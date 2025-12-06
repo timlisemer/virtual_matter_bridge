@@ -249,12 +249,24 @@ impl<'a> FilteredAvahiMdnsResponder<'a> {
                     txt_slice = next_slice;
                 }
 
-                // Use specific interface index to restrict which addresses are advertised.
-                // This prevents Thread mesh addresses from being advertised.
+                // Log what we're registering
+                log::info!(
+                    "  Service name: '{}', type: '{}', port: {}",
+                    service.name,
+                    service.service_protocol,
+                    service.port
+                );
+                log::info!("  TXT records: {:?}", service.txt_kvs);
+                log::info!("  Subtypes: {:?}", service.service_subtypes);
+
+                // Register the service.
+                // We use -1 for interface (all interfaces) and rely on NixOS
+                // services.avahi.allowInterfaces = ["enp14s0"] to restrict which
+                // interfaces Avahi advertises on.
                 // NOTE: Requires services.avahi.publish.userServices = true in NixOS config
                 group
                     .add_service(
-                        interface_index,
+                        -1, // interface: -1 = all (filtered by allowInterfaces in avahi config)
                         -1, // protocol: -1 = both IPv4 and IPv6
                         0,
                         service.name,
@@ -266,13 +278,16 @@ impl<'a> FilteredAvahiMdnsResponder<'a> {
                     )
                     .await?;
 
+                log::info!("  add_service completed");
+
                 for subtype in service.service_subtypes {
                     let avahi_subtype = format!("{}._sub.{}", subtype, service.service_protocol);
+                    log::info!("  Adding subtype: {}", avahi_subtype);
 
                     group
                         .add_service_subtype(
-                            interface_index,
-                            -1,
+                            -1, // interface: -1 = all (filtered by allowInterfaces)
+                            -1, // protocol: -1 = both IPv4 and IPv6
                             0,
                             service.name,
                             service.service_protocol,
@@ -282,9 +297,27 @@ impl<'a> FilteredAvahiMdnsResponder<'a> {
                         .await?;
                 }
 
+                log::info!("  All subtypes added, committing...");
+
                 group.commit().await?;
 
-                log::info!("mDNS service registered successfully");
+                // Check the entry group state after commit
+                let state = group.get_state().await?;
+                log::info!(
+                    "mDNS entry group state immediately after commit: {} (0=uncommitted, 1=registering, 2=established, 3=collision, 4=failure)",
+                    state
+                );
+
+                // Wait a bit for the state to settle and check again
+                embassy_time::Timer::after_millis(100).await;
+                let state = group.get_state().await?;
+                log::info!("mDNS entry group state after 100ms: {}", state);
+
+                if state == 3 {
+                    log::error!("mDNS name collision detected!");
+                } else if state == 4 {
+                    log::error!("mDNS registration failed!");
+                }
 
                 Ok(path)
             },

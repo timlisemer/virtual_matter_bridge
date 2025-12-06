@@ -76,6 +76,14 @@ This project implements a virtual Matter bridge that:
 
 ### In Progress
 
+- [ ] **Matter Stack Integration**
+  - [x] Basic Matter stack initialization with `rs-matter`
+  - [x] UDP transport on port 5540
+  - [x] Commissioning window (PASE) with QR code and manual pairing code
+  - [x] mDNS advertisement via Avahi (custom responder for interface filtering)
+  - [ ] Connect clusters to `rs-matter` data model
+  - [ ] Device attestation with production credentials
+  - [ ] Fabric management and persistence
 - [ ] **Actual RTSP Streaming**
   - Integration with `retina` crate for H.264/AAC depacketization
   - RTP/RTCP handling
@@ -92,13 +100,6 @@ This project implements a virtual Matter bridge that:
   - RTP packetization for WebRTC
   - Timestamp synchronization
   - Keyframe detection and handling
-- [ ] **Matter Stack Integration**
-  - Connect clusters to `rs-matter` data model
-  - Device attestation
-  - Commissioning flow (QR code, manual pairing)
-  - Fabric management
-- [ ] **mDNS Advertisement**
-  - Service discovery for Matter controllers
 - [ ] **Persistent Storage**
   - Fabric credentials
   - Device configuration
@@ -125,6 +126,41 @@ Configuration is loaded from environment variables with sensible defaults:
 | `MATTER_DISCRIMINATOR` | `3840` | Matter pairing discriminator |
 | `MATTER_PASSCODE` | `20202021` | Matter pairing passcode |
 
+## NixOS Configuration
+
+This application requires specific Avahi settings on NixOS to enable mDNS service publishing:
+
+```nix
+{
+  # Enable Avahi for mDNS
+  services.avahi = {
+    enable = true;
+
+    # Allow user applications to publish mDNS services
+    publish = {
+      enable = true;
+      userServices = true;  # Required for this app to register services
+    };
+
+    # Optional: Restrict Avahi to specific interfaces
+    # This prevents Thread mesh addresses from being advertised
+    allowInterfaces = [ "enp14s0" ];  # Replace with your LAN interface
+  };
+
+  # Open firewall for Matter
+  networking.firewall.allowedUDPPorts = [ 5353 5540 ];
+}
+```
+
+### Troubleshooting mDNS
+
+If the device is not discoverable:
+
+1. **Check Avahi is running**: `systemctl status avahi-daemon`
+2. **Verify service registration**: `avahi-browse -a` while the app is running
+3. **Check for Thread mesh interference**: If you have a Thread border router (e.g., Home Assistant Yellow), mDNS reflection can cause Thread mesh addresses to be advertised instead of LAN addresses. Use `allowInterfaces` to restrict Avahi to your LAN interface.
+4. **Verify firewall**: Ensure UDP ports 5353 (mDNS) and 5540 (Matter) are open
+
 ## Building
 
 ```bash
@@ -141,16 +177,31 @@ make run
 ## Dependencies
 
 Key dependencies:
-- **rs-matter** - Rust Matter protocol implementation
+- **rs-matter** - Rust Matter protocol implementation (git: main branch)
 - **webrtc** - WebRTC stack for video streaming
 - **retina** - RTSP client for camera connections
 - **tokio** - Async runtime
+- **embassy-\*** - Async primitives for embedded/no_std compatibility
+- **zbus** - D-Bus client for Avahi communication
+- **nix** - Unix/Linux system interfaces
 
 ## Requirements
 
 - Rust 2024 edition (nightly)
+- Linux with Avahi daemon (NixOS recommended)
 - RTSP camera with H.264 video stream
 - Network connectivity to camera and Matter controller
+
+## Matter Commissioning
+
+When the application starts, it displays:
+- A QR code for mobile app pairing
+- A setup code: `MT:-24J0AFN00KA064IJ3P0WISA0DK5N1K8SQ1RYCU1O0`
+- A manual pairing code: `3497-0112-332`
+
+The commissioning window is open for 15 minutes (900 seconds) after startup.
+
+**Note**: Currently uses test device credentials from rs-matter. Production deployments should use proper device attestation certificates.
 
 ## License
 
