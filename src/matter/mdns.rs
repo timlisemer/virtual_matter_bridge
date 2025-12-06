@@ -1,15 +1,11 @@
 //! Custom mDNS responder that registers services on a specific network interface.
 //!
-//! The default rs-matter AvahiMdnsResponder uses interface=-1 (all interfaces) and
-//! empty hostname, which causes Avahi to advertise addresses from all interfaces
-//! including Thread mesh addresses visible via mDNS reflection.
+//! The default rs-matter AvahiMdnsResponder uses interface=-1 (all interfaces),
+//! which causes Avahi to advertise addresses from all interfaces including
+//! Thread mesh addresses visible via mDNS reflection.
 //!
-//! This implementation:
-//! 1. Specifies a specific interface index when registering services
-//! 2. Gets the actual IP addresses from that interface
-//! 3. Explicitly registers A/AAAA records for the hostname with those addresses
-//!
-//! This ensures the mDNS advertisement contains only addresses from the intended interface.
+//! This implementation specifies a specific interface index when registering services,
+//! which restricts Avahi to only advertise addresses from that interface.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
@@ -25,15 +21,13 @@ use rs_matter::utils::zbus::Connection;
 use rs_matter::utils::zbus::zvariant::{ObjectPath, OwnedObjectPath};
 use rs_matter::utils::zbus_proxies::avahi::entry_group::EntryGroupProxy;
 use rs_matter::utils::zbus_proxies::avahi::server2::Server2Proxy;
-use rs_matter::{MATTER_SERVICE_MAX_NAME_LEN, Matter, MatterMdnsService};
+use rs_matter::{Matter, MatterMdnsService};
 
 /// An mDNS responder that registers services on a specific network interface.
 ///
 /// Unlike the default `AvahiMdnsResponder` which uses interface=-1 (all interfaces),
-/// this responder:
-/// - Uses a specific interface index
-/// - Explicitly registers address records (A/AAAA) for the service hostname
-/// - Ensures only addresses from the specified interface are advertised
+/// this responder uses a specific interface index to ensure only addresses from
+/// that interface are advertised via mDNS.
 pub struct FilteredAvahiMdnsResponder<'a> {
     matter: &'a Matter<'a>,
     interface_name: &'static str,
@@ -203,22 +197,13 @@ impl<'a> FilteredAvahiMdnsResponder<'a> {
         matter_service: &MatterMdnsService,
     ) -> Result<OwnedObjectPath, Error> {
         let interface_index = self.get_interface_index();
-        let (ipv4_addrs, ipv6_addrs) = self.get_interface_addresses();
 
-        // Get the service instance name (e.g., "E601FEB08A46D58F")
-        let mut name_buf = [0u8; MATTER_SERVICE_MAX_NAME_LEN];
-        let instance_name = matter_service.name(&mut name_buf).to_string();
-
-        // Create a unique hostname for this Matter device
-        // Use the instance name to avoid collisions
-        let hostname = format!("{}.local", instance_name);
+        // Log the addresses we found (for debugging)
+        let _ = self.get_interface_addresses();
 
         log::info!(
-            "Registering mDNS service with hostname '{}' on interface {} with {} IPv4 and {} IPv6 addresses",
-            hostname,
-            interface_index,
-            ipv4_addrs.len(),
-            ipv6_addrs.len()
+            "Registering mDNS service on interface index {}",
+            interface_index
         );
 
         Service::async_call_with(
@@ -235,35 +220,8 @@ impl<'a> FilteredAvahiMdnsResponder<'a> {
                     .build()
                     .await?;
 
-                // First, register explicit address records for our hostname
-                // This ensures Avahi uses OUR addresses, not cached Thread addresses
-                for ipv4 in &ipv4_addrs {
-                    log::info!("  Adding A record: {} -> {}", hostname, ipv4);
-                    group
-                        .add_address(
-                            interface_index,
-                            0, // AVAHI_PROTO_INET (IPv4 only for A record)
-                            0, // flags
-                            &hostname,
-                            &ipv4.to_string(),
-                        )
-                        .await?;
-                }
-
-                for ipv6 in &ipv6_addrs {
-                    log::info!("  Adding AAAA record: {} -> {}", hostname, ipv6);
-                    group
-                        .add_address(
-                            interface_index,
-                            1, // AVAHI_PROTO_INET6 (IPv6 only for AAAA record)
-                            0, // flags
-                            &hostname,
-                            &ipv6.to_string(),
-                        )
-                        .await?;
-                }
-
-                // Now register the service with our explicit hostname
+                // Register the service with empty hostname - Avahi will use the system hostname
+                // but restricted to our interface, so it will only advertise addresses from that interface
                 let mut txt_buf = Vec::new();
 
                 let offsets = service
@@ -291,7 +249,9 @@ impl<'a> FilteredAvahiMdnsResponder<'a> {
                     txt_slice = next_slice;
                 }
 
-                // Use specific interface index and our explicit hostname
+                // Use specific interface index to restrict which addresses are advertised.
+                // This prevents Thread mesh addresses from being advertised.
+                // NOTE: Requires services.avahi.publish.userServices = true in NixOS config
                 group
                     .add_service(
                         interface_index,
@@ -299,8 +259,8 @@ impl<'a> FilteredAvahiMdnsResponder<'a> {
                         0,
                         service.name,
                         service.service_protocol,
-                        "",        // domain (empty = default .local)
-                        &hostname, // Use our explicit hostname instead of empty
+                        "", // domain (empty = default .local)
+                        "", // hostname (empty = use system hostname)
                         service.port,
                         &txt,
                     )
