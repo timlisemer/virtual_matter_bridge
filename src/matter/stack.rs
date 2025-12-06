@@ -6,7 +6,8 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use log::{error, info};
 use static_cell::StaticCell;
 
-use super::mdns::FilteredAvahiMdnsResponder;
+// use super::mdns::FilteredAvahiMdnsResponder;
+use rs_matter::transport::network::mdns::avahi::AvahiMdnsResponder;
 use super::netif::FilteredNetifs;
 use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
@@ -195,17 +196,8 @@ pub async fn run_matter_stack(_config: &MatterConfig) -> Result<(), Error> {
     Ok(())
 }
 
-/// The network interface name for mDNS advertisement.
-/// This must match NETIFS interface for consistent behavior.
-const MDNS_INTERFACE: &str = "enp14s0";
-
-/// Run mDNS for device discovery
-///
-/// Uses zbus to communicate with Avahi for mDNS on Linux.
-/// Uses our custom FilteredAvahiMdnsResponder to ensure mDNS only advertises
-/// addresses from the specified interface, avoiding Thread mesh addresses.
+/// Run mDNS for device discovery - using original rs-matter responder for comparison
 async fn run_mdns(matter: &Matter<'_>) -> Result<(), Error> {
-    // Get a D-Bus connection to the system bus (where Avahi runs)
     let conn = rs_matter::utils::zbus::Connection::system()
         .await
         .map_err(|e| {
@@ -213,8 +205,7 @@ async fn run_mdns(matter: &Matter<'_>) -> Result<(), Error> {
             rs_matter::error::ErrorCode::DBusError
         })?;
 
-    // Run our filtered mDNS responder that only advertises on the specified interface
-    FilteredAvahiMdnsResponder::new(matter, MDNS_INTERFACE)
+    AvahiMdnsResponder::new(matter)
         .run(&conn)
         .await
 }

@@ -160,6 +160,84 @@ If the device is not discoverable:
 2. **Verify service registration**: `avahi-browse -a` while the app is running
 3. **Check for Thread mesh interference**: If you have a Thread border router (e.g., Home Assistant Yellow), mDNS reflection can cause Thread mesh addresses to be advertised instead of LAN addresses. Use `allowInterfaces` to restrict Avahi to your LAN interface.
 4. **Verify firewall**: Ensure UDP ports 5353 (mDNS) and 5540 (Matter) are open
+5. **Test manual service publishing**: `avahi-publish-service "TestMatter" "_matterc._udp" 5540 "D=3840" "CM=1"` - if this works but the app doesn't, the issue is in the D-Bus registration code
+
+### mDNS Development Notes
+
+#### Known Issues (Critical Investigation Required)
+
+- [ ] **ALL mDNS registration fails** - Neither the original `rs-matter::AvahiMdnsResponder` nor the custom `FilteredAvahiMdnsResponder` successfully registers services that appear in `avahi-browse`.
+- [ ] **avahi-publish-service also fails to appear** - Even the command-line tool reports "Established" but services don't show up in `avahi-browse`.
+- [ ] **Thread mesh address still advertised** - The `BBEC6C9F718D4F5E` service (from another device) is visible but locally registered services are not.
+
+#### Investigation Report (2025-12-06)
+
+**Summary**: mDNS service registration appears to succeed at the D-Bus level but services never become visible via `avahi-browse`. This affects both the application AND manual `avahi-publish-service` commands.
+
+**Environment**:
+- NixOS with Avahi daemon running
+- `services.avahi.publish.userServices = true` is set
+- `services.avahi.allowInterfaces = ["enp14s0"]` is set
+- Avahi API version: 516
+
+**Symptoms**:
+
+1. **D-Bus registration succeeds**:
+   - `entry_group_new()` returns valid path like `/Client19/EntryGroup1`
+   - `add_service()` completes without error
+   - `add_service_subtype()` completes without error for all subtypes
+   - `commit()` completes without error
+   - `get_state()` returns 1 (registering), never transitions to 2 (established)
+
+2. **avahi-publish-service reports success but service not visible**:
+   ```bash
+   $ avahi-publish-service "TestMatter" "_matterc._udp" 5540 "D=3840" &
+   Established under name 'TestMatter'
+
+   $ avahi-browse -t _matterc._udp
+   # Only shows BBEC6C9F718D4F5E from another device, NOT TestMatter
+   ```
+
+3. **External device services ARE visible**:
+   - `BBEC6C9F718D4F5E` (_matterc._udp) - from Home Assistant / Thread network
+   - Many `_matter._tcp` services from commissioned devices
+   - These remain visible even when local app is not running
+
+**What works**:
+- Avahi daemon is running (`systemctl status avahi-daemon`)
+- D-Bus communication to Avahi succeeds (API calls return valid responses)
+- External mDNS services are discovered and displayed
+
+**What doesn't work**:
+- Local service registration doesn't appear in browse results
+- Entry group state stays at 1 (registering), never reaches 2 (established)
+- This affects BOTH programmatic registration AND avahi-publish-service
+
+**Possible causes to investigate**:
+
+1. **mDNS port conflict**: Another process may be binding to 224.0.0.251:5353
+   - Check with: `ss -ulnp | grep 5353`
+   - Steam's steamwebhelper was previously identified as running a competing mDNS stack
+
+2. **Avahi reflector interference**: `enable-reflector=yes` might cause issues
+   - The Thread border router reflects mDNS from the Thread network
+   - This might be interfering with local registration
+
+3. **Network namespace issues**: Avahi might be running in a different network context
+
+4. **Cache/state corruption**: Avahi daemon may need restart
+   - Try: `sudo systemctl restart avahi-daemon`
+
+5. **Firewall rules**: mDNS multicast might be blocked
+   - Check: `sudo iptables -L -n | grep -i 5353`
+   - Check: `sudo nft list ruleset | grep -i 5353`
+
+**Next steps**:
+1. Restart Avahi daemon: `sudo systemctl restart avahi-daemon`
+2. Check for competing mDNS stacks: `ss -ulnp | grep 5353`
+3. Try disabling Avahi reflector temporarily
+4. Check Avahi logs: `journalctl -u avahi-daemon -f`
+5. Test on a fresh system without Thread border router
 
 ## Building
 
