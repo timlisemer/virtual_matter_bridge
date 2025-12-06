@@ -1,0 +1,125 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    pub rtsp: RtspConfig,
+    pub matter: MatterConfig,
+    pub webrtc: WebRtcConfig,
+    pub doorbell: DoorbellConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RtspConfig {
+    pub url: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatterConfig {
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub device_name: String,
+    pub discriminator: u16,
+    pub passcode: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebRtcConfig {
+    pub stun_servers: Vec<String>,
+    pub turn_servers: Vec<TurnServer>,
+    pub max_concurrent_streams: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnServer {
+    pub url: String,
+    pub username: String,
+    pub credential: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoorbellConfig {
+    pub chime_enabled: bool,
+    pub selected_chime: u8,
+    pub installed_chimes: Vec<ChimeSound>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChimeSound {
+    pub id: u8,
+    pub name: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            rtsp: RtspConfig {
+                url: "rtsp://username:password@10.0.0.38:554/h264Preview_01_main".to_string(),
+                username: Some("username".to_string()),
+                password: Some("password".to_string()),
+            },
+            matter: MatterConfig {
+                vendor_id: 0xFFF1,
+                product_id: 0x8001,
+                device_name: "Virtual Doorbell".to_string(),
+                discriminator: 3840,
+                passcode: 20202021,
+            },
+            webrtc: WebRtcConfig {
+                stun_servers: vec!["stun:stun.l.google.com:19302".to_string()],
+                turn_servers: vec![],
+                max_concurrent_streams: 4,
+            },
+            doorbell: DoorbellConfig {
+                chime_enabled: true,
+                selected_chime: 0,
+                installed_chimes: vec![
+                    ChimeSound {
+                        id: 0,
+                        name: "Default".to_string(),
+                    },
+                    ChimeSound {
+                        id: 1,
+                        name: "Classic".to_string(),
+                    },
+                    ChimeSound {
+                        id: 2,
+                        name: "Modern".to_string(),
+                    },
+                ],
+            },
+        }
+    }
+}
+
+impl Config {
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+
+        if let Ok(url) = std::env::var("RTSP_URL") {
+            config.rtsp.url = url;
+        }
+        if let Ok(username) = std::env::var("RTSP_USERNAME") {
+            config.rtsp.username = Some(username);
+        }
+        if let Ok(password) = std::env::var("RTSP_PASSWORD") {
+            config.rtsp.password = Some(password);
+        }
+        if let Ok(name) = std::env::var("DEVICE_NAME") {
+            config.matter.device_name = name;
+        }
+        if let Ok(discriminator) = std::env::var("MATTER_DISCRIMINATOR")
+            && let Ok(d) = discriminator.parse()
+        {
+            config.matter.discriminator = d;
+        }
+        if let Ok(passcode) = std::env::var("MATTER_PASSCODE")
+            && let Ok(p) = passcode.parse()
+        {
+            config.matter.passcode = p;
+        }
+
+        config
+    }
+}
