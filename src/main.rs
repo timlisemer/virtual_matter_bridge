@@ -80,9 +80,8 @@ async fn main() {
         .stack_size(512 * 1024) // 512KB stack for Matter operations
         .spawn(move || {
             // Run the Matter stack (blocking)
-            if let Err(e) = futures_lite::future::block_on(
-                matter::run_matter_stack(&matter_config),
-            ) {
+            if let Err(e) = futures_lite::future::block_on(matter::run_matter_stack(&matter_config))
+            {
                 log::error!("Matter stack error: {:?}", e);
             }
         })
