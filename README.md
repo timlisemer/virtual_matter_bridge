@@ -80,7 +80,7 @@ This project implements a virtual Matter bridge that:
   - [x] Basic Matter stack initialization with `rs-matter`
   - [x] UDP transport on port 5540
   - [x] Commissioning window (PASE) with QR code and manual pairing code
-  - [x] mDNS advertisement via Avahi (custom responder for interface filtering)
+  - [x] mDNS advertisement via direct multicast (`mdns-sd` crate)
   - [ ] Connect clusters to `rs-matter` data model
   - [ ] Device attestation with production credentials
   - [ ] Fabric management and persistence
@@ -128,116 +128,89 @@ Configuration is loaded from environment variables with sensible defaults:
 
 ## NixOS Configuration
 
-This application requires specific Avahi settings on NixOS to enable mDNS service publishing:
+This application uses direct mDNS multicast via the `mdns-sd` crate. Disable Avahi to avoid conflicts:
 
 ```nix
 {
-  # Enable Avahi for mDNS
-  services.avahi = {
-    enable = true;
-
-    # Allow user applications to publish mDNS services
-    publish = {
-      enable = true;
-      userServices = true;  # Required for this app to register services
-    };
-
-    # Optional: Restrict Avahi to specific interfaces
-    # This prevents Thread mesh addresses from being advertised
-    allowInterfaces = [ "enp14s0" ];  # Replace with your LAN interface
-  };
+  # Disable Avahi - we use direct mDNS instead
+  services.avahi.enable = false;
 
   # Open firewall for Matter
   networking.firewall.allowedUDPPorts = [ 5353 5540 ];
 }
 ```
 
+### Verifying mDNS Registration
+
+To verify the Matter service is being advertised correctly, use Python zeroconf:
+
+```bash
+nix-shell -p python3Packages.zeroconf --run 'python3 -c "
+from zeroconf import Zeroconf, ServiceBrowser
+import time
+
+class Listener:
+    def add_service(self, zc, type_, name):
+        print(\"Found:\", name)
+        info = zc.get_service_info(type_, name)
+        if info:
+            print(\"  Addresses:\", info.parsed_addresses())
+            print(\"  Port:\", info.port)
+            for k, v in info.properties.items():
+                kstr = k.decode() if isinstance(k, bytes) else k
+                vstr = v.decode() if isinstance(v, bytes) else str(v)
+                print(\"  {}={}\".format(kstr, vstr))
+    def remove_service(self, zc, type_, name):
+        pass
+    def update_service(self, zc, type_, name):
+        pass
+
+zc = Zeroconf()
+browser = ServiceBrowser(zc, \"_matterc._udp.local.\", Listener())
+print(\"Browsing for 5 seconds...\")
+time.sleep(5)
+zc.close()
+print(\"Done.\")
+"'
+```
+
+Expected output when the application is running:
+
+```
+Browsing for 5 seconds...
+Found: 5B9408616867442C._matterc._udp.local.
+  Addresses: ['10.0.0.3']
+  Port: 5540
+  D=3840
+  CM=1
+  VP=65521+32769
+  SAI=300
+  SII=5000
+  DN=MyTest
+Done.
+```
+
 ### Troubleshooting mDNS
 
 If the device is not discoverable:
 
-1. **Check Avahi is running**: `systemctl status avahi-daemon`
-2. **Verify service registration**: `avahi-browse -a` while the app is running
-3. **Check for Thread mesh interference**: If you have a Thread border router (e.g., Home Assistant Yellow), mDNS reflection can cause Thread mesh addresses to be advertised instead of LAN addresses. Use `allowInterfaces` to restrict Avahi to your LAN interface.
-4. **Verify firewall**: Ensure UDP ports 5353 (mDNS) and 5540 (Matter) are open
-5. **Test manual service publishing**: `avahi-publish-service "TestMatter" "_matterc._udp" 5540 "D=3840" "CM=1"` - if this works but the app doesn't, the issue is in the D-Bus registration code
+1. **Check for port conflicts**: `ss -ulnp | grep 5353` - ensure no other process is binding to port 5353
+2. **Verify firewall**: Ensure UDP ports 5353 (mDNS) and 5540 (Matter) are open
+3. **Check interface name**: The application is configured to use `enp14s0` - update `src/matter/stack.rs` if your interface differs
 
-### mDNS Development Notes
+### mDNS Implementation Notes
 
-#### Known Issues (Critical Investigation Required)
+This application uses **direct mDNS multicast** via the `mdns-sd` crate. This approach was chosen because:
 
-- [ ] **ALL mDNS registration fails** - Neither the original `rs-matter::AvahiMdnsResponder` nor the custom `FilteredAvahiMdnsResponder` successfully registers services that appear in `avahi-browse`.
-- [ ] **avahi-publish-service also fails to appear** - Even the command-line tool reports "Established" but services don't show up in `avahi-browse`.
-- [ ] **Thread mesh address still advertised** - The `BBEC6C9F718D4F5E` service (from another device) is visible but locally registered services are not.
+1. **Interface filtering**: The `mdns-sd` crate allows explicit interface binding, ensuring only the correct LAN addresses are advertised (not Docker bridges or Thread mesh addresses).
 
-#### Investigation Report (2025-12-06)
+2. **No daemon dependency**: Works without requiring any system mDNS daemon.
 
-**Summary**: mDNS service registration appears to succeed at the D-Bus level but services never become visible via `avahi-browse`. This affects both the application AND manual `avahi-publish-service` commands.
-
-**Environment**:
-- NixOS with Avahi daemon running
-- `services.avahi.publish.userServices = true` is set
-- `services.avahi.allowInterfaces = ["enp14s0"]` is set
-- Avahi API version: 516
-
-**Symptoms**:
-
-1. **D-Bus registration succeeds**:
-   - `entry_group_new()` returns valid path like `/Client19/EntryGroup1`
-   - `add_service()` completes without error
-   - `add_service_subtype()` completes without error for all subtypes
-   - `commit()` completes without error
-   - `get_state()` returns 1 (registering), never transitions to 2 (established)
-
-2. **avahi-publish-service reports success but service not visible**:
-   ```bash
-   $ avahi-publish-service "TestMatter" "_matterc._udp" 5540 "D=3840" &
-   Established under name 'TestMatter'
-
-   $ avahi-browse -t _matterc._udp
-   # Only shows BBEC6C9F718D4F5E from another device, NOT TestMatter
-   ```
-
-3. **External device services ARE visible**:
-   - `BBEC6C9F718D4F5E` (_matterc._udp) - from Home Assistant / Thread network
-   - Many `_matter._tcp` services from commissioned devices
-   - These remain visible even when local app is not running
-
-**What works**:
-- Avahi daemon is running (`systemctl status avahi-daemon`)
-- D-Bus communication to Avahi succeeds (API calls return valid responses)
-- External mDNS services are discovered and displayed
-
-**What doesn't work**:
-- Local service registration doesn't appear in browse results
-- Entry group state stays at 1 (registering), never reaches 2 (established)
-- This affects BOTH programmatic registration AND avahi-publish-service
-
-**Possible causes to investigate**:
-
-1. **mDNS port conflict**: Another process may be binding to 224.0.0.251:5353
-   - Check with: `ss -ulnp | grep 5353`
-   - Steam's steamwebhelper was previously identified as running a competing mDNS stack
-
-2. **Avahi reflector interference**: `enable-reflector=yes` might cause issues
-   - The Thread border router reflects mDNS from the Thread network
-   - This might be interfering with local registration
-
-3. **Network namespace issues**: Avahi might be running in a different network context
-
-4. **Cache/state corruption**: Avahi daemon may need restart
-   - Try: `sudo systemctl restart avahi-daemon`
-
-5. **Firewall rules**: mDNS multicast might be blocked
-   - Check: `sudo iptables -L -n | grep -i 5353`
-   - Check: `sudo nft list ruleset | grep -i 5353`
-
-**Next steps**:
-1. Restart Avahi daemon: `sudo systemctl restart avahi-daemon`
-2. Check for competing mDNS stacks: `ss -ulnp | grep 5353`
-3. Try disabling Avahi reflector temporarily
-4. Check Avahi logs: `journalctl -u avahi-daemon -f`
-5. Test on a fresh system without Thread border router
+The `DirectMdnsResponder` in `src/matter/mdns.rs`:
+- Binds exclusively to the configured network interface (e.g., `enp14s0`)
+- Filters out link-local IPv6 addresses (fe80::/10)
+- Filters out Thread mesh addresses (fd00::/8 ULAs)
+- Registers Matter commissioning services with proper TXT records
 
 ## Building
 
@@ -256,17 +229,17 @@ make run
 
 Key dependencies:
 - **rs-matter** - Rust Matter protocol implementation (git: main branch)
+- **mdns-sd** - Direct mDNS multicast for service discovery
 - **webrtc** - WebRTC stack for video streaming
 - **retina** - RTSP client for camera connections
 - **tokio** - Async runtime
 - **embassy-\*** - Async primitives for embedded/no_std compatibility
-- **zbus** - D-Bus client for Avahi communication
 - **nix** - Unix/Linux system interfaces
 
 ## Requirements
 
 - Rust 2024 edition (nightly)
-- Linux with Avahi daemon (NixOS recommended)
+- Linux (NixOS recommended)
 - RTSP camera with H.264 video stream
 - Network connectivity to camera and Matter controller
 

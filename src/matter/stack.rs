@@ -6,8 +6,7 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use log::{error, info};
 use static_cell::StaticCell;
 
-// use super::mdns::FilteredAvahiMdnsResponder;
-use rs_matter::transport::network::mdns::avahi::AvahiMdnsResponder;
+use super::mdns::DirectMdnsResponder;
 use super::netif::FilteredNetifs;
 use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
@@ -196,16 +195,10 @@ pub async fn run_matter_stack(_config: &MatterConfig) -> Result<(), Error> {
     Ok(())
 }
 
-/// Run mDNS for device discovery - using original rs-matter responder for comparison
+/// Run mDNS for device discovery using direct multicast (bypasses broken Avahi D-Bus)
 async fn run_mdns(matter: &Matter<'_>) -> Result<(), Error> {
-    let conn = rs_matter::utils::zbus::Connection::system()
-        .await
-        .map_err(|e| {
-            error!("Failed to connect to D-Bus: {:?}", e);
-            rs_matter::error::ErrorCode::DBusError
-        })?;
+    // Use the same interface as FilteredNetifs
+    const INTERFACE: &str = "enp14s0";
 
-    AvahiMdnsResponder::new(matter)
-        .run(&conn)
-        .await
+    DirectMdnsResponder::new(matter, INTERFACE).run().await
 }
