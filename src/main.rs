@@ -6,6 +6,7 @@ mod clusters;
 mod config;
 mod device;
 mod error;
+mod matter;
 mod rtsp;
 
 use crate::config::Config;
@@ -34,6 +35,9 @@ async fn main() {
     info!("  Vendor ID: 0x{:04X}", config.matter.vendor_id);
     info!("  Product ID: 0x{:04X}", config.matter.product_id);
     info!("  Discriminator: {}", config.matter.discriminator);
+
+    // Clone config for Matter stack before moving to device
+    let matter_config = config.matter.clone();
 
     // Create the video doorbell device
     let device = Arc::new(RwLock::new(VideoDoorbellDevice::new(config)));
@@ -69,12 +73,22 @@ async fn main() {
         }
     });
 
-    // TODO: Start Matter stack and register device
-    // This would involve:
-    // 1. Initializing rs-matter with device attestation
-    // 2. Registering our clusters (CameraAVStreamMgmt, WebRTCProvider, Chime)
-    // 3. Starting the Matter responder
-    // 4. Handling commissioning
+    // Start Matter stack in a separate thread
+    // Matter uses blocking I/O internally with embassy, so we run it on a dedicated thread
+    let _matter_handle = std::thread::Builder::new()
+        .name("matter-stack".into())
+        .stack_size(512 * 1024) // 512KB stack for Matter operations
+        .spawn(move || {
+            // Run the Matter stack (blocking)
+            if let Err(e) = futures_lite::future::block_on(
+                matter::run_matter_stack(&matter_config),
+            ) {
+                log::error!("Matter stack error: {:?}", e);
+            }
+        })
+        .expect("Failed to spawn Matter thread");
+
+    info!("Matter stack started on dedicated thread");
 
     // Wait for shutdown signal
     match signal::ctrl_c().await {
