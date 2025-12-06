@@ -8,8 +8,8 @@ license = "MIT"
 
 [dependencies]
 # Matter protocol (use git for latest features, crates.io version is outdated)
-# Features: std (stdlib support), os (OS-level features), zbus (D-Bus mDNS via Avahi on Linux)
-rs-matter = { git = "https://github.com/project-chip/rs-matter.git", branch = "main", features = ["std", "os", "zbus"] }
+# Features: std (stdlib support), os (OS-level features), zbus (D-Bus mDNS via Avahi on Linux), async-io (async runtime)
+rs-matter = { git = "https://github.com/project-chip/rs-matter.git", branch = "main", features = ["std", "os", "zbus", "async-io"] }
 
 # Embassy async utilities for Matter stack
 embassy-futures = "0.1"
