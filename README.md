@@ -198,6 +198,27 @@ If the device is not discoverable:
 2. **Verify firewall**: Ensure UDP ports 5353 (mDNS) and 5540 (Matter) are open
 3. **Check interface name**: The application is configured to use `enp14s0` - update `src/matter/stack.rs` if your interface differs
 
+### Debugging Commissioning
+
+**Verify mDNS queries and responses:**
+```bash
+sudo tcpdump -i enp14s0 -n port 5353 -vv
+```
+
+When the phone scans for Matter devices, you should see:
+- Phone queries `_matterc._udp.local.` (PTR query)
+- PC responds with service info including `SRV tim-pc.local.:5540` and TXT records
+
+**Verify Matter UDP traffic on port 5540:**
+```bash
+sudo tcpdump -i enp14s0 -n udp port 5540
+```
+
+When commissioning starts, you should see PASE packets from the phone to your PC on port 5540.
+
+**Known Issue - IPv6 vs IPv4:**
+Matter controllers (phones) typically prefer IPv6 when available. The mDNS response advertises both IPv4 (`A` record) and IPv6 (`AAAA` records). If the phone connects via IPv6 but the application only binds to IPv4 (`0.0.0.0`), packets will arrive at the network interface but not reach the application.
+
 ### mDNS Implementation Notes
 
 This application uses **direct mDNS multicast** via the `mdns-sd` crate. This approach was chosen because:

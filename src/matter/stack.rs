@@ -6,6 +6,7 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use log::{error, info};
 use static_cell::StaticCell;
 
+use super::logging_udp::LoggingUdpSocket;
 use super::mdns::DirectMdnsResponder;
 use super::netif::FilteredNetifs;
 use rs_matter::dm::IMBuffer;
@@ -105,16 +106,17 @@ pub async fn run_matter_stack(_config: &MatterConfig) -> Result<(), Error> {
     matter.initialize_transport_buffers()?;
 
     // Create UDP socket for Matter transport
-    // Bind to all interfaces for now - use MATTER_BIND_ADDR env var to override
-    let bind_addr = std::env::var("MATTER_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let socket = UdpSocket::bind(format!("{}:{}", bind_addr, MATTER_PORT)).map_err(|e| {
+    // Bind to IPv6 [::] which accepts both IPv4 and IPv6 connections (dual-stack)
+    // Use MATTER_BIND_ADDR env var to override (e.g., "0.0.0.0" for IPv4-only)
+    let bind_addr = std::env::var("MATTER_BIND_ADDR").unwrap_or_else(|_| "::".to_string());
+    let socket = UdpSocket::bind(format!("[{}]:{}", bind_addr, MATTER_PORT)).map_err(|e| {
         error!(
-            "Failed to bind UDP socket on {}:{}: {}",
+            "Failed to bind UDP socket on [{}]:{}: {}",
             bind_addr, MATTER_PORT, e
         );
         rs_matter::error::ErrorCode::StdIoError
     })?;
-    info!("Matter UDP socket bound to {}:{}", bind_addr, MATTER_PORT);
+    info!("Matter UDP socket bound to [{}]:{}", bind_addr, MATTER_PORT);
     socket.set_nonblocking(true).map_err(|e| {
         error!("Failed to set socket non-blocking: {}", e);
         rs_matter::error::ErrorCode::StdIoError
@@ -164,8 +166,11 @@ pub async fn run_matter_stack(_config: &MatterConfig) -> Result<(), Error> {
 
     info!("Matter stack running. Waiting for controller connections...");
 
+    // Wrap socket with logging for debugging
+    let logging_socket = LoggingUdpSocket::new(&socket);
+
     // Run Matter transport
-    let mut transport = pin!(matter.run(&socket, &socket));
+    let mut transport = pin!(matter.run(&logging_socket, &logging_socket));
 
     // Run mDNS for discovery (using zbus/D-Bus via Avahi)
     let mut mdns = pin!(run_mdns(matter));
