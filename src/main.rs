@@ -77,11 +77,12 @@ async fn main() {
     // Matter uses blocking I/O internally with embassy, so we run it on a dedicated thread
     let _matter_handle = std::thread::Builder::new()
         .name("matter-stack".into())
-        .stack_size(512 * 1024) // 512KB stack for Matter operations
+        .stack_size(550 * 1024) // 550KB stack for Matter operations (matches rs-matter examples)
         .spawn(move || {
-            // Run the Matter stack using async_io's block_on which drives the I/O reactor
-            // (futures_lite::block_on doesn't poll the async_io reactor, causing socket reads to hang)
-            if let Err(e) = async_io::block_on(matter::run_matter_stack(&matter_config)) {
+            // Run the Matter stack (blocking) - futures_lite::block_on works with async_io
+            // when async_io::Async is used for socket creation
+            if let Err(e) = futures_lite::future::block_on(matter::run_matter_stack(&matter_config))
+            {
                 log::error!("Matter stack error: {:?}", e);
             }
         })

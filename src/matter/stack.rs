@@ -1,9 +1,10 @@
 use std::net::UdpSocket;
 use std::pin::pin;
 
-use embassy_futures::select::{select, select4};
+use embassy_futures::select::{select, select3};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use log::{error, info};
+use socket2::{Domain, Protocol, Socket, Type};
 use static_cell::StaticCell;
 
 use super::logging_udp::LoggingUdpSocket;
@@ -24,6 +25,7 @@ use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::pairing::qr::QrTextType;
 use rs_matter::respond::DefaultResponder;
+use rs_matter::transport::MATTER_SOCKET_BIND_ADDR;
 use rs_matter::utils::init::InitMaybeUninit;
 use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::storage::pooled::PooledBuffers;
@@ -105,27 +107,38 @@ pub async fn run_matter_stack(_config: &MatterConfig) -> Result<(), Error> {
     // Initialize transport buffers
     matter.initialize_transport_buffers()?;
 
-    // Create UDP socket for Matter transport
-    // Bind to IPv6 [::] which accepts both IPv4 and IPv6 connections (dual-stack)
-    // Use MATTER_BIND_ADDR env var to override (e.g., "0.0.0.0" for IPv4-only)
-    let bind_addr = std::env::var("MATTER_BIND_ADDR").unwrap_or_else(|_| "::".to_string());
-    let socket = UdpSocket::bind(format!("[{}]:{}", bind_addr, MATTER_PORT)).map_err(|e| {
-        error!(
-            "Failed to bind UDP socket on [{}]:{}: {}",
-            bind_addr, MATTER_PORT, e
-        );
+    // Create UDP socket for Matter transport using socket2 for proper IPv6 dual-stack setup
+    // This ensures IPV6_V6ONLY is set to false, allowing the socket to receive both IPv4 and IPv6
+    let raw_socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).map_err(|e| {
+        error!("Failed to create UDP socket: {}", e);
         rs_matter::error::ErrorCode::StdIoError
     })?;
-    info!("Matter UDP socket bound to [{}]:{}", bind_addr, MATTER_PORT);
-    socket.set_nonblocking(true).map_err(|e| {
-        error!("Failed to set socket non-blocking: {}", e);
+    raw_socket.set_reuse_address(true).map_err(|e| {
+        error!("Failed to set SO_REUSEADDR: {}", e);
         rs_matter::error::ErrorCode::StdIoError
     })?;
-
-    let socket = async_io::Async::new(socket).map_err(|e| {
+    raw_socket.set_only_v6(false).map_err(|e| {
+        error!("Failed to set IPV6_V6ONLY=false: {}", e);
+        rs_matter::error::ErrorCode::StdIoError
+    })?;
+    raw_socket.set_nonblocking(true).map_err(|e| {
+        error!("Failed to set non-blocking: {}", e);
+        rs_matter::error::ErrorCode::StdIoError
+    })?;
+    raw_socket
+        .bind(&MATTER_SOCKET_BIND_ADDR.into())
+        .map_err(|e| {
+            error!(
+                "Failed to bind UDP socket on {:?}: {}",
+                MATTER_SOCKET_BIND_ADDR, e
+            );
+            rs_matter::error::ErrorCode::StdIoError
+        })?;
+    let socket = async_io::Async::<UdpSocket>::new(raw_socket.into()).map_err(|e| {
         error!("Failed to create async socket: {}", e);
         rs_matter::error::ErrorCode::StdIoError
     })?;
+    info!("Matter UDP socket bound to {:?}", MATTER_SOCKET_BIND_ADDR);
 
     // Open the commissioning window to allow pairing
     // This triggers mDNS advertisement
@@ -166,14 +179,26 @@ pub async fn run_matter_stack(_config: &MatterConfig) -> Result<(), Error> {
 
     info!("Matter stack running. Waiting for controller connections...");
 
-    // Wrap socket with logging for debugging
+    // Run Matter transport with logging wrapper
     let logging_socket = LoggingUdpSocket::new(&socket);
-
-    // Run Matter transport
     let mut transport = pin!(matter.run(&logging_socket, &logging_socket));
 
-    // Run mDNS for discovery (using zbus/D-Bus via Avahi)
-    let mut mdns = pin!(run_mdns(matter));
+    // Run mDNS in a separate thread - mdns-sd's daemon blocks async_io's reactor
+    // when run in the same async context
+    //
+    // SAFETY: matter lives for 'static (in StaticCell) and the mDNS thread
+    // only reads from it. The thread will be terminated when the process exits.
+    let matter_addr = matter as *const Matter<'_> as usize;
+    std::thread::Builder::new()
+        .name("mdns".into())
+        .spawn(move || {
+            let matter: &Matter<'_> = unsafe { &*(matter_addr as *const Matter<'_>) };
+            if let Err(e) = futures_lite::future::block_on(run_mdns(matter)) {
+                log::error!("mDNS error: {:?}", e);
+            }
+        })
+        .expect("Failed to spawn mDNS thread");
+    info!("mDNS responder started on separate thread");
 
     // Run the responder
     let mut respond = pin!(responder.run::<4, 4>());
@@ -181,10 +206,10 @@ pub async fn run_matter_stack(_config: &MatterConfig) -> Result<(), Error> {
     // Run data model background job (handles subscriptions)
     let mut dm_job = pin!(dm.run());
 
-    // Run all components concurrently using select4
-    let result = select4(
+    // Run all components concurrently
+    // Note: mDNS runs in its own thread to avoid blocking async_io reactor
+    let result = select3(
         &mut transport,
-        &mut mdns,
         select(&mut respond, &mut dm_job).coalesce(),
         // Placeholder for future persistence
         core::future::pending::<Result<(), Error>>(),

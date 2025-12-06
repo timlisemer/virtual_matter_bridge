@@ -73,17 +73,25 @@ This project implements a virtual Matter bridge that:
   - Combines all clusters
   - Doorbell press simulation
   - Device initialization
+- [x] **Matter Stack Integration - Commissioning**
+  - Basic Matter stack initialization with `rs-matter`
+  - UDP transport on port 5540 (IPv6 dual-stack)
+  - Commissioning window (PASE) with QR code and manual pairing code
+  - mDNS advertisement via direct multicast (`mdns-sd` crate)
+  - PASE handshake (successful key exchange)
+  - Certificate chain requests (DAC, PAI)
+  - Attestation and CSR generation
+  - NOC (Node Operational Certificate) installation
+  - Fabric creation and operational discovery (_matter._tcp)
 
 ### In Progress
 
-- [ ] **Matter Stack Integration**
-  - [x] Basic Matter stack initialization with `rs-matter`
-  - [x] UDP transport on port 5540
-  - [x] Commissioning window (PASE) with QR code and manual pairing code
-  - [x] mDNS advertisement via direct multicast (`mdns-sd` crate)
+- [ ] **Matter Stack Integration - Data Model**
   - [ ] Connect clusters to `rs-matter` data model
+  - [ ] Implement cluster attribute read/write handlers
+  - [ ] Implement cluster command handlers
   - [ ] Device attestation with production credentials
-  - [ ] Fabric management and persistence
+  - [ ] Fabric management persistence (currently in-memory)
 - [ ] **Actual RTSP Streaming**
   - Integration with `retina` crate for H.264/AAC depacketization
   - RTP/RTCP handling
@@ -216,8 +224,50 @@ sudo tcpdump -i enp14s0 -n udp port 5540
 
 When commissioning starts, you should see PASE packets from the phone to your PC on port 5540.
 
-**Known Issue - IPv6 vs IPv4:**
-Matter controllers (phones) typically prefer IPv6 when available. The mDNS response advertises both IPv4 (`A` record) and IPv6 (`AAAA` records). If the phone connects via IPv6 but the application only binds to IPv4 (`0.0.0.0`), packets will arrive at the network interface but not reach the application.
+### Known Issues
+
+**mDNS IPv6 AAAA record errors during deregistration:**
+
+When the commissioning window closes, the `mdns-sd` crate logs many errors about not finding valid addresses for AAAA records on certain IPv6 interfaces. This is cosmetic and does not affect functionality:
+
+```
+[ERROR mdns_sd::service_daemon] Cannot find valid addrs for TYPE_AAAA response on intf Interface { name: "enp14s0", addr: V6(Ifv6Addr { ip: fdb3:10a8:8234:0:..., ... }) }
+```
+
+These errors occur because the mDNS library tries to announce on all IPv6 addresses but some (ULA addresses from Thread mesh, etc.) are filtered out during registration. The service deregistration still completes successfully.
+
+**mDNS unregister channel closed error:**
+
+```
+[ERROR mdns_sd::service_daemon] unregister: failed to send response: sending on a closed channel
+```
+
+This occurs because the mDNS daemon's internal communication channel is closed before the unregister response can be sent. This is a timing issue during cleanup and does not affect the commissioning process.
+
+### Previous Issues (Resolved)
+
+**UDP packets not received (RESOLVED):**
+
+Previously, the phone's UDP packets to port 5540 were not being received by the application due to Linux's reverse path filtering.
+
+**Solution for NixOS:**
+
+Add to your host configuration (e.g., `hosts/your-host.nix`):
+
+```nix
+{
+  # Disable reverse path filtering for Matter/IPv6 traffic
+  networking.firewall.checkReversePath = false;
+
+  # Or use "loose" mode for less permissive filtering:
+  # networking.firewall.checkReversePath = "loose";
+
+  # Ensure Matter port is open
+  networking.firewall.allowedUDPPorts = [ 5353 5540 ];
+}
+```
+
+Then rebuild: `sudo nixos-rebuild switch`
 
 ### mDNS Implementation Notes
 
@@ -273,7 +323,22 @@ When the application starts, it displays:
 
 The commissioning window is open for 15 minutes (900 seconds) after startup.
 
-**Note**: Currently uses test device credentials from rs-matter. Production deployments should use proper device attestation certificates.
+### Commissioning Flow (Working)
+
+The following commissioning steps complete successfully:
+
+1. **mDNS Discovery**: Device advertises `_matterc._udp` service with discriminator and vendor info
+2. **PASE Handshake**: Secure channel established using the pairing code
+3. **Certificate Chain**: Device provides DAC (Device Attestation Certificate) and PAI certificates
+4. **Attestation**: Device proves authenticity via attestation challenge
+5. **CSR Generation**: Device generates certificate signing request
+6. **NOC Installation**: Controller installs Node Operational Certificate
+7. **Fabric Join**: Device joins the controller's fabric
+8. **Operational Discovery**: Device re-advertises as `_matter._tcp` with fabric/node IDs
+
+After commissioning, the device transitions from commissionable (`_matterc._udp`) to operational (`_matter._tcp`) mDNS service.
+
+**Note**: Currently uses test device credentials from rs-matter. Production deployments should use proper device attestation certificates. Fabric credentials are stored in memory and lost on restart.
 
 ## License
 
