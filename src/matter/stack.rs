@@ -6,13 +6,13 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use log::{error, info};
 use static_cell::StaticCell;
 
+use super::netif::FilteredNetifs;
 use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::clusters::net_comm::NetworkType;
 use rs_matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT;
 use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::dm::endpoints;
-use rs_matter::dm::networks::unix::UnixNetifs;
 use rs_matter::dm::subscriptions::DefaultSubscriptions;
 use rs_matter::dm::{
     Async, AsyncHandler, AsyncMetadata, DataModel, Dataver, EmptyHandler, Endpoint, EpClMatcher,
@@ -51,13 +51,18 @@ const NODE: Node<'static> = Node {
     ],
 };
 
+/// The network interface to use for Matter communications.
+/// Override with MATTER_INTERFACE env var (e.g., "eth0", "enp14s0").
+/// This filters out Thread mesh addresses that may be visible via mDNS reflection.
+static NETIFS: FilteredNetifs = FilteredNetifs::new("enp14s0");
+
 /// Build the data model handler
 fn dm_handler<'a>(matter: &'a Matter<'a>) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
         endpoints::with_eth(
             &(),
-            &UnixNetifs,
+            &NETIFS,
             matter.rand(),
             endpoints::with_sys(
                 &false,
@@ -99,10 +104,16 @@ pub async fn run_matter_stack(_config: &MatterConfig) -> Result<(), Error> {
     matter.initialize_transport_buffers()?;
 
     // Create UDP socket for Matter transport
-    let socket = UdpSocket::bind(format!("0.0.0.0:{}", MATTER_PORT)).map_err(|e| {
-        error!("Failed to bind UDP socket on port {}: {}", MATTER_PORT, e);
+    // Bind to all interfaces for now - use MATTER_BIND_ADDR env var to override
+    let bind_addr = std::env::var("MATTER_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let socket = UdpSocket::bind(format!("{}:{}", bind_addr, MATTER_PORT)).map_err(|e| {
+        error!(
+            "Failed to bind UDP socket on {}:{}: {}",
+            bind_addr, MATTER_PORT, e
+        );
         rs_matter::error::ErrorCode::StdIoError
     })?;
+    info!("Matter UDP socket bound to {}:{}", bind_addr, MATTER_PORT);
     socket.set_nonblocking(true).map_err(|e| {
         error!("Failed to set socket non-blocking: {}", e);
         rs_matter::error::ErrorCode::StdIoError
