@@ -6,6 +6,7 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use log::{error, info};
 use static_cell::StaticCell;
 
+use super::mdns::FilteredAvahiMdnsResponder;
 use super::netif::FilteredNetifs;
 use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
@@ -124,6 +125,15 @@ pub async fn run_matter_stack(_config: &MatterConfig) -> Result<(), Error> {
         rs_matter::error::ErrorCode::StdIoError
     })?;
 
+    // Open the commissioning window to allow pairing
+    // This triggers mDNS advertisement
+    const COMM_WINDOW_TIMEOUT_SECS: u16 = 900; // 15 minutes
+    info!(
+        "Opening commissioning window for {} seconds...",
+        COMM_WINDOW_TIMEOUT_SECS
+    );
+    matter.open_basic_comm_window(COMM_WINDOW_TIMEOUT_SECS)?;
+
     // Print commissioning info
     info!("Matter device ready for commissioning");
     info!("  Discriminator: {}", TEST_DEV_COMM.discriminator);
@@ -185,9 +195,15 @@ pub async fn run_matter_stack(_config: &MatterConfig) -> Result<(), Error> {
     Ok(())
 }
 
+/// The network interface name for mDNS advertisement.
+/// This must match NETIFS interface for consistent behavior.
+const MDNS_INTERFACE: &str = "enp14s0";
+
 /// Run mDNS for device discovery
 ///
-/// Uses zbus to communicate with Avahi for mDNS on Linux
+/// Uses zbus to communicate with Avahi for mDNS on Linux.
+/// Uses our custom FilteredAvahiMdnsResponder to ensure mDNS only advertises
+/// addresses from the specified interface, avoiding Thread mesh addresses.
 async fn run_mdns(matter: &Matter<'_>) -> Result<(), Error> {
     // Get a D-Bus connection to the system bus (where Avahi runs)
     let conn = rs_matter::utils::zbus::Connection::system()
@@ -197,8 +213,8 @@ async fn run_mdns(matter: &Matter<'_>) -> Result<(), Error> {
             rs_matter::error::ErrorCode::DBusError
         })?;
 
-    // Run the Avahi-based mDNS responder
-    rs_matter::transport::network::mdns::avahi::AvahiMdnsResponder::new(matter)
+    // Run our filtered mDNS responder that only advertises on the specified interface
+    FilteredAvahiMdnsResponder::new(matter, MDNS_INTERFACE)
         .run(&conn)
         .await
 }

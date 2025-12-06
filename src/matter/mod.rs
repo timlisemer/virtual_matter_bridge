@@ -1,4 +1,5 @@
 mod dev_att;
+mod mdns;
 mod netif;
 mod stack;
 
