@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::fs;
-use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::{Arc, OnceLock};
@@ -36,7 +36,6 @@ use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::pairing::qr::QrTextType;
 use rs_matter::respond::DefaultResponder;
-use rs_matter::transport::MATTER_SOCKET_BIND_ADDR;
 use rs_matter::transport::network::mdns::builtin::{BuiltinMdnsResponder, Host};
 use rs_matter::transport::network::mdns::{
     MDNS_IPV4_BROADCAST_ADDR, MDNS_IPV6_BROADCAST_ADDR, MDNS_SOCKET_DEFAULT_BIND_ADDR,
@@ -295,8 +294,38 @@ pub async fn run_matter_stack(
     // Initialize transport buffers
     matter.initialize_transport_buffers()?;
 
+    // Detect network interface and get addresses BEFORE socket creation
+    // This is critical because we need to bind to the specific IPv6 address we advertise in mDNS
+    // to ensure the kernel uses the same source address when sending responses
+    let interface_name = get_interface_name();
+    let interface_index = get_interface_index(interface_name)?;
+    let (ipv4_addrs, ipv6_addrs) = get_interface_addresses(interface_name)?;
+
+    if ipv4_addrs.is_empty() {
+        error!("No IPv4 address found on interface '{}'", interface_name);
+        return Err(rs_matter::error::ErrorCode::MdnsError.into());
+    }
+
+    // Need at least one IPv6 address for Matter
+    let ipv6_addr = if ipv6_addrs.is_empty() {
+        info!(
+            "No global IPv6 address on '{}', using unspecified",
+            interface_name
+        );
+        Ipv6Addr::UNSPECIFIED
+    } else {
+        ipv6_addrs[0]
+    };
+
+    info!(
+        "Using interface '{}' (index {}) with {} and {}",
+        interface_name, interface_index, ipv4_addrs[0], ipv6_addr
+    );
+
     // Create UDP socket for Matter transport using socket2 for proper IPv6 dual-stack setup
-    // This ensures IPV6_V6ONLY is set to false, allowing the socket to receive both IPv4 and IPv6
+    // CRITICAL: Bind to the specific IPv6 address we advertise in mDNS, NOT to [::]
+    // This ensures responses come from the same source IP that HA sent packets to,
+    // which is required for multi-admin commissioning to work
     let raw_socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).map_err(|e| {
         error!("Failed to create UDP socket: {}", e);
         rs_matter::error::ErrorCode::StdIoError
@@ -313,20 +342,18 @@ pub async fn run_matter_stack(
         error!("Failed to set non-blocking: {}", e);
         rs_matter::error::ErrorCode::StdIoError
     })?;
-    raw_socket
-        .bind(&MATTER_SOCKET_BIND_ADDR.into())
-        .map_err(|e| {
-            error!(
-                "Failed to bind UDP socket on {:?}: {}",
-                MATTER_SOCKET_BIND_ADDR, e
-            );
-            rs_matter::error::ErrorCode::StdIoError
-        })?;
+
+    // Bind to specific IPv6 address (with IPV6_V6ONLY=false, IPv4 will use IPv6-mapped addresses)
+    let bind_addr = SocketAddr::new(IpAddr::V6(ipv6_addr), MATTER_PORT);
+    raw_socket.bind(&bind_addr.into()).map_err(|e| {
+        error!("Failed to bind UDP socket to {:?}: {}", bind_addr, e);
+        rs_matter::error::ErrorCode::StdIoError
+    })?;
     let socket = async_io::Async::<UdpSocket>::new(raw_socket.into()).map_err(|e| {
         error!("Failed to create async socket: {}", e);
         rs_matter::error::ErrorCode::StdIoError
     })?;
-    info!("Matter UDP socket bound to {:?}", MATTER_SOCKET_BIND_ADDR);
+    info!("Matter UDP socket bound to {:?}", bind_addr);
 
     // Try to load existing fabrics from persistent storage
     let was_commissioned = load_fabrics(matter)?;
@@ -391,31 +418,7 @@ pub async fn run_matter_stack(
     // Create mDNS responder using rs-matter's built-in implementation
     // This correctly handles subtype PTR queries (e.g., _S1._sub._matterc._udp.local.)
     // which is required for multi-admin commissioning via phone apps
-    let interface_name = get_interface_name();
-    let interface_index = get_interface_index(interface_name)?;
-    let (ipv4_addrs, ipv6_addrs) = get_interface_addresses(interface_name)?;
-
-    if ipv4_addrs.is_empty() {
-        error!("No IPv4 address found on interface '{}'", interface_name);
-        return Err(rs_matter::error::ErrorCode::MdnsError.into());
-    }
-
-    // Need at least one IPv6 address for Matter (can use link-local if no GUA)
-    let ipv6_addr = if ipv6_addrs.is_empty() {
-        // Fall back to unspecified - built-in responder will handle this
-        info!(
-            "No global IPv6 address on '{}', using unspecified",
-            interface_name
-        );
-        Ipv6Addr::UNSPECIFIED
-    } else {
-        ipv6_addrs[0]
-    };
-
-    info!(
-        "mDNS using interface '{}' (index {}) with {} and {}",
-        interface_name, interface_index, ipv4_addrs[0], ipv6_addr
-    );
+    // Note: interface_name, interface_index, ipv4_addrs, ipv6_addr are already set above
 
     // Create mDNS socket (separate from Matter transport, binds to port 5353)
     let mdns_socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).map_err(|e| {
