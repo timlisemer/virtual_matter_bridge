@@ -1,5 +1,6 @@
+use std::ffi::CString;
 use std::fs;
-use std::net::UdpSocket;
+use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::{Arc, OnceLock};
@@ -7,13 +8,15 @@ use std::sync::{Arc, OnceLock};
 use embassy_futures::select::{select, select4};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use log::{error, info};
+use nix::ifaddrs::getifaddrs;
+use nix::net::if_::if_nametoindex;
+use nix::sys::socket::{AddressFamily, SockaddrLike};
 use socket2::{Domain, Protocol, Socket, Type};
 use static_cell::StaticCell;
 
 use super::clusters::{CameraAvStreamMgmtHandler, ChimeHandler, WebRtcTransportProviderHandler};
 use super::device_types::DEV_TYPE_VIDEO_DOORBELL;
 use super::logging_udp::LoggingUdpSocket;
-use super::mdns::DirectMdnsResponder;
 use super::netif::{FilteredNetifs, get_interface_name};
 use crate::clusters::camera_av_stream_mgmt::CameraAvStreamMgmtCluster;
 use crate::clusters::chime::ChimeCluster;
@@ -34,6 +37,10 @@ use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::pairing::qr::QrTextType;
 use rs_matter::respond::DefaultResponder;
 use rs_matter::transport::MATTER_SOCKET_BIND_ADDR;
+use rs_matter::transport::network::mdns::builtin::{BuiltinMdnsResponder, Host};
+use rs_matter::transport::network::mdns::{
+    MDNS_IPV4_BROADCAST_ADDR, MDNS_IPV6_BROADCAST_ADDR, MDNS_SOCKET_DEFAULT_BIND_ADDR,
+};
 use rs_matter::utils::init::InitMaybeUninit;
 use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::storage::pooled::PooledBuffers;
@@ -45,6 +52,68 @@ use crate::config::MatterConfig;
 static MATTER: StaticCell<Matter> = StaticCell::new();
 static BUFFERS: StaticCell<PooledBuffers<10, NoopRawMutex, IMBuffer>> = StaticCell::new();
 static SUBSCRIPTIONS: StaticCell<DefaultSubscriptions> = StaticCell::new();
+
+/// Static hostname storage for mDNS (needs 'static lifetime for Host struct)
+static HOSTNAME: OnceLock<String> = OnceLock::new();
+
+/// Get IPv4 and IPv6 addresses for a specific network interface.
+///
+/// Filters out link-local IPv6 addresses (fe80::/10).
+fn get_interface_addresses(interface_name: &str) -> Result<(Vec<Ipv4Addr>, Vec<Ipv6Addr>), Error> {
+    let addrs = getifaddrs().map_err(|e| {
+        error!("Failed to get interface addresses: {:?}", e);
+        rs_matter::error::ErrorCode::MdnsError
+    })?;
+
+    let mut ipv4 = Vec::new();
+    let mut ipv6 = Vec::new();
+
+    for ifaddr in addrs {
+        if ifaddr.interface_name != interface_name {
+            continue;
+        }
+
+        if let Some(addr) = ifaddr.address
+            && let Some(family) = addr.family()
+        {
+            match family {
+                AddressFamily::Inet => {
+                    if let Some(sockaddr) = addr.as_sockaddr_in() {
+                        ipv4.push(sockaddr.ip());
+                    }
+                }
+                AddressFamily::Inet6 => {
+                    if let Some(sockaddr) = addr.as_sockaddr_in6() {
+                        let ip = sockaddr.ip();
+                        // Filter out link-local addresses (fe80::/10)
+                        let octets = ip.octets();
+                        if !(octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80) {
+                            ipv6.push(ip);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok((ipv4, ipv6))
+}
+
+/// Get the interface index for a network interface name.
+fn get_interface_index(interface_name: &str) -> Result<u32, Error> {
+    let cname = CString::new(interface_name).map_err(|_| {
+        error!("Invalid interface name: {}", interface_name);
+        Error::from(rs_matter::error::ErrorCode::MdnsError)
+    })?;
+    if_nametoindex(cname.as_c_str()).map_err(|e| {
+        error!(
+            "Failed to get interface index for '{}': {:?}",
+            interface_name, e
+        );
+        Error::from(rs_matter::error::ErrorCode::MdnsError)
+    })
+}
 
 /// Directory for fabric persistence data
 const PERSIST_DIR: &str = ".config/virtual-matter-bridge";
@@ -319,11 +388,107 @@ pub async fn run_matter_stack(
     let logging_socket = LoggingUdpSocket::new(&socket);
     let mut transport = pin!(matter.run(&logging_socket, &logging_socket));
 
-    // Create mDNS responder - runs in the same async executor as Matter stack
-    // This avoids RefCell borrow conflicts that occur when mDNS runs in a separate thread
-    // (mdns-sd's ServiceDaemon spawns its own internal thread for multicast I/O)
-    let mut mdns_responder = DirectMdnsResponder::new(matter, get_interface_name());
-    let mut mdns = pin!(mdns_responder.run());
+    // Create mDNS responder using rs-matter's built-in implementation
+    // This correctly handles subtype PTR queries (e.g., _S1._sub._matterc._udp.local.)
+    // which is required for multi-admin commissioning via phone apps
+    let interface_name = get_interface_name();
+    let interface_index = get_interface_index(interface_name)?;
+    let (ipv4_addrs, ipv6_addrs) = get_interface_addresses(interface_name)?;
+
+    if ipv4_addrs.is_empty() {
+        error!("No IPv4 address found on interface '{}'", interface_name);
+        return Err(rs_matter::error::ErrorCode::MdnsError.into());
+    }
+
+    // Need at least one IPv6 address for Matter (can use link-local if no GUA)
+    let ipv6_addr = if ipv6_addrs.is_empty() {
+        // Fall back to unspecified - built-in responder will handle this
+        info!(
+            "No global IPv6 address on '{}', using unspecified",
+            interface_name
+        );
+        Ipv6Addr::UNSPECIFIED
+    } else {
+        ipv6_addrs[0]
+    };
+
+    info!(
+        "mDNS using interface '{}' (index {}) with {} and {}",
+        interface_name, interface_index, ipv4_addrs[0], ipv6_addr
+    );
+
+    // Create mDNS socket (separate from Matter transport, binds to port 5353)
+    let mdns_socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).map_err(|e| {
+        error!("Failed to create mDNS socket: {}", e);
+        rs_matter::error::ErrorCode::MdnsError
+    })?;
+    mdns_socket.set_reuse_address(true).map_err(|e| {
+        error!("Failed to set SO_REUSEADDR on mDNS socket: {}", e);
+        rs_matter::error::ErrorCode::MdnsError
+    })?;
+    mdns_socket.set_only_v6(false).map_err(|e| {
+        error!("Failed to set IPV6_V6ONLY=false on mDNS socket: {}", e);
+        rs_matter::error::ErrorCode::MdnsError
+    })?;
+    mdns_socket.set_nonblocking(true).map_err(|e| {
+        error!("Failed to set non-blocking on mDNS socket: {}", e);
+        rs_matter::error::ErrorCode::MdnsError
+    })?;
+    mdns_socket
+        .bind(&MDNS_SOCKET_DEFAULT_BIND_ADDR.into())
+        .map_err(|e| {
+            error!(
+                "Failed to bind mDNS socket to {:?}: {}",
+                MDNS_SOCKET_DEFAULT_BIND_ADDR, e
+            );
+            rs_matter::error::ErrorCode::MdnsError
+        })?;
+
+    let mdns_socket =
+        async_io::Async::<UdpSocket>::new_nonblocking(mdns_socket.into()).map_err(|e| {
+            error!("Failed to create async mDNS socket: {}", e);
+            rs_matter::error::ErrorCode::MdnsError
+        })?;
+
+    // Join multicast groups for mDNS
+    mdns_socket
+        .get_ref()
+        .join_multicast_v6(&MDNS_IPV6_BROADCAST_ADDR, interface_index)
+        .map_err(|e| {
+            error!("Failed to join IPv6 multicast group: {}", e);
+            rs_matter::error::ErrorCode::MdnsError
+        })?;
+    mdns_socket
+        .get_ref()
+        .join_multicast_v4(&MDNS_IPV4_BROADCAST_ADDR, &ipv4_addrs[0])
+        .map_err(|e| {
+            error!("Failed to join IPv4 multicast group: {}", e);
+            rs_matter::error::ErrorCode::MdnsError
+        })?;
+
+    info!("mDNS socket bound to {:?}", MDNS_SOCKET_DEFAULT_BIND_ADDR);
+
+    // Store hostname statically (Host struct requires 'static lifetime)
+    let hostname =
+        HOSTNAME.get_or_init(|| gethostname::gethostname().to_string_lossy().into_owned());
+
+    // Create host info for mDNS responder
+    let host = Host {
+        id: 0,
+        hostname,
+        ip: ipv4_addrs[0].octets().into(),
+        ipv6: ipv6_addr.octets().into(),
+    };
+
+    // Use built-in mDNS responder - correctly handles subtype queries
+    let mdns_responder = BuiltinMdnsResponder::new(matter);
+    let mut mdns = pin!(mdns_responder.run(
+        &mdns_socket,
+        &mdns_socket,
+        &host,
+        Some(ipv4_addrs[0].octets().into()),
+        Some(interface_index),
+    ));
 
     // Run the responder
     let mut respond = pin!(responder.run::<4, 4>());

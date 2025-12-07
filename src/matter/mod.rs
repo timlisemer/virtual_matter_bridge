@@ -1,6 +1,5 @@
 mod dev_att;
 mod logging_udp;
-mod mdns;
 mod netif;
 mod stack;
 

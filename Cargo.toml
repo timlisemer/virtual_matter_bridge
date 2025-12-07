@@ -26,8 +26,7 @@ socket2 = "0.5"
 # Unix network interface detection
 nix = { version = "0.29", features = ["net"] }
 
-# Direct mDNS (bypasses broken Avahi D-Bus)
-mdns-sd = "0.11"
+# Hostname for mDNS
 gethostname = "0.5"
 
 # Async runtime
