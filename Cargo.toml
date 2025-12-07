@@ -54,6 +54,12 @@ serde_json = "1"
 futures-util = "0.3"
 async-trait = "0.1"
 
+# Synchronization primitives (for Matter handler compatibility)
+parking_lot = "0.12"
+
+# Enum derive macros (for Matter cluster enums)
+strum = { version = "0.26", features = ["derive"] }
+
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 

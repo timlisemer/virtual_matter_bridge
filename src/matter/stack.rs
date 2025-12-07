@@ -8,13 +8,14 @@ use log::{error, info};
 use socket2::{Domain, Protocol, Socket, Type};
 use static_cell::StaticCell;
 
+use super::clusters::{CameraAvStreamMgmtHandler, ChimeHandler, WebRtcTransportProviderHandler};
+use super::device_types::DEV_TYPE_VIDEO_DOORBELL;
 use super::logging_udp::LoggingUdpSocket;
 use super::mdns::DirectMdnsResponder;
 use super::netif::{FilteredNetifs, get_interface_name};
 use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::clusters::net_comm::NetworkType;
-use rs_matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT;
 use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::dm::endpoints;
 use rs_matter::dm::subscriptions::DefaultSubscriptions;
@@ -39,19 +40,22 @@ static MATTER: StaticCell<Matter> = StaticCell::new();
 static BUFFERS: StaticCell<PooledBuffers<10, NoopRawMutex, IMBuffer>> = StaticCell::new();
 static SUBSCRIPTIONS: StaticCell<DefaultSubscriptions> = StaticCell::new();
 
-/// Node definition for our Matter device
-/// For now, we expose a simple on/off light endpoint as a minimal working example
-/// TODO: Replace with video doorbell device type and clusters
+/// Node definition for our Matter Video Doorbell device
 const NODE: Node<'static> = Node {
     id: 0,
     endpoints: &[
         // Endpoint 0: Root endpoint (required for all Matter devices)
         endpoints::root_endpoint(NetworkType::Ethernet),
-        // Endpoint 1: Simple on/off light (placeholder until doorbell clusters are implemented)
+        // Endpoint 1: Video Doorbell with camera, WebRTC, and chime clusters
         Endpoint {
             id: 1,
-            device_types: devices!(DEV_TYPE_ON_OFF_LIGHT),
-            clusters: clusters!(desc::DescHandler::CLUSTER),
+            device_types: devices!(DEV_TYPE_VIDEO_DOORBELL),
+            clusters: clusters!(
+                desc::DescHandler::CLUSTER,
+                CameraAvStreamMgmtHandler::CLUSTER,
+                WebRtcTransportProviderHandler::CLUSTER,
+                ChimeHandler::CLUSTER
+            ),
         },
     ],
 };
@@ -64,8 +68,13 @@ fn get_netifs() -> &'static FilteredNetifs {
     NETIFS.get_or_init(FilteredNetifs::auto_detect)
 }
 
-/// Build the data model handler
-fn dm_handler<'a>(matter: &'a Matter<'a>) -> impl AsyncMetadata + AsyncHandler + 'a {
+/// Build the data model handler with video doorbell clusters
+fn dm_handler<'a>(
+    matter: &'a Matter<'a>,
+    camera_handler: &'a CameraAvStreamMgmtHandler,
+    webrtc_handler: &'a WebRtcTransportProviderHandler,
+    chime_handler: &'a ChimeHandler,
+) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
         endpoints::with_eth(
@@ -75,26 +84,46 @@ fn dm_handler<'a>(matter: &'a Matter<'a>) -> impl AsyncMetadata + AsyncHandler +
             endpoints::with_sys(
                 &false,
                 matter.rand(),
-                // Chain handlers for our endpoints
-                EmptyHandler.chain(
-                    EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
-                    Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
-                ),
+                // Chain handlers for endpoint 1 clusters
+                EmptyHandler
+                    .chain(
+                        EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
+                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
+                    )
+                    .chain(
+                        EpClMatcher::new(Some(1), Some(CameraAvStreamMgmtHandler::CLUSTER.id)),
+                        Async(camera_handler),
+                    )
+                    .chain(
+                        EpClMatcher::new(Some(1), Some(WebRtcTransportProviderHandler::CLUSTER.id)),
+                        Async(webrtc_handler),
+                    )
+                    .chain(
+                        EpClMatcher::new(Some(1), Some(ChimeHandler::CLUSTER.id)),
+                        Async(chime_handler),
+                    ),
             ),
         ),
     )
 }
 
-/// Run the Matter stack
+/// Run the Matter stack with video doorbell cluster handlers
 ///
 /// This function initializes and runs the Matter protocol stack, enabling:
 /// - Device discovery via mDNS
 /// - Commissioning (pairing) with controllers like Home Assistant
 /// - Matter protocol communication
 ///
+/// The handlers bridge the existing cluster business logic to rs-matter's data model.
+///
 /// Note: Currently uses test device credentials for development.
 /// TODO: Create proper static device info from MatterConfig
-pub async fn run_matter_stack(_config: &MatterConfig) -> Result<(), Error> {
+pub async fn run_matter_stack(
+    _config: &MatterConfig,
+    camera_handler: &CameraAvStreamMgmtHandler,
+    webrtc_handler: &WebRtcTransportProviderHandler,
+    chime_handler: &ChimeHandler,
+) -> Result<(), Error> {
     info!("Initializing Matter stack...");
 
     // Initialize the Matter instance in static memory
@@ -174,8 +203,8 @@ pub async fn run_matter_stack(_config: &MatterConfig) -> Result<(), Error> {
         .uninit()
         .init_with(DefaultSubscriptions::init());
 
-    // Create the data model with our handler
-    let handler = dm_handler(matter);
+    // Create the data model with our video doorbell handlers
+    let handler = dm_handler(matter, camera_handler, webrtc_handler, chime_handler);
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 
     // Create the responder that handles incoming Matter requests

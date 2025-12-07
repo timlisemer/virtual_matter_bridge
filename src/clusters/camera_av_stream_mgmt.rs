@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU16, Ordering};
+use strum::FromRepr;
 
 /// Matter Cluster ID for Camera AV Stream Management
 pub const CLUSTER_ID: u32 = 0x0551;
@@ -35,7 +36,7 @@ pub struct Features {
 }
 
 /// Audio codec enumeration (Matter spec)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, FromRepr)]
 #[repr(u8)]
 pub enum AudioCodec {
     Opus = 0x00,
@@ -50,7 +51,7 @@ pub enum ImageCodec {
 }
 
 /// Video codec enumeration (Matter spec)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, FromRepr)]
 #[repr(u8)]
 pub enum VideoCodec {
     H264 = 0x00,
@@ -60,7 +61,7 @@ pub enum VideoCodec {
 }
 
 /// Stream usage type enumeration
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, FromRepr)]
 #[repr(u8)]
 pub enum StreamUsage {
     Internal = 0x00,

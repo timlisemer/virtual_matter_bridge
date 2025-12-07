@@ -8,9 +8,10 @@ use crate::clusters::webrtc_transport_provider::{
 use crate::config::Config;
 use crate::error::{BridgeError, Result};
 use crate::rtsp::webrtc_bridge::{BridgeConfig, RtspWebRtcBridge};
+use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::RwLock;
+use tokio::sync::RwLock as AsyncRwLock;
 
 /// Matter Device Type ID for Video Doorbell
 /// Note: This is a placeholder - actual ID from Matter 1.5 spec
@@ -19,10 +20,12 @@ pub const DEVICE_TYPE_VIDEO_DOORBELL: u32 = 0x0012;
 /// Video Doorbell device combining Camera and Doorbell functionality
 pub struct VideoDoorbellDevice {
     config: Config,
-    camera_cluster: Arc<RwLock<CameraAvStreamMgmtCluster>>,
-    webrtc_cluster: Arc<RwLock<WebRtcTransportProviderCluster>>,
-    chime_cluster: Arc<RwLock<ChimeCluster>>,
-    bridge: Arc<RwLock<Option<RtspWebRtcBridge>>>,
+    /// Cluster instances use sync RwLock for Matter handler compatibility
+    camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
+    webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
+    chime_cluster: Arc<SyncRwLock<ChimeCluster>>,
+    /// Bridge uses async RwLock for async I/O operations
+    bridge: Arc<AsyncRwLock<Option<RtspWebRtcBridge>>>,
     doorbell_pressed: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
 }
@@ -80,10 +83,10 @@ impl VideoDoorbellDevice {
 
         Self {
             config,
-            camera_cluster: Arc::new(RwLock::new(camera_cluster)),
-            webrtc_cluster: Arc::new(RwLock::new(webrtc_cluster)),
-            chime_cluster: Arc::new(RwLock::new(chime_cluster)),
-            bridge: Arc::new(RwLock::new(None)),
+            camera_cluster: Arc::new(SyncRwLock::new(camera_cluster)),
+            webrtc_cluster: Arc::new(SyncRwLock::new(webrtc_cluster)),
+            chime_cluster: Arc::new(SyncRwLock::new(chime_cluster)),
+            bridge: Arc::new(AsyncRwLock::new(None)),
             doorbell_pressed: Arc::new(AtomicBool::new(false)),
             running: Arc::new(AtomicBool::new(false)),
         }
@@ -94,7 +97,7 @@ impl VideoDoorbellDevice {
         log::info!("Initializing Video Doorbell device...");
 
         let bridge_config = BridgeConfig {
-            ice_servers: self.get_ice_servers().await,
+            ice_servers: self.get_ice_servers(),
             video_codec: VideoCodec::H264,
             ..Default::default()
         };
@@ -114,8 +117,8 @@ impl VideoDoorbellDevice {
     }
 
     /// Get configured ICE servers
-    async fn get_ice_servers(&self) -> Vec<IceServer> {
-        let webrtc = self.webrtc_cluster.read().await;
+    fn get_ice_servers(&self) -> Vec<IceServer> {
+        let webrtc = self.webrtc_cluster.read();
         webrtc
             .get_current_sessions()
             .first()
@@ -167,7 +170,7 @@ impl VideoDoorbellDevice {
 
         // Play chime sound
         {
-            let chime = self.chime_cluster.read().await;
+            let chime = self.chime_cluster.read();
             if let Err(e) = chime.play_chime_sound() {
                 log::warn!("Failed to play chime: {}", e);
             }
@@ -196,7 +199,7 @@ impl VideoDoorbellDevice {
     ) -> Result<(u16, u16, String)> {
         // Allocate a video stream
         let video_stream_id = {
-            let mut camera = self.camera_cluster.write().await;
+            let mut camera = self.camera_cluster.write();
             camera
                 .video_stream_allocate(
                     StreamUsage::LiveView,
@@ -213,7 +216,7 @@ impl VideoDoorbellDevice {
 
         // Start WebRTC session
         let (session_id, sdp, _servers) = {
-            let mut webrtc = self.webrtc_cluster.write().await;
+            let mut webrtc = self.webrtc_cluster.write();
             webrtc
                 .solicit_offer(
                     peer_node_id,
@@ -250,7 +253,7 @@ impl VideoDoorbellDevice {
     pub async fn end_video_stream(&self, session_id: u16, video_stream_id: u16) -> Result<()> {
         // End WebRTC session
         {
-            let mut webrtc = self.webrtc_cluster.write().await;
+            let mut webrtc = self.webrtc_cluster.write();
             webrtc
                 .end_session(session_id)
                 .map_err(|e| BridgeError::WebRtcError(e.to_string()))?;
@@ -258,7 +261,7 @@ impl VideoDoorbellDevice {
 
         // Deallocate video stream
         {
-            let mut camera = self.camera_cluster.write().await;
+            let mut camera = self.camera_cluster.write();
             camera
                 .video_stream_deallocate(video_stream_id)
                 .map_err(|e| BridgeError::StreamAllocationFailed(e.to_string()))?;
@@ -269,17 +272,17 @@ impl VideoDoorbellDevice {
     }
 
     /// Get camera cluster for external access
-    pub fn camera_cluster(&self) -> Arc<RwLock<CameraAvStreamMgmtCluster>> {
+    pub fn camera_cluster(&self) -> Arc<SyncRwLock<CameraAvStreamMgmtCluster>> {
         self.camera_cluster.clone()
     }
 
     /// Get WebRTC cluster for external access
-    pub fn webrtc_cluster(&self) -> Arc<RwLock<WebRtcTransportProviderCluster>> {
+    pub fn webrtc_cluster(&self) -> Arc<SyncRwLock<WebRtcTransportProviderCluster>> {
         self.webrtc_cluster.clone()
     }
 
     /// Get chime cluster for external access
-    pub fn chime_cluster(&self) -> Arc<RwLock<ChimeCluster>> {
+    pub fn chime_cluster(&self) -> Arc<SyncRwLock<ChimeCluster>> {
         self.chime_cluster.clone()
     }
 

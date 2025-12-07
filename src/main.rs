@@ -11,10 +11,14 @@ mod rtsp;
 
 use crate::config::Config;
 use crate::device::video_doorbell::VideoDoorbellDevice;
+use crate::matter::clusters::{
+    CameraAvStreamMgmtHandler, ChimeHandler, WebRtcTransportProviderHandler,
+};
 use log::info;
+use parking_lot::RwLock as SyncRwLock;
+use rs_matter::dm::Dataver;
 use std::sync::Arc;
 use tokio::signal;
-use tokio::sync::RwLock;
 
 fn init_logger() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -40,16 +44,27 @@ async fn main() {
     let matter_config = config.matter.clone();
 
     // Create the video doorbell device
-    let device = Arc::new(RwLock::new(VideoDoorbellDevice::new(config)));
+    let device = Arc::new(SyncRwLock::new(VideoDoorbellDevice::new(config)));
 
-    // Initialize the device
-    {
-        let device_lock = device.read().await;
-        if let Err(e) = device_lock.initialize().await {
-            log::error!("Failed to initialize device: {}", e);
-            std::process::exit(1);
-        }
-    }
+    // Create Matter handlers from device clusters
+    // These need to be created before spawning the Matter thread
+    let camera_cluster = device.read().camera_cluster();
+    let webrtc_cluster = device.read().webrtc_cluster();
+    let chime_cluster = device.read().chime_cluster();
+
+    // Initialize the device - use spawn_blocking since initialize() is async but uses sync locks internally
+    let device_for_init = device.clone();
+    tokio::task::spawn_blocking(move || {
+        let device_lock = device_for_init.read();
+        futures_lite::future::block_on(async {
+            if let Err(e) = device_lock.initialize().await {
+                log::error!("Failed to initialize device: {}", e);
+                std::process::exit(1);
+            }
+        });
+    })
+    .await
+    .expect("Device initialization task panicked");
 
     info!("Virtual Matter Bridge is running");
     info!("  - Video Doorbell device ready");
@@ -61,10 +76,17 @@ async fn main() {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            let device_lock = device_clone.read().await;
-            if device_lock.is_running() {
+            // Check if running and get chime cluster reference
+            let (is_running, chime_cluster) = {
+                let device_lock = device_clone.read();
+                (device_lock.is_running(), device_lock.chime_cluster())
+            };
+
+            if is_running {
                 info!("Simulating doorbell press...");
-                if let Err(e) = device_lock.press_doorbell().await {
+                // Play chime directly since we have the cluster reference
+                let chime = chime_cluster.read();
+                if let Err(e) = chime.play_chime_sound() {
                     log::warn!("Failed to simulate doorbell press: {}", e);
                 }
             } else {
@@ -79,10 +101,21 @@ async fn main() {
         .name("matter-stack".into())
         .stack_size(550 * 1024) // 550KB stack for Matter operations (matches rs-matter examples)
         .spawn(move || {
+            // Create handlers that wrap the cluster instances
+            // Note: rand is a placeholder - rs-matter's Matter instance will provide proper rand
+            let camera_handler = CameraAvStreamMgmtHandler::new(Dataver::new(0), camera_cluster);
+            let webrtc_handler =
+                WebRtcTransportProviderHandler::new(Dataver::new(0), webrtc_cluster);
+            let chime_handler = ChimeHandler::new(Dataver::new(0), chime_cluster);
+
             // Run the Matter stack (blocking) - futures_lite::block_on works with async_io
             // when async_io::Async is used for socket creation
-            if let Err(e) = futures_lite::future::block_on(matter::run_matter_stack(&matter_config))
-            {
+            if let Err(e) = futures_lite::future::block_on(matter::run_matter_stack(
+                &matter_config,
+                &camera_handler,
+                &webrtc_handler,
+                &chime_handler,
+            )) {
                 log::error!("Matter stack error: {:?}", e);
             }
         })
@@ -102,12 +135,21 @@ async fn main() {
 
     // Shutdown
     doorbell_task.abort();
-    {
-        let device_lock = device.read().await;
-        if let Err(e) = device_lock.shutdown().await {
-            log::error!("Error during shutdown: {}", e);
-        }
-    }
+
+    // Shutdown the device - we need to do this carefully because the device
+    // uses a sync RwLock for clusters but async RwLock for the bridge
+    // The shutdown method is async, so we run it in a blocking task
+    let device_for_shutdown = device.clone();
+    tokio::task::spawn_blocking(move || {
+        let device_lock = device_for_shutdown.read();
+        futures_lite::future::block_on(async {
+            if let Err(e) = device_lock.shutdown().await {
+                log::error!("Error during shutdown: {}", e);
+            }
+        });
+    })
+    .await
+    .expect("Shutdown task panicked");
 
     info!("Virtual Matter Bridge stopped");
 }
