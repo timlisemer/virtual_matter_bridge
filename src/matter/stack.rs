@@ -25,6 +25,7 @@ use rs_matter::dm::{
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::pairing::qr::QrTextType;
+use rs_matter::persist::{NO_NETWORKS, Psm};
 use rs_matter::respond::DefaultResponder;
 use rs_matter::transport::network::mdns::builtin::{BuiltinMdnsResponder, Host};
 use rs_matter::transport::network::mdns::{
@@ -49,6 +50,7 @@ use crate::config::MatterConfig;
 static MATTER: StaticCell<Matter> = StaticCell::new();
 static BUFFERS: StaticCell<PooledBuffers<10, NoopRawMutex, IMBuffer>> = StaticCell::new();
 static SUBSCRIPTIONS: StaticCell<DefaultSubscriptions> = StaticCell::new();
+static PSM: StaticCell<Psm<4096>> = StaticCell::new();
 
 /// Static hostname storage for mDNS (needs 'static lifetime for Host struct)
 static HOSTNAME: OnceLock<String> = OnceLock::new();
@@ -112,84 +114,16 @@ fn get_interface_index(interface_name: &str) -> Result<u32, Error> {
     })
 }
 
-/// Directory for fabric persistence data
+/// Directory for persistence data
 const PERSIST_DIR: &str = ".config/virtual-matter-bridge";
-const FABRICS_FILE: &str = "fabrics.bin";
+const PERSIST_FILE: &str = "matter.bin";
 
-/// Get the path to the fabrics persistence file
-fn get_fabrics_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(PERSIST_DIR).join(FABRICS_FILE))
-}
-
-/// Load fabrics from persistent storage
-fn load_fabrics(matter: &Matter) -> Result<bool, Error> {
-    let Some(path) = get_fabrics_path() else {
-        info!("Could not determine home directory for fabric persistence");
-        return Ok(false);
-    };
-
-    if !path.exists() {
-        info!("No persisted fabrics found at {:?}", path);
-        return Ok(false);
-    }
-
-    match fs::read(&path) {
-        Ok(data) => {
-            if data.is_empty() {
-                info!("Persisted fabrics file is empty");
-                return Ok(false);
-            }
-            match matter.load_fabrics(&data) {
-                Ok(()) => {
-                    info!("Loaded fabrics from {:?}", path);
-                    Ok(true)
-                }
-                Err(e) => {
-                    error!("Failed to parse persisted fabrics: {:?}", e);
-                    // Don't fail startup, just start fresh
-                    Ok(false)
-                }
-            }
-        }
-        Err(e) => {
-            error!("Failed to read fabrics file {:?}: {}", path, e);
-            Ok(false)
-        }
-    }
-}
-
-/// Save fabrics to persistent storage
-fn save_fabrics(matter: &Matter) -> Result<(), Error> {
-    let Some(path) = get_fabrics_path() else {
-        error!("Could not determine home directory for fabric persistence");
-        return Ok(());
-    };
-
-    // Ensure directory exists
-    if let Some(parent) = path.parent()
-        && let Err(e) = fs::create_dir_all(parent)
-    {
-        error!("Failed to create persistence directory {:?}: {}", parent, e);
-        return Ok(());
-    }
-
-    // Store fabrics - use a reasonably large buffer
-    let mut buf = vec![0u8; 8192];
-    match matter.store_fabrics(&mut buf) {
-        Ok(len) => {
-            buf.truncate(len);
-            if let Err(e) = fs::write(&path, &buf) {
-                error!("Failed to write fabrics to {:?}: {}", path, e);
-            } else {
-                info!("Saved fabrics to {:?} ({} bytes)", path, len);
-            }
-        }
-        Err(e) => {
-            error!("Failed to serialize fabrics: {:?}", e);
-        }
-    }
-
-    Ok(())
+/// Get the persistence file path
+fn get_persist_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(PERSIST_DIR)
+        .join(PERSIST_FILE)
 }
 
 /// Node definition for our Matter Video Doorbell device
@@ -371,14 +305,30 @@ pub async fn run_matter_stack(
     })?;
     info!("Matter UDP socket bound to {:?}", bind_addr);
 
-    // Try to load existing fabrics from persistent storage
-    let was_commissioned = load_fabrics(matter)?;
+    // Initialize Psm (Persistent State Manager) and load existing state
+    let persist_path = get_persist_path();
+
+    // Ensure the persistence directory exists
+    if let Some(parent) = persist_path.parent()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        error!("Failed to create persistence directory {:?}: {}", parent, e);
+    }
+
+    let psm = PSM.uninit().init_with(Psm::init());
+    if let Err(e) = psm.load(&persist_path, matter, NO_NETWORKS) {
+        error!(
+            "Failed to load persisted state from {:?}: {:?}",
+            persist_path, e
+        );
+        // Continue anyway - will start fresh
+    }
 
     // Only open commissioning window if device is not already commissioned
     const COMM_WINDOW_TIMEOUT_SECS: u16 = 900; // 15 minutes
-    if was_commissioned {
+    if matter.is_commissioned() {
         info!("Device already commissioned, skipping commissioning window");
-        info!("  (Delete {:?} to reset commissioning)", get_fabrics_path());
+        info!("  (Delete {:?} to reset commissioning)", persist_path);
     } else {
         info!(
             "Opening commissioning window for {} seconds...",
@@ -532,24 +482,8 @@ pub async fn run_matter_stack(
     // Run data model background job (handles subscriptions)
     let mut dm_job = pin!(dm.run());
 
-    // Persistence task - saves fabrics when they change
-    let persist_task = async {
-        loop {
-            // Wait for notification that something changed
-            matter.wait_persist().await;
-
-            // Check if fabrics changed and need to be persisted
-            if matter.fabrics_changed() {
-                info!("Fabrics changed, persisting...");
-                if let Err(e) = save_fabrics(matter) {
-                    error!("Failed to persist fabrics: {:?}", e);
-                }
-            }
-        }
-        #[allow(unreachable_code)]
-        Ok::<(), Error>(())
-    };
-    let mut persist = pin!(persist_task);
+    // Persistence task - uses Psm to automatically save state when it changes
+    let mut persist = pin!(psm.run(&persist_path, matter, NO_NETWORKS));
 
     // Run all components concurrently in the same async executor
     // mDNS is included here to avoid RefCell borrow conflicts with Matter's internal state
