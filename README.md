@@ -387,6 +387,14 @@ The following features are currently stub implementations or use placeholder val
 - **Doorbell Simulation**: Automatically triggers doorbell press every 30 seconds for testing
 - **Fabric Persistence**: Credentials stored in memory only (lost on restart)
 
+## Open TODOs and Placeholders (code-level)
+- Matter stack (`src/matter/stack.rs`): still uses test device credentials and includes a TODO to build proper static device info from `MatterConfig`.
+- Matter thread setup (`src/main.rs`): cluster handlers are seeded with placeholder dataver randomness (`Dataver::new(0)`); switch to real rs-matter datavers.
+- Video doorbell device type (`src/device/video_doorbell.rs`): device type ID is a placeholder; replace with the official Matter 1.5 video doorbell ID.
+- RTSP client (`src/rtsp/client.rs`): connection/streaming are mocked; implement retina-based RTSP connect/stream (RTP/RTCP, depacketize H.264/AAC, invoke callbacks with real frames).
+- RTSP ↔ WebRTC bridge (`src/rtsp/webrtc_bridge.rs`): TODO to set up WebRTC peer connection, media tracks, and actually forward video/audio frames instead of counting bytes.
+- WebRTC cluster SDP (`src/clusters/webrtc_transport_provider.rs`): ICE ufrag/pwd and DTLS fingerprint are placeholder strings in offers/answers; replace with real credentials/certs from the WebRTC stack.
+
 ## License
 
 MIT
