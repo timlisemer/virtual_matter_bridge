@@ -1,29 +1,21 @@
-use std::ffi::CString;
-use std::fs;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::path::PathBuf;
-use std::pin::pin;
-use std::sync::{Arc, OnceLock};
-
-use embassy_futures::select::{select, select4};
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use log::{error, info};
-use nix::ifaddrs::getifaddrs;
-use nix::net::if_::if_nametoindex;
-use nix::sys::socket::{AddressFamily, SockaddrLike};
-use socket2::{Domain, Protocol, Socket, Type};
-use static_cell::StaticCell;
-
 use super::clusters::{CameraAvStreamMgmtHandler, WebRtcTransportProviderHandler};
 use super::device_types::DEV_TYPE_VIDEO_DOORBELL;
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
 use crate::clusters::camera_av_stream_mgmt::CameraAvStreamMgmtCluster;
 use crate::clusters::webrtc_transport_provider::WebRtcTransportProviderCluster;
+use crate::device::on_off_hooks::DoorbellOnOffHooks;
+use embassy_futures::select::{select, select4};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use log::{error, info};
+use nix::ifaddrs::getifaddrs;
+use nix::net::if_::if_nametoindex;
+use nix::sys::socket::{AddressFamily, SockaddrLike};
 use parking_lot::RwLock as SyncRwLock;
 use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::clusters::net_comm::NetworkType;
+use rs_matter::dm::clusters::on_off::{self, NoLevelControl, OnOffHooks};
 use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::dm::endpoints;
 use rs_matter::dm::subscriptions::DefaultSubscriptions;
@@ -43,6 +35,14 @@ use rs_matter::utils::init::InitMaybeUninit;
 use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::storage::pooled::PooledBuffers;
 use rs_matter::{MATTER_PORT, Matter, clusters, devices};
+use socket2::{Domain, Protocol, Socket, Type};
+use static_cell::StaticCell;
+use std::ffi::CString;
+use std::fs;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::path::PathBuf;
+use std::pin::pin;
+use std::sync::{Arc, OnceLock};
 
 use crate::config::MatterConfig;
 
@@ -205,6 +205,7 @@ const NODE: Node<'static> = Node {
             device_types: devices!(DEV_TYPE_VIDEO_DOORBELL),
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
+                DoorbellOnOffHooks::CLUSTER,
                 CameraAvStreamMgmtHandler::CLUSTER,
                 WebRtcTransportProviderHandler::CLUSTER
             ),
@@ -225,6 +226,7 @@ fn dm_handler<'a>(
     matter: &'a Matter<'a>,
     camera_handler: &'a CameraAvStreamMgmtHandler,
     webrtc_handler: &'a WebRtcTransportProviderHandler,
+    on_off_handler: &'a on_off::OnOffHandler<'a, &'a DoorbellOnOffHooks, NoLevelControl>,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -240,6 +242,10 @@ fn dm_handler<'a>(
                     .chain(
                         EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
                         Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
+                    )
+                    .chain(
+                        EpClMatcher::new(Some(1), Some(DoorbellOnOffHooks::CLUSTER.id)),
+                        on_off::HandlerAsyncAdaptor(on_off_handler),
                     )
                     .chain(
                         EpClMatcher::new(Some(1), Some(CameraAvStreamMgmtHandler::CLUSTER.id)),
@@ -269,6 +275,7 @@ pub async fn run_matter_stack(
     _config: &MatterConfig,
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
     webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
+    on_off_hooks: Arc<DoorbellOnOffHooks>,
 ) -> Result<(), Error> {
     info!("Initializing Matter stack...");
 
@@ -393,8 +400,16 @@ pub async fn run_matter_stack(
     let webrtc_handler =
         WebRtcTransportProviderHandler::new(Dataver::new_rand(matter.rand()), webrtc_cluster);
 
+    // Create OnOff handler for the doorbell's armed/disarmed state
+    // new_standalone calls init internally
+    let on_off_handler = on_off::OnOffHandler::new_standalone(
+        Dataver::new_rand(matter.rand()),
+        1, // endpoint ID
+        on_off_hooks.as_ref(),
+    );
+
     // Create the data model with our video doorbell handlers
-    let handler = dm_handler(matter, &camera_handler, &webrtc_handler);
+    let handler = dm_handler(matter, &camera_handler, &webrtc_handler, &on_off_handler);
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 
     // Create the responder that handles incoming Matter requests

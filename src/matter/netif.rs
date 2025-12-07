@@ -210,17 +210,17 @@ impl NetifDiag for FilteredNetifs {
             return Ok(());
         }
 
-        log::info!(
+        log::debug!(
             "FilteredNetifs: using interface '{}' with {} IPv4 and {} IPv6 addresses",
             self.interface_name,
             ipv4_addrs.len(),
             ipv6_addrs.len()
         );
         for addr in &ipv4_addrs {
-            log::info!("  IPv4: {}", addr);
+            log::debug!("  IPv4: {}", addr);
         }
         for addr in &ipv6_addrs {
-            log::info!("  IPv6: {}", addr);
+            log::debug!("  IPv6: {}", addr);
         }
 
         let info = NetifInfo {

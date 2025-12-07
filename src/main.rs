@@ -46,6 +46,7 @@ async fn main() {
     // These need to be created before spawning the Matter thread
     let camera_cluster = device.read().camera_cluster();
     let webrtc_cluster = device.read().webrtc_cluster();
+    let on_off_hooks = device.read().on_off_hooks();
 
     // Initialize the device - use spawn_blocking since initialize() is async but uses sync locks internally
     let device_for_init = device.clone();
@@ -95,6 +96,7 @@ async fn main() {
                 &matter_config,
                 camera_cluster,
                 webrtc_cluster,
+                on_off_hooks,
             )) {
                 log::error!("Matter stack error: {:?}", e);
             }

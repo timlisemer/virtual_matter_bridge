@@ -5,6 +5,7 @@ use crate::clusters::webrtc_transport_provider::{
     Features as WebRtcFeatures, IceServer, WebRtcTransportProviderCluster,
 };
 use crate::config::Config;
+use crate::device::on_off_hooks::DoorbellOnOffHooks;
 use crate::error::{BridgeError, Result};
 use crate::rtsp::webrtc_bridge::{BridgeConfig, RtspWebRtcBridge};
 use parking_lot::RwLock as SyncRwLock;
@@ -22,6 +23,9 @@ pub struct VideoDoorbellDevice {
     /// Cluster instances use sync RwLock for Matter handler compatibility
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
     webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
+    /// OnOff hooks for armed/disarmed state (used by rs-matter's OnOffHandler)
+    /// Uses Arc for thread-safe sharing with the Matter stack
+    on_off_hooks: Arc<DoorbellOnOffHooks>,
     /// Bridge uses async RwLock for async I/O operations
     bridge: Arc<AsyncRwLock<Option<RtspWebRtcBridge>>>,
     doorbell_pressed: Arc<AtomicBool>,
@@ -69,6 +73,7 @@ impl VideoDoorbellDevice {
             config,
             camera_cluster: Arc::new(SyncRwLock::new(camera_cluster)),
             webrtc_cluster: Arc::new(SyncRwLock::new(webrtc_cluster)),
+            on_off_hooks: Arc::new(DoorbellOnOffHooks::new()),
             bridge: Arc::new(AsyncRwLock::new(None)),
             doorbell_pressed: Arc::new(AtomicBool::new(false)),
             running: Arc::new(AtomicBool::new(false)),
@@ -256,6 +261,16 @@ impl VideoDoorbellDevice {
     /// Get WebRTC cluster for external access
     pub fn webrtc_cluster(&self) -> Arc<SyncRwLock<WebRtcTransportProviderCluster>> {
         self.webrtc_cluster.clone()
+    }
+
+    /// Get OnOff hooks for external access (used by Matter stack)
+    pub fn on_off_hooks(&self) -> Arc<DoorbellOnOffHooks> {
+        self.on_off_hooks.clone()
+    }
+
+    /// Check if the doorbell is armed
+    pub fn is_armed(&self) -> bool {
+        self.on_off_hooks.is_armed()
     }
 
     /// Check if device is running
