@@ -241,6 +241,193 @@ When commissioning starts, you should see PASE packets from the phone to your PC
 
 ### Known Issues
 
+**Multi-Admin Commissioning Flow (Under Investigation):**
+
+- [x] Works: Scanning QR directly with Home Assistant app - device appears in HA
+- [ ] Fails: Scanning QR with Android native scanner - phone commissions - tries to share to HA - "Discovery timed out"
+
+Note: The standard Android Matter flow should not require any custom handler implementation. The native Android Matter commissioning flow is the standard way to pair devices and should work out of the box with a compliant Matter device. Over 20 Matter devices have been successfully added using this exact same workflow, so the issue is likely in our implementation, not Android.
+
+Observed behavior:
+
+1. Phone commissions device successfully with discriminator D=3840
+2. Phone calls `OpenCommissioningWindow` to share with HA
+3. rs-matter opens enhanced commissioning window with new discriminator (e.g., D=2867)
+4. Device advertises `_L2867._sub._matterc._udp.local.`
+5. HA searches for `_L3840._sub._matterc._udp.local.` - not found - discovery timeout
+
+Investigation findings:
+
+- mDNS subtypes are being advertised correctly (verified with Python zeroconf)
+- A discriminator mismatch is observed between what is advertised and what HA searches for
+- Root cause not yet determined - further investigation needed
+
+**Test results from Python zeroconf browser for `_matterc._udp.local.`:**
+
+```
+Browsing for Matter commissioning services...
+(Keep this running while you do the Android -> HA flow)
+
+[FOUND] 246A3CBF5F556CA3._matterc._udp.local.
+  Addresses: ['10.0.0.3']
+  Port: 5540
+  D=243
+  CM=1
+  VP=65521+32769
+  SAI=300
+  SII=5000
+  DN=MyTest
+[FOUND] BBEC6C9F718D4F5E._matterc._udp.local.
+  Addresses: ['fdf6:944e:701b:1:969c:445:47c3:2e9d']
+  Port: 5540
+  VP=4942+1
+  DT=769
+  SII=3800
+  SAI=1000
+  T=0
+  D=1099
+  CM=0
+  PH=36
+  PI=None
+[FOUND] 07B2CA6BA8A7B47C._matterc._udp.local.
+  Addresses: ['10.0.0.3']
+  Port: 5540
+  D=3840
+  CM=1
+  VP=65521+32769
+  SAI=300
+  SII=5000
+  DN=MyTest
+[REMOVED] 07B2CA6BA8A7B47C._matterc._udp.local.
+[FOUND] 561DBFB46657C2E4._matterc._udp.local.
+  Addresses: ['10.0.0.3']
+  Port: 5540
+  D=192
+  CM=1
+  VP=65521+32769
+  SAI=300
+  SII=5000
+  DN=MyTest
+```
+
+Observations from this output:
+- Our device (10.0.0.3) advertises correctly with D=3840
+- After phone commissioning, D=3840 gets REMOVED
+- Enhanced commissioning windows appear with new discriminators (D=243, D=192)
+- Services only show IPv4 address (10.0.0.3) even though we register 5 IPv6 addresses
+
+**Test results from Python zeroconf browser for `_L3840._sub._matterc._udp.local.` (discriminator subtype):**
+
+```
+Browsing for _L3840._sub._matterc._udp.local. (discriminator subtype)...
+Keep this running. Start make run in another terminal.
+Press Ctrl+C to stop.
+
+[SUBTYPE FOUND] B3334ED826CC51E2._matterc._udp.local.
+  Addresses: ['10.0.0.3']
+  Port: 5540
+```
+
+This result appeared right after phone started commissioning process, confirming subtypes ARE working.
+
+**Bridge logs during multi-admin test:**
+
+```
+13:09:59 - Registering 'B3334ED826CC51E2' on _matterc._udp with D=3840
+13:09:59 - Registering subtype: _L3840 -> _L3840._sub._matterc._udp.local.
+13:10:12 - Phone commissioned successfully (NOC installed, fabric added)
+13:10:12 - PASE Commissioning Window closed
+13:10:12 - Deregistering mDNS service (D=3840)
+13:10:12 - ERROR mdns_sd: UnregisterResend from fdb3:... and 10.0.0.3
+13:10:18 - PASE Commissioning Window opened (Enhanced)
+13:10:18 - Registering 'CA22662FA3495189' on _matterc._udp with D=2867
+13:10:18 - Registering subtype: _L2867 -> _L2867._sub._matterc._udp.local.
+```
+
+**Home Assistant error (30 seconds after phone commissioned):**
+
+```
+14:10:57 CHIP_ERROR Discovery timed out
+14:10:57 CHIP_ERROR Secure Pairing Failed
+14:10:57 ERROR commission_with_code: Commission with code failed for node 41.
+```
+
+**Debugging commands for this issue:**
+
+Browse for Matter commissioning services (run before `make run`, keep running):
+```bash
+nix-shell -p python3Packages.zeroconf --run 'python3 -c "
+from zeroconf import Zeroconf, ServiceBrowser
+import time
+
+class Listener:
+    def add_service(self, zc, type_, name):
+        print(\"[FOUND]\", name)
+        info = zc.get_service_info(type_, name)
+        if info:
+            print(\"  Addresses:\", info.parsed_addresses())
+            print(\"  Port:\", info.port)
+            for k, v in info.properties.items():
+                kstr = k.decode() if isinstance(k, bytes) else k
+                vstr = v.decode() if isinstance(v, bytes) else str(v)
+                print(\"  {}={}\".format(kstr, vstr))
+    def remove_service(self, zc, type_, name):
+        print(\"[REMOVED]\", name)
+    def update_service(self, zc, type_, name):
+        print(\"[UPDATED]\", name)
+
+zc = Zeroconf()
+print(\"Browsing for Matter commissioning services...\")
+print(\"Press Ctrl+C to stop.\")
+print()
+browser = ServiceBrowser(zc, \"_matterc._udp.local.\", Listener())
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    pass
+zc.close()
+"'
+```
+
+Browse for specific discriminator subtype (e.g., _L3840):
+```bash
+nix-shell -p python3Packages.zeroconf --run 'python3 -c "
+from zeroconf import Zeroconf, ServiceBrowser
+import time
+
+class Listener:
+    def add_service(self, zc, type_, name):
+        print(\"[SUBTYPE FOUND]\", name)
+        info = zc.get_service_info(type_, name)
+        if info:
+            print(\"  Addresses:\", info.parsed_addresses())
+            print(\"  Port:\", info.port)
+    def remove_service(self, zc, type_, name):
+        print(\"[SUBTYPE REMOVED]\", name)
+    def update_service(self, zc, type_, name):
+        print(\"[SUBTYPE UPDATED]\", name)
+
+zc = Zeroconf()
+print(\"Browsing for _L3840._sub._matterc._udp.local. (discriminator subtype)...\")
+print(\"Keep this running. Start make run in another terminal.\")
+print(\"Press Ctrl+C to stop.\")
+print()
+browser = ServiceBrowser(zc, \"_L3840._sub._matterc._udp.local.\", Listener())
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    pass
+zc.close()
+"'
+```
+
+Query mDNS multicast directly (224.0.0.251 is the mDNS multicast address):
+```bash
+nix-shell -p dnsutils --run 'dig @224.0.0.251 -p 5353 _L3840._sub._matterc._udp.local. PTR +short'
+```
+
 **mDNS IPv6 AAAA record errors during deregistration:**
 
 When the commissioning window closes, the `mdns-sd` crate logs many errors about not finding valid addresses for AAAA records on certain IPv6 interfaces. This is cosmetic and does not affect functionality:

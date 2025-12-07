@@ -260,11 +260,39 @@ impl<'a> DirectMdnsResponder<'a> {
                     full_name
                 );
 
-                // Register subtypes
+                // Register subtypes (e.g., _L3840 for discriminator lookup)
+                // Matter controllers query for discriminator subtypes like:
+                // _L3840._sub._matterc._udp.local.
                 for subtype in service.service_subtypes {
-                    log::info!("  Subtype: {}", subtype);
-                    // mdns-sd handles subtypes differently - they're part of the service type
-                    // For now, log them. Full subtype support may need ServiceInfo::with_subtype()
+                    let subtype_service_type = format!(
+                        "{}._sub.{}.local.",
+                        subtype,                  // e.g., "_L3840"
+                        service.service_protocol  // e.g., "_matterc._udp"
+                    );
+
+                    log::info!(
+                        "  Registering subtype: {} -> {}",
+                        subtype,
+                        subtype_service_type
+                    );
+
+                    let subtype_info = ServiceInfo::new(
+                        &subtype_service_type,
+                        service.name,
+                        &host_fqdn,
+                        all_addrs.as_slice(),
+                        service.port,
+                        properties.as_slice(),
+                    )
+                    .map_err(|e| {
+                        log::error!("Failed to create subtype ServiceInfo: {:?}", e);
+                        rs_matter::error::ErrorCode::MdnsError
+                    })?;
+
+                    daemon.register(subtype_info).map_err(|e| {
+                        log::error!("Failed to register mDNS subtype service: {:?}", e);
+                        rs_matter::error::ErrorCode::MdnsError
+                    })?;
                 }
 
                 Ok(full_name)
