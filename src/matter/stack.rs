@@ -555,9 +555,9 @@ pub async fn run_matter_stack(
     // Persistence task - uses Psm to automatically save state when it changes
     let mut persist = pin!(psm.run(&persist_path, matter, NO_NETWORKS));
 
-    // Subscription resumption task - runs on startup if we have persisted subscriptions
-    // Controllers will see our mDNS announcements and initiate CASE
-    let mut sub_resume = pin!(run_subscription_resumption(subscription_store));
+    // Subscription resumption task - monitors for controller reconnection after restart
+    // Logs recovery status and detects when CASE sessions are re-established
+    let mut sub_resume = pin!(run_subscription_resumption(subscription_store, matter));
 
     // Run all components concurrently in the same async executor
     // mDNS is included here to avoid RefCell borrow conflicts with Matter's internal state

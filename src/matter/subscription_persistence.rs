@@ -2,6 +2,19 @@
 //!
 //! This module persists subscription information so that after device restart,
 //! we can signal to controllers that we need them to re-establish sessions.
+//!
+//! ## Session Recovery Flow
+//!
+//! After device restart, controllers will attempt to use their cached sessions
+//! which no longer exist on the device. The recovery process is:
+//!
+//! 1. Controller sends encrypted messages on old session → device drops them
+//! 2. Controller's MRP (Message Reliability Protocol) retries with exponential backoff
+//! 3. After ~30 seconds of retries, MRP gives up
+//! 4. Controller initiates new CASE handshake via mDNS discovery
+//! 5. New session established, subscriptions re-created
+//!
+//! Expected recovery time: 1-3 minutes after device restart.
 
 use std::fs;
 use std::path::PathBuf;
@@ -9,6 +22,7 @@ use std::sync::Arc;
 
 use log::{error, info, warn};
 use parking_lot::RwLock;
+use rs_matter::Matter;
 use rs_matter::error::Error;
 use serde::{Deserialize, Serialize};
 
@@ -140,32 +154,48 @@ impl SubscriptionStore {
     }
 }
 
-/// Run subscription resumption - log persisted subscriptions on startup
-/// The mDNS responder will handle announcements, controllers will reconnect
-/// This function never returns - it pends forever after logging startup info
-pub async fn run_subscription_resumption(store: Arc<SubscriptionStore>) -> Result<(), Error> {
+/// Run subscription resumption - log persisted subscriptions on startup and monitor for reconnection
+///
+/// This function logs the recovery status and waits for controllers to re-establish sessions.
+/// It uses Matter's persist notification to detect when CASE sessions are established.
+pub async fn run_subscription_resumption(
+    store: Arc<SubscriptionStore>,
+    matter: &Matter<'_>,
+) -> Result<(), Error> {
     let subs = store.get_all();
     if subs.is_empty() {
         info!("No persisted subscriptions to resume");
-    } else {
-        info!(
-            "Found {} persisted subscriptions - mDNS is broadcasting, waiting for controllers to reconnect",
-            subs.len()
-        );
-
-        for sub in &subs {
-            info!(
-                "  Subscription: fabric={}, peer_node={:016x}, id={}",
-                sub.fabric_idx, sub.peer_node_id, sub.subscription_id
-            );
-        }
-
-        // mDNS responder already broadcasts on startup and every 30 seconds
-        // Controllers should see our operational service (_matter._tcp) and initiate CASE
-        info!("Subscription resumption ready - controllers will initiate CASE on mDNS discovery");
+        // No subscriptions means no controllers to wait for - just pend forever
+        core::future::pending::<()>().await;
+        return Ok(());
     }
 
-    // Never return - pend forever so we don't terminate the select loop
-    core::future::pending::<()>().await;
-    Ok(())
+    let num_subs = subs.len();
+    info!(
+        "Session recovery: {} controller(s) need to reconnect",
+        num_subs
+    );
+    info!("  Controllers will timeout on old sessions and re-establish via CASE");
+    info!("  Expected recovery time: 1-3 minutes");
+
+    for sub in &subs {
+        info!(
+            "  Waiting for: fabric={}, peer_node={:016x}",
+            sub.fabric_idx, sub.peer_node_id
+        );
+    }
+
+    // Wait for the first persist notification, which indicates a CASE session was established
+    // (rs-matter calls notify_persist() after successful CASE handshake)
+    matter.wait_persist().await;
+
+    info!("Session recovery: Controller reconnected! Device is now available.");
+    info!("  New CASE session established, subscriptions will be re-created by controller");
+
+    // Continue waiting for any additional persist events (more controllers reconnecting)
+    // This loop never returns - it just logs reconnection events
+    loop {
+        matter.wait_persist().await;
+        info!("Session recovery: Additional session activity detected");
+    }
 }

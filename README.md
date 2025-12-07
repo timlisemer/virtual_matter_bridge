@@ -249,7 +249,98 @@ When commissioning starts, you should see PASE packets from the phone to your PC
 
 ### Known Issues
 
-None currently.
+**MRP Retransmission Error on Stale Subscriptions:**
+
+After device restart, an error may appear in logs:
+```
+ERROR rs_matter::transport::mrp] Packet SID:XXXX,CTR:XXXXI|R,EID:1,PROTO:1,OP:5: Too many retransmissions. Giving up
+WARN  rs_matter::dm] Got status response InvalidSubscription, aborting interaction
+```
+
+This occurs because the device attempts to send subscription updates to controllers using stale session information from before the restart. The error is harmless - the subscription system correctly detects the invalid state and aborts. Controllers will re-establish subscriptions after CASE session recovery completes.
+
+### Session Recovery After Device Restart
+
+This section documents the investigation into Matter session recovery behavior after device restart.
+
+#### Problem Statement
+
+After restarting the Matter device, Home Assistant (and other controllers) temporarily cannot communicate with the device. The device logs show:
+```
+>>RCV UDP [...] [SID:4,CTR:8a285e3][(encoded)]
+      => No valid session found, dropping
+```
+
+The controller keeps trying to use the old encrypted session (SID:4), but the device lost all session keys on restart.
+
+#### Investigation Summary
+
+**Initial Hypothesis: ICD Check-In Protocol**
+
+We initially implemented the ICD (Intermittently Connected Device) Management cluster with Check-In Protocol support (feature_map: 0x01), believing this would help controllers recover sessions after restart. This included:
+- RegisterClient, UnregisterClient, StayActiveRequest commands
+- Check-In message encryption and sending
+- ICD state persistence
+
+**Finding: ICD Check-In is for sleepy devices, not session recovery**
+
+The ICD Check-In Protocol is designed for battery-powered devices that sleep and wake periodically. It is NOT the mechanism for session recovery after restart of always-on devices. Home Assistant does not call RegisterClient for normal devices.
+
+**Root Cause Analysis**
+
+Through code analysis of rs-matter, we discovered:
+
+1. **rs-matter silently drops packets for unknown sessions** - No response is sent to inform the controller the session is invalid. The packet is logged with a warning and discarded (`src/transport.rs:558-569`).
+
+2. **No explicit session invalidation signal** - Per Matter spec, devices could send a Status Report with `SESSION_NOT_FOUND`, but rs-matter does not implement this.
+
+3. **Controllers rely on MRP timeout** - The Message Reliability Protocol (MRP) has exponential backoff with 10 retries. Controllers must exhaust all retries before concluding the session is dead.
+
+4. **mDNS has no restart indicator** - Operational mDNS records (`_matter._tcp`) contain only a dummy TXT record. There is no Session Active Counter or similar field that changes on restart to signal controllers.
+
+**MRP Retry Timing (from rs-matter source)**
+
+```rust
+const MRP_BASE_RETRY_INTERVAL_MS: u16 = 300;  // 300ms base
+const MRP_MAX_TRANSMISSIONS: u16 = 10;         // 10 retries max
+const MRP_BACKOFF_BASE: (u64, u64) = (16, 10); // 1.6x exponential backoff
+```
+
+With exponential backoff and jitter, MRP exhausts all retries in approximately **15-30 seconds**.
+
+#### Actual Behavior (Verified)
+
+Testing confirmed that session recovery **works correctly** - it just requires patience:
+
+| Event | Timestamp | Notes |
+|-------|-----------|-------|
+| Device restart | 22:46:30 | Matter stack initializes |
+| Controller retries old session | 22:46:30 - 22:47:17 | "No valid session found, dropping" messages |
+| MRP gives up | ~22:48:57 | "Too many retransmissions. Giving up" |
+| InvalidSubscription response | 22:48:57 | Stale subscription correctly aborted |
+| **CASE re-established** | ~22:49:09 | New session created |
+| **Device available in HA** | 22:49:09 | OnOff commands work |
+
+**Timeline: ~2.5 minutes from restart to full recovery**
+
+The recovery time includes:
+- MRP retry exhaustion (~30 seconds per stale session)
+- Controller's internal cooldown before CASE retry
+- CASE handshake completion
+- Subscription re-establishment
+
+#### Conclusions
+
+1. **Session recovery works as designed** - No code changes needed for basic functionality
+2. **ICD Check-In is unnecessary** for always-on devices - The implementation should be simplified
+3. **User experience could be improved** with better logging to indicate recovery is in progress
+4. **The MRP error is expected** - It indicates the system correctly handling stale state
+
+#### Recommendations
+
+1. **Add informative logging** - Log when waiting for controllers to reconnect and when recovery completes
+2. **Remove ICD Check-In dead code** - Simplify to basic ICD Management without Check-In protocol
+3. **Document expected recovery time** - Users should expect 1-3 minutes for full recovery after restart
 
 ### Previous Issues (Resolved)
 
