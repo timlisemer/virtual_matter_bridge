@@ -24,8 +24,9 @@ pub struct DirectMdnsResponder<'a> {
     matter: &'a Matter<'a>,
     interface_name: &'static str,
     daemon: Option<ServiceDaemon>,
-    /// Maps MatterMdnsService to the full service name registered with mdns-sd
-    registered: HashMap<MatterMdnsService, String>,
+    /// Maps MatterMdnsService to all registered service fullnames (main service + subtypes)
+    /// This ensures proper cleanup of subtype services when deregistering
+    registered: HashMap<MatterMdnsService, Vec<String>>,
 }
 
 impl<'a> DirectMdnsResponder<'a> {
@@ -107,15 +108,39 @@ impl<'a> DirectMdnsResponder<'a> {
             // properly sequenced
             let mut services = HashSet::new();
             self.matter.mdns_services(|service| {
+                // Log discriminator for debugging multi-admin commissioning
+                match &service {
+                    MatterMdnsService::Commissionable { id, discriminator } => {
+                        log::info!(
+                            "mDNS service from rs-matter: Commissionable id={:016X} D={}",
+                            id,
+                            discriminator
+                        );
+                    }
+                    MatterMdnsService::Commissioned {
+                        compressed_fabric_id,
+                        node_id,
+                    } => {
+                        log::info!(
+                            "mDNS service from rs-matter: Commissioned fabric={:016X} node={:016X}",
+                            compressed_fabric_id,
+                            node_id
+                        );
+                    }
+                }
                 services.insert(service);
                 Ok(())
             })?;
 
-            log::info!("mDNS services changed, updating...");
+            log::info!(
+                "mDNS services changed: {} current services, {} registered",
+                services.len(),
+                self.registered.len()
+            );
 
             self.update_services(&services).await?;
 
-            log::info!("mDNS services updated");
+            log::info!("mDNS services update complete");
         }
     }
 
@@ -131,9 +156,25 @@ impl<'a> DirectMdnsResponder<'a> {
         // Register new services
         for service in services {
             if !self.registered.contains_key(service) {
-                log::info!("Registering mDNS service: {:?}", service);
-                let full_name = self.register(daemon, service).await?;
-                self.registered.insert(service.clone(), full_name);
+                // Log discriminator for new registrations
+                match service {
+                    MatterMdnsService::Commissionable { discriminator, .. } => {
+                        log::info!(
+                            "Registering NEW mDNS service: Commissionable D={}",
+                            discriminator
+                        );
+                    }
+                    MatterMdnsService::Commissioned { .. } => {
+                        log::info!("Registering NEW mDNS service: Commissioned (operational)");
+                    }
+                }
+                let full_names = self.register(daemon, service).await?;
+                log::info!(
+                    "Registered {} service(s) for {:?}",
+                    full_names.len(),
+                    service
+                );
+                self.registered.insert(service.clone(), full_names);
             }
         }
 
@@ -146,25 +187,47 @@ impl<'a> DirectMdnsResponder<'a> {
             .collect();
 
         for service in to_remove {
-            if let Some(full_name) = self.registered.remove(&service) {
-                log::info!("Deregistering mDNS service: {:?}", service);
-                match daemon.unregister(&full_name) {
-                    Ok(receiver) => {
-                        // Wait for unregister to complete to avoid "sending on closed channel" errors
-                        match receiver.recv() {
-                            Ok(status) => {
-                                log::debug!("Unregistered '{}': {:?}", full_name, status)
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "Failed to receive unregister status for '{}': {:?}",
-                                    full_name,
-                                    e
-                                )
+            if let Some(full_names) = self.registered.remove(&service) {
+                // Log discriminator for deregistrations
+                match &service {
+                    MatterMdnsService::Commissionable { discriminator, .. } => {
+                        log::info!(
+                            "Deregistering mDNS service: Commissionable D={} ({} service(s))",
+                            discriminator,
+                            full_names.len()
+                        );
+                    }
+                    MatterMdnsService::Commissioned { .. } => {
+                        log::info!(
+                            "Deregistering mDNS service: Commissioned ({} service(s))",
+                            full_names.len()
+                        );
+                    }
+                }
+
+                // Unregister ALL services (main + subtypes)
+                for full_name in full_names {
+                    log::debug!("Unregistering '{}'", full_name);
+                    match daemon.unregister(&full_name) {
+                        Ok(receiver) => {
+                            // Wait for unregister to complete to avoid "sending on closed channel" errors
+                            match receiver.recv() {
+                                Ok(status) => {
+                                    log::debug!("Unregistered '{}': {:?}", full_name, status)
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "Failed to receive unregister status for '{}': {:?}",
+                                        full_name,
+                                        e
+                                    )
+                                }
                             }
                         }
+                        Err(e) => {
+                            log::warn!("Failed to unregister service '{}': {:?}", full_name, e)
+                        }
                     }
-                    Err(e) => log::warn!("Failed to unregister service '{}': {:?}", full_name, e),
                 }
             }
         }
@@ -176,12 +239,15 @@ impl<'a> DirectMdnsResponder<'a> {
         &self,
         daemon: &ServiceDaemon,
         matter_service: &MatterMdnsService,
-    ) -> Result<String, Error> {
+    ) -> Result<Vec<String>, Error> {
         Service::async_call_with(
             matter_service,
             self.matter.dev_det(),
             self.matter.port(),
             async |service| {
+                // Track all registered service fullnames for proper cleanup
+                let mut registered_names = Vec::new();
+
                 // Get addresses for our interface
                 let (ipv4_addrs, ipv6_addrs) = get_interface_addresses(self.interface_name)?;
 
@@ -201,10 +267,10 @@ impl<'a> DirectMdnsResponder<'a> {
                     ipv6_addrs.len()
                 );
                 for addr in &ipv4_addrs {
-                    log::info!("  IPv4: {}", addr);
+                    log::debug!("  IPv4: {}", addr);
                 }
                 for addr in &ipv6_addrs {
-                    log::info!("  IPv6: {}", addr);
+                    log::debug!("  IPv6: {}", addr);
                 }
 
                 // Build TXT properties
@@ -248,32 +314,33 @@ impl<'a> DirectMdnsResponder<'a> {
                 // Get the full name for later unregistration
                 let full_name = service_info.get_fullname().to_string();
 
-                // Register the service
+                // Register the main service
                 daemon.register(service_info).map_err(|e| {
                     log::error!("Failed to register mDNS service: {:?}", e);
                     rs_matter::error::ErrorCode::MdnsError
                 })?;
 
                 log::info!(
-                    "mDNS service registered: {} (fullname: {})",
+                    "mDNS main service registered: {} (fullname: {})",
                     service.name,
                     full_name
                 );
+                registered_names.push(full_name);
 
                 // Register subtypes (e.g., _L3840 for discriminator lookup)
                 // Matter controllers query for discriminator subtypes like:
                 // _L3840._sub._matterc._udp.local.
+                log::info!(
+                    "  Registering {} subtypes: {:?}",
+                    service.service_subtypes.len(),
+                    service.service_subtypes
+                );
+
                 for subtype in service.service_subtypes {
                     let subtype_service_type = format!(
                         "{}._sub.{}.local.",
                         subtype,                  // e.g., "_L3840"
                         service.service_protocol  // e.g., "_matterc._udp"
-                    );
-
-                    log::info!(
-                        "  Registering subtype: {} -> {}",
-                        subtype,
-                        subtype_service_type
                     );
 
                     let subtype_info = ServiceInfo::new(
@@ -285,17 +352,30 @@ impl<'a> DirectMdnsResponder<'a> {
                         properties.as_slice(),
                     )
                     .map_err(|e| {
-                        log::error!("Failed to create subtype ServiceInfo: {:?}", e);
+                        log::error!(
+                            "Failed to create subtype ServiceInfo for {}: {:?}",
+                            subtype,
+                            e
+                        );
                         rs_matter::error::ErrorCode::MdnsError
                     })?;
+
+                    let subtype_full_name = subtype_info.get_fullname().to_string();
 
                     daemon.register(subtype_info).map_err(|e| {
-                        log::error!("Failed to register mDNS subtype service: {:?}", e);
+                        log::error!("Failed to register mDNS subtype {}: {:?}", subtype, e);
                         rs_matter::error::ErrorCode::MdnsError
                     })?;
+
+                    log::info!(
+                        "  Subtype registered: {} (fullname: {})",
+                        subtype,
+                        subtype_full_name
+                    );
+                    registered_names.push(subtype_full_name);
                 }
 
-                Ok(full_name)
+                Ok(registered_names)
             },
         )
         .await
