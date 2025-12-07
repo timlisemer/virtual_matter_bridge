@@ -6,7 +6,7 @@
 use std::net::UdpSocket;
 
 use async_io::Async;
-use log::{debug, error, info, trace};
+use log::{debug, error, trace};
 
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::transport::network::{Address, NetworkReceive, NetworkSend};
@@ -25,7 +25,7 @@ impl<'a> LoggingUdpSocket<'a> {
 
 impl NetworkSend for LoggingUdpSocket<'_> {
     async fn send_to(&mut self, data: &[u8], addr: Address) -> Result<(), Error> {
-        info!("[UDP TX] {} bytes to {}", data.len(), addr);
+        debug!("[UDP TX] {} bytes to {}", data.len(), addr);
 
         // Log first 64 bytes of payload at trace level
         let preview_len = data.len().min(64);
@@ -41,7 +41,7 @@ impl NetworkSend for LoggingUdpSocket<'_> {
 
 impl NetworkReceive for LoggingUdpSocket<'_> {
     async fn wait_available(&mut self) -> Result<(), Error> {
-        debug!("[UDP] Waiting for packet...");
+        trace!("[UDP] Waiting for packet...");
         Async::<UdpSocket>::readable(self.inner).await?;
         Ok(())
     }
@@ -51,7 +51,7 @@ impl NetworkReceive for LoggingUdpSocket<'_> {
 
         match &result {
             Ok((len, addr)) => {
-                info!("[UDP RX] {} bytes from {}", len, addr);
+                debug!("[UDP RX] {} bytes from {}", len, addr);
 
                 // Log first 64 bytes of payload at trace level
                 let preview_len = (*len).min(64);
@@ -70,7 +70,7 @@ impl NetworkReceive for LoggingUdpSocket<'_> {
 // Implement traits for &LoggingUdpSocket to match rs-matter's &Async<UdpSocket> pattern
 impl NetworkSend for &LoggingUdpSocket<'_> {
     async fn send_to(&mut self, data: &[u8], addr: Address) -> Result<(), Error> {
-        info!("[UDP TX] {} bytes to {}", data.len(), addr);
+        debug!("[UDP TX] {} bytes to {}", data.len(), addr);
 
         // Log first 64 bytes of payload at trace level
         let preview_len = data.len().min(64);
@@ -86,9 +86,9 @@ impl NetworkSend for &LoggingUdpSocket<'_> {
 
 impl NetworkReceive for &LoggingUdpSocket<'_> {
     async fn wait_available(&mut self) -> Result<(), Error> {
-        info!("[UDP] wait_available called, waiting for packet...");
+        trace!("[UDP] wait_available called, waiting for packet...");
         Async::<UdpSocket>::readable(self.inner).await?;
-        info!("[UDP] wait_available: socket is readable!");
+        trace!("[UDP] wait_available: socket is readable!");
         Ok(())
     }
 
@@ -97,7 +97,7 @@ impl NetworkReceive for &LoggingUdpSocket<'_> {
 
         match &result {
             Ok((len, addr)) => {
-                info!("[UDP RX] {} bytes from {}", len, addr);
+                debug!("[UDP RX] {} bytes from {}", len, addr);
 
                 // Log first 64 bytes of payload at trace level
                 let preview_len = (*len).min(64);

@@ -4,8 +4,11 @@
 //! including Thread mesh addresses that may be visible via mDNS reflection but don't
 //! belong to this host.
 
+use std::collections::HashSet;
+use std::env;
 use std::ffi::CString;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::OnceLock;
 
 use nix::ifaddrs::getifaddrs;
 use nix::net::if_::{InterfaceFlags, if_nametoindex};
@@ -14,6 +17,96 @@ use nix::sys::socket::{AddressFamily, SockaddrLike};
 use rs_matter::dm::clusters::gen_diag::{InterfaceTypeEnum, NetifDiag, NetifInfo};
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::error::Error;
+
+/// Environment variable to override the network interface
+const MATTER_INTERFACE_ENV: &str = "MATTER_INTERFACE";
+
+/// Cached detected interface name
+static DETECTED_INTERFACE: OnceLock<String> = OnceLock::new();
+
+/// Get the network interface to use for Matter communications.
+///
+/// Priority:
+/// 1. `MATTER_INTERFACE` environment variable
+/// 2. Auto-detected first non-loopback interface with IPv4
+///
+/// Returns the interface name or panics if no suitable interface is found.
+pub fn get_interface_name() -> &'static str {
+    DETECTED_INTERFACE.get_or_init(|| {
+        // Check environment variable first
+        if let Ok(iface) = env::var(MATTER_INTERFACE_ENV)
+            && !iface.is_empty()
+        {
+            log::info!(
+                "Using network interface from {}: {}",
+                MATTER_INTERFACE_ENV,
+                iface
+            );
+            return iface;
+        }
+
+        // Auto-detect interface
+        match detect_interface() {
+            Some(iface) => {
+                log::info!("Auto-detected network interface: {}", iface);
+                iface
+            }
+            None => {
+                panic!(
+                    "No suitable network interface found. Set {} environment variable to specify one.",
+                    MATTER_INTERFACE_ENV
+                );
+            }
+        }
+    })
+}
+
+/// Detect the first suitable network interface.
+///
+/// Returns the first non-loopback interface that has an IPv4 address and is running.
+fn detect_interface() -> Option<String> {
+    let Ok(addrs) = getifaddrs() else {
+        return None;
+    };
+
+    // Collect interfaces that have IPv4 addresses and are running
+    let mut candidates: HashSet<String> = HashSet::new();
+
+    for ifaddr in addrs {
+        let name = &ifaddr.interface_name;
+
+        // Skip loopback
+        if ifaddr.flags.contains(InterfaceFlags::IFF_LOOPBACK) {
+            continue;
+        }
+
+        // Must be running
+        if !ifaddr.flags.contains(InterfaceFlags::IFF_RUNNING) {
+            continue;
+        }
+
+        // Must have an IPv4 address (ensures it's a "real" interface)
+        if let Some(addr) = &ifaddr.address
+            && let Some(family) = addr.family()
+            && family == AddressFamily::Inet
+        {
+            candidates.insert(name.clone());
+        }
+    }
+
+    // Prefer common interface name patterns
+    let preferred_prefixes = ["eth", "enp", "eno", "ens", "wlan", "wlp"];
+    for prefix in preferred_prefixes {
+        for candidate in &candidates {
+            if candidate.starts_with(prefix) {
+                return Some(candidate.clone());
+            }
+        }
+    }
+
+    // Fall back to any candidate
+    candidates.into_iter().next()
+}
 
 /// A network interface implementation that only returns addresses from a specific interface.
 ///
@@ -29,6 +122,15 @@ impl FilteredNetifs {
     /// Create a new FilteredNetifs that only reports addresses from the given interface.
     pub const fn new(interface_name: &'static str) -> Self {
         Self { interface_name }
+    }
+
+    /// Create a new FilteredNetifs using auto-detection or environment variable override.
+    ///
+    /// This is the preferred way to create a FilteredNetifs instance.
+    pub fn auto_detect() -> Self {
+        Self {
+            interface_name: get_interface_name(),
+        }
     }
 }
 

@@ -127,12 +127,22 @@ Configuration is loaded from environment variables with sensible defaults:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `MATTER_INTERFACE` | Auto-detected | Network interface for Matter/mDNS (e.g., `eth0`, `enp14s0`) |
 | `RTSP_URL` | `rtsp://username:password@10.0.0.38:554/h264Preview_01_main` | Camera RTSP stream URL |
 | `RTSP_USERNAME` | - | RTSP authentication username |
 | `RTSP_PASSWORD` | - | RTSP authentication password |
 | `DEVICE_NAME` | `Virtual Doorbell` | Matter device name |
 | `MATTER_DISCRIMINATOR` | `3840` | Matter pairing discriminator |
 | `MATTER_PASSCODE` | `20202021` | Matter pairing passcode |
+
+### Network Interface Auto-Detection
+
+If `MATTER_INTERFACE` is not set, the application automatically detects the first suitable network interface by looking for:
+1. Non-loopback interfaces that are running
+2. Interfaces with an IPv4 address
+3. Preferring common interface name patterns (`eth*`, `enp*`, `eno*`, `ens*`, `wlan*`, `wlp*`)
+
+The detected interface is logged at startup. If auto-detection fails, set `MATTER_INTERFACE` explicitly.
 
 ## NixOS Configuration
 
@@ -204,7 +214,7 @@ If the device is not discoverable:
 
 1. **Check for port conflicts**: `ss -ulnp | grep 5353` - ensure no other process is binding to port 5353
 2. **Verify firewall**: Ensure UDP ports 5353 (mDNS) and 5540 (Matter) are open
-3. **Check interface name**: The application is configured to use `enp14s0` - update `src/matter/stack.rs` if your interface differs
+3. **Check interface**: Set `MATTER_INTERFACE` environment variable if auto-detection picks the wrong interface
 
 ### Debugging Commissioning
 
@@ -278,7 +288,7 @@ This application uses **direct mDNS multicast** via the `mdns-sd` crate. This ap
 2. **No daemon dependency**: Works without requiring any system mDNS daemon.
 
 The `DirectMdnsResponder` in `src/matter/mdns.rs`:
-- Binds exclusively to the configured network interface (e.g., `enp14s0`)
+- Binds exclusively to the auto-detected or configured network interface
 - Filters out link-local IPv6 addresses (fe80::/10)
 - Filters out Thread mesh addresses (fd00::/8 ULAs)
 - Registers Matter commissioning services with proper TXT records
@@ -294,6 +304,21 @@ make build
 
 # Run in development
 make run
+
+# Run with debug logging (shows UDP packet flow)
+make run-debug
+
+# Run with trace logging (shows full packet dumps)
+make run-trace
+```
+
+### Environment Configuration
+
+Copy `.env.example` to `.env` and adjust values:
+
+```bash
+cp .env.example .env
+# Edit .env with your settings
 ```
 
 ## Dependencies
@@ -339,6 +364,28 @@ The following commissioning steps complete successfully:
 After commissioning, the device transitions from commissionable (`_matterc._udp`) to operational (`_matter._tcp`) mDNS service.
 
 **Note**: Currently uses test device credentials from rs-matter. Production deployments should use proper device attestation certificates. Fabric credentials are stored in memory and lost on restart.
+
+## Known Limitations
+
+The following features are currently stub implementations or use placeholder values:
+
+### Matter Device Model
+- **Device Type**: Uses `DEV_TYPE_ON_OFF_LIGHT` as placeholder (not video doorbell device type)
+- **Device Type ID**: `0x0012` is a placeholder value (needs actual Matter 1.5 spec value)
+- **Clusters**: Not connected to rs-matter data model - no actual attribute/command handlers
+
+### RTSP Streaming
+- **RTSP Client**: Stub that returns fake 1920x1080@30fps stream info
+- **Frame Generation**: Produces placeholder frames (zeros) instead of actual video data
+
+### WebRTC
+- **WebRTC Bridge**: Frame forwarding is a no-op (counts frames but doesn't transmit)
+- **SDP Generation**: Uses placeholder values for ICE credentials and DTLS fingerprints
+- **Peer Connections**: Not implemented
+
+### Testing/Debug Code
+- **Doorbell Simulation**: Automatically triggers doorbell press every 30 seconds for testing
+- **Fabric Persistence**: Credentials stored in memory only (lost on restart)
 
 ## License
 

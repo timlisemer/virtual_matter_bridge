@@ -1,5 +1,6 @@
 use std::net::UdpSocket;
 use std::pin::pin;
+use std::sync::OnceLock;
 
 use embassy_futures::select::{select, select3};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -9,7 +10,7 @@ use static_cell::StaticCell;
 
 use super::logging_udp::LoggingUdpSocket;
 use super::mdns::DirectMdnsResponder;
-use super::netif::FilteredNetifs;
+use super::netif::{FilteredNetifs, get_interface_name};
 use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::clusters::net_comm::NetworkType;
@@ -55,10 +56,13 @@ const NODE: Node<'static> = Node {
     ],
 };
 
-/// The network interface to use for Matter communications.
-/// Override with MATTER_INTERFACE env var (e.g., "eth0", "enp14s0").
-/// This filters out Thread mesh addresses that may be visible via mDNS reflection.
-static NETIFS: FilteredNetifs = FilteredNetifs::new("enp14s0");
+/// Cached network interface filter (lazily initialized)
+static NETIFS: OnceLock<FilteredNetifs> = OnceLock::new();
+
+/// Get the network interface filter, auto-detecting if necessary.
+fn get_netifs() -> &'static FilteredNetifs {
+    NETIFS.get_or_init(FilteredNetifs::auto_detect)
+}
 
 /// Build the data model handler
 fn dm_handler<'a>(matter: &'a Matter<'a>) -> impl AsyncMetadata + AsyncHandler + 'a {
@@ -66,7 +70,7 @@ fn dm_handler<'a>(matter: &'a Matter<'a>) -> impl AsyncMetadata + AsyncHandler +
         NODE,
         endpoints::with_eth(
             &(),
-            &NETIFS,
+            get_netifs(),
             matter.rand(),
             endpoints::with_sys(
                 &false,
@@ -228,7 +232,7 @@ pub async fn run_matter_stack(_config: &MatterConfig) -> Result<(), Error> {
 /// Run mDNS for device discovery using direct multicast (bypasses broken Avahi D-Bus)
 async fn run_mdns(matter: &Matter<'_>) -> Result<(), Error> {
     // Use the same interface as FilteredNetifs
-    const INTERFACE: &str = "enp14s0";
-
-    DirectMdnsResponder::new(matter, INTERFACE).run().await
+    DirectMdnsResponder::new(matter, get_interface_name())
+        .run()
+        .await
 }
