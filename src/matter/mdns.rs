@@ -5,7 +5,7 @@
 //! handles multicast directly.
 
 use std::collections::{HashMap, HashSet};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
 use nix::ifaddrs::getifaddrs;
@@ -72,6 +72,25 @@ impl<'a> DirectMdnsResponder<'a> {
             );
             rs_matter::error::ErrorCode::MdnsError
         })?;
+
+        // Drop link-local addresses for this interface to avoid mdns-sd errors
+        // when it attempts AAAA responses on fe80:: entries.
+        for ll in get_link_local_ipv6_addresses(self.interface_name) {
+            if let Err(e) = daemon.disable_interface(IfKind::Addr(IpAddr::V6(ll))) {
+                log::warn!(
+                    "Failed to disable link-local IPv6 {} on '{}': {:?}",
+                    ll,
+                    self.interface_name,
+                    e
+                );
+            } else {
+                log::info!(
+                    "Disabled link-local IPv6 {} on interface '{}'",
+                    ll,
+                    self.interface_name
+                );
+            }
+        }
 
         log::info!(
             "Direct mDNS responder initialized on interface '{}'",
@@ -259,7 +278,6 @@ impl<'a> DirectMdnsResponder<'a> {
 ///
 /// Filters out:
 /// - Link-local IPv6 addresses (fe80::/10)
-/// - Thread mesh addresses (fd00::/8 ULAs from Thread network)
 fn get_interface_addresses(interface_name: &str) -> Result<(Vec<Ipv4Addr>, Vec<Ipv6Addr>), Error> {
     let addrs = getifaddrs().map_err(|e| {
         log::error!("Failed to get interface addresses: {:?}", e);
@@ -288,7 +306,7 @@ fn get_interface_addresses(interface_name: &str) -> Result<(Vec<Ipv4Addr>, Vec<I
                         let ip = sockaddr.ip();
 
                         // Filter out problematic addresses
-                        if !is_link_local_ipv6(&ip) && !is_thread_mesh_address(&ip) {
+                        if !is_link_local_ipv6(&ip) {
                             ipv6.push(ip);
                         }
                     }
@@ -301,19 +319,35 @@ fn get_interface_addresses(interface_name: &str) -> Result<(Vec<Ipv4Addr>, Vec<I
     Ok((ipv4, ipv6))
 }
 
+/// Collect link-local IPv6 addresses (fe80::/10) for an interface.
+fn get_link_local_ipv6_addresses(interface_name: &str) -> Vec<Ipv6Addr> {
+    let Ok(addrs) = getifaddrs() else {
+        return Vec::new();
+    };
+
+    let mut ipv6 = Vec::new();
+    for ifaddr in addrs {
+        if ifaddr.interface_name != interface_name {
+            continue;
+        }
+
+        if let Some(addr) = ifaddr.address
+            && let Some(family) = addr.family()
+            && family == AddressFamily::Inet6
+            && let Some(sockaddr) = addr.as_sockaddr_in6()
+        {
+            let ip = sockaddr.ip();
+            if is_link_local_ipv6(&ip) {
+                ipv6.push(ip);
+            }
+        }
+    }
+
+    ipv6
+}
+
 /// Check if an IPv6 address is link-local (fe80::/10)
 fn is_link_local_ipv6(addr: &Ipv6Addr) -> bool {
     let octets = addr.octets();
     octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80
-}
-
-/// Check if an IPv6 address is a Thread mesh address (fd00::/8 ULA)
-///
-/// Thread uses Unique Local Addresses in the fd00::/8 range.
-/// These addresses are internal to the Thread mesh and shouldn't be advertised
-/// for Matter over IP.
-fn is_thread_mesh_address(addr: &Ipv6Addr) -> bool {
-    let segments = addr.segments();
-    // fd00::/8 - Unique Local Addresses used by Thread
-    segments[0] & 0xff00 == 0xfd00
 }
