@@ -352,6 +352,47 @@ This result appeared right after phone started commissioning process, confirming
 14:10:57 ERROR commission_with_code: Commission with code failed for node 41.
 ```
 
+**Test 2 (2025-12-07): Enhanced discriminator logging**
+
+Added detailed discriminator logging to track the exact flow. Results:
+
+```
+13:52:54.658Z - Initial: Registered D=3840 with 5 services (main + 4 subtypes)
+13:53:14.002Z - Phone commissioned: Added Commissioned fabric service (operational)
+13:53:15.121Z - PASE Window closed, deregistering D=3840 (5 services)
+13:53:15.121Z - ERROR x4: cannot find service (subtype deregistration issue)
+13:53:25.319Z - User clicked "continue" on phone -> Enhanced window opened with D=323
+13:53:25.320Z - Registered D=323 with 5 services (main + 4 subtypes)
+14:53:37.441Z - HA starts commissioning with Node ID 42
+14:54:07.446Z - HA: Discovery timed out (30 seconds)
+```
+
+**New discovery: mdns-sd subtype fullname bug**
+
+All subtypes return the SAME fullname as the main service:
+```
+mDNS main service registered: FC277D4F3EA030F1 (fullname: FC277D4F3EA030F1._matterc._udp.local.)
+Subtype registered: _L3840 (fullname: FC277D4F3EA030F1._matterc._udp.local.)  <-- SAME!
+Subtype registered: _S15 (fullname: FC277D4F3EA030F1._matterc._udp.local.)    <-- SAME!
+Subtype registered: _V65521P32769 (fullname: FC277D4F3EA030F1._matterc._udp.local.)  <-- SAME!
+Subtype registered: _CM (fullname: FC277D4F3EA030F1._matterc._udp.local.)  <-- SAME!
+```
+
+The `mdns-sd` crate's `ServiceInfo::get_fullname()` returns the same name for subtypes as the main service. Consequence:
+1. We store 5 identical fullnames in our deregistration map
+2. First unregister succeeds (removes the service)
+3. Remaining 4 unregisters fail with "cannot find such service"
+4. **Subtypes may not be properly cleaned up in mdns-sd's internal state**
+
+**python-matter-server logs during failure:**
+
+```
+2024-12-07 14:53:37.440 [I][CTL  ] Commissioning node 42 with node ID 0x000000000000002A
+2024-12-07 14:53:37.441 [I][DL   ] Found device at address: 10.0.0.3:5540
+2024-12-07 14:54:07.446 [E][DIS  ] OperationalDeviceProxy::OnDeviceConnectFailed: Discovery timed out
+2024-12-07 14:54:07.447 [E][CTL  ] Secure Pairing Failed
+```
+
 **Debugging commands for this issue:**
 
 Browse for Matter commissioning services (run before `make run`, keep running):
