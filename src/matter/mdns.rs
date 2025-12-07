@@ -129,8 +129,23 @@ impl<'a> DirectMdnsResponder<'a> {
         for service in to_remove {
             if let Some(full_name) = self.registered.remove(&service) {
                 log::info!("Deregistering mDNS service: {:?}", service);
-                if let Err(e) = daemon.unregister(&full_name) {
-                    log::warn!("Failed to unregister service '{}': {:?}", full_name, e);
+                match daemon.unregister(&full_name) {
+                    Ok(receiver) => {
+                        // Wait for unregister to complete to avoid "sending on closed channel" errors
+                        match receiver.recv() {
+                            Ok(status) => {
+                                log::debug!("Unregistered '{}': {:?}", full_name, status)
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to receive unregister status for '{}': {:?}",
+                                    full_name,
+                                    e
+                                )
+                            }
+                        }
+                    }
+                    Err(e) => log::warn!("Failed to unregister service '{}': {:?}", full_name, e),
                 }
             }
         }
