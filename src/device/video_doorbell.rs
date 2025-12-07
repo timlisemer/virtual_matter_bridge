@@ -1,7 +1,6 @@
 use crate::clusters::camera_av_stream_mgmt::{
     CameraAvStreamMgmtCluster, Features as CameraFeatures, StreamUsage, VideoCodec, VideoResolution,
 };
-use crate::clusters::chime::{ChimeCluster, ChimeSound};
 use crate::clusters::webrtc_transport_provider::{
     Features as WebRtcFeatures, IceServer, WebRtcTransportProviderCluster,
 };
@@ -23,7 +22,6 @@ pub struct VideoDoorbellDevice {
     /// Cluster instances use sync RwLock for Matter handler compatibility
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
     webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
-    chime_cluster: Arc<SyncRwLock<ChimeCluster>>,
     /// Bridge uses async RwLock for async I/O operations
     bridge: Arc<AsyncRwLock<Option<RtspWebRtcBridge>>>,
     doorbell_pressed: Arc<AtomicBool>,
@@ -67,25 +65,10 @@ impl VideoDoorbellDevice {
             .collect();
         let webrtc_cluster = WebRtcTransportProviderCluster::new(webrtc_features, ice_servers);
 
-        // Initialize chime cluster
-        let chimes: Vec<ChimeSound> = config
-            .doorbell
-            .installed_chimes
-            .iter()
-            .map(|c| ChimeSound {
-                chime_id: c.id,
-                name: c.name.clone(),
-            })
-            .collect();
-        let mut chime_cluster = ChimeCluster::with_sounds(chimes);
-        chime_cluster.set_enabled(config.doorbell.chime_enabled);
-        let _ = chime_cluster.set_selected_chime(config.doorbell.selected_chime);
-
         Self {
             config,
             camera_cluster: Arc::new(SyncRwLock::new(camera_cluster)),
             webrtc_cluster: Arc::new(SyncRwLock::new(webrtc_cluster)),
-            chime_cluster: Arc::new(SyncRwLock::new(chime_cluster)),
             bridge: Arc::new(AsyncRwLock::new(None)),
             doorbell_pressed: Arc::new(AtomicBool::new(false)),
             running: Arc::new(AtomicBool::new(false)),
@@ -168,13 +151,7 @@ impl VideoDoorbellDevice {
 
         self.doorbell_pressed.store(true, Ordering::SeqCst);
 
-        // Play chime sound
-        {
-            let chime = self.chime_cluster.read();
-            if let Err(e) = chime.play_chime_sound() {
-                log::warn!("Failed to play chime: {}", e);
-            }
-        }
+        // TODO: Send Matter doorbell press event notification to controllers
 
         // Reset doorbell state after a short delay
         let doorbell_pressed = self.doorbell_pressed.clone();
@@ -279,11 +256,6 @@ impl VideoDoorbellDevice {
     /// Get WebRTC cluster for external access
     pub fn webrtc_cluster(&self) -> Arc<SyncRwLock<WebRtcTransportProviderCluster>> {
         self.webrtc_cluster.clone()
-    }
-
-    /// Get chime cluster for external access
-    pub fn chime_cluster(&self) -> Arc<SyncRwLock<ChimeCluster>> {
-        self.chime_cluster.clone()
     }
 
     /// Check if device is running

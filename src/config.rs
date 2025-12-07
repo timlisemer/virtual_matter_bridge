@@ -40,15 +40,7 @@ pub struct TurnServer {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoorbellConfig {
-    pub chime_enabled: bool,
-    pub selected_chime: u8,
-    pub installed_chimes: Vec<ChimeSound>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChimeSound {
-    pub id: u8,
-    pub name: String,
+    // Doorbell configuration (chime removed - handled by controller)
 }
 
 impl Default for Config {
@@ -71,24 +63,7 @@ impl Default for Config {
                 turn_servers: vec![],
                 max_concurrent_streams: 4,
             },
-            doorbell: DoorbellConfig {
-                chime_enabled: true,
-                selected_chime: 0,
-                installed_chimes: vec![
-                    ChimeSound {
-                        id: 0,
-                        name: "Default".to_string(),
-                    },
-                    ChimeSound {
-                        id: 1,
-                        name: "Classic".to_string(),
-                    },
-                    ChimeSound {
-                        id: 2,
-                        name: "Modern".to_string(),
-                    },
-                ],
-            },
+            doorbell: DoorbellConfig {},
         }
     }
 }

@@ -42,7 +42,6 @@ This project implements a general-purpose virtual Matter bridge that can:
 | --------------------------- | -------- | -------------- | ------------------------------------------------ |
 | Camera AV Stream Management | `0x0551` | ✅ Implemented | Video/audio stream allocation, codec negotiation |
 | WebRTC Transport Provider   | `0x0553` | ✅ Implemented | WebRTC session management, SDP/ICE handling      |
-| Chime                       | `0x0556` | ✅ Implemented | Doorbell sounds configuration and playback       |
 
 ## Project Status
 
@@ -65,13 +64,12 @@ This project implements a general-purpose virtual Matter bridge that can:
 - [x] **Cluster Handlers (stub implementations)**
   - Camera AV Stream Management (0x0551)
   - WebRTC Transport Provider (0x0553)
-  - Chime (0x0556)
 
 ### Current Issue
 
 Home Assistant shows **"This device has no entities"** because:
 
-- Current clusters (Camera AV, WebRTC, Chime) are protocol-level, not user-facing
+- Current clusters (Camera AV, WebRTC) are protocol-level, not user-facing
 - No standard clusters like OnOff that HA recognizes as entities
 - Cluster handlers return placeholder values
 
@@ -85,8 +83,7 @@ Home Assistant shows **"This device has no entities"** because:
 
 - [ ] Add OnOff cluster to video doorbell endpoint (exposes armed/disarmed state)
 - [ ] Implement Software Diagnostics cluster (0x46) on endpoint 0
-- [ ] Connect Chime cluster to actual doorbell state
-- [ ] Fix device type registration (correct Matter 1.5 video doorbell ID)
+- [ ] ~~Fix device type registration (correct Matter 1.5 video doorbell ID)~~ - Skipped: Home Assistant does not support Matter 1.5 camera device types yet
 
 ### Phase 2: Multi-Device Bridge Architecture
 
@@ -405,12 +402,39 @@ The following features are currently stub implementations or use placeholder val
 
 ## Open TODOs and Placeholders (code-level)
 
-- Matter stack (`src/matter/stack.rs`): still uses test device credentials and includes a TODO to build proper static device info from `MatterConfig`.
-- Matter thread setup (`src/main.rs`): cluster handlers are seeded with placeholder dataver randomness (`Dataver::new(0)`); switch to real rs-matter datavers.
-- Video doorbell device type (`src/device/video_doorbell.rs`): device type ID is a placeholder; replace with the official Matter 1.5 video doorbell ID.
-- RTSP client (`src/rtsp/client.rs`): connection/streaming are mocked; implement retina-based RTSP connect/stream (RTP/RTCP, depacketize H.264/AAC, invoke callbacks with real frames).
-- RTSP ↔ WebRTC bridge (`src/rtsp/webrtc_bridge.rs`): TODO to set up WebRTC peer connection, media tracks, and actually forward video/audio frames instead of counting bytes.
-- WebRTC cluster SDP (`src/clusters/webrtc_transport_provider.rs`): ICE ufrag/pwd and DTLS fingerprint are placeholder strings in offers/answers; replace with real credentials/certs from the WebRTC stack.
+### Matter Stack
+
+- **Test credentials** (`src/matter/stack.rs`): Uses test device credentials; TODO to build proper static device info from `MatterConfig`.
+- **Dataver placeholder** (`src/main.rs`): Cluster handlers use `Dataver::new(0)` placeholder randomness; switch to real rs-matter datavers.
+- **Device type ID** (`src/device/video_doorbell.rs`): Device type ID `0x0012` is a placeholder; replace with official Matter 1.5 video doorbell ID.
+- **Persistence path** (`src/matter/stack.rs:117`): Hardcoded to `.config/virtual-matter-bridge`; should respect `XDG_CONFIG_HOME` or be configurable.
+- **Network change detection** (`src/matter/netif.rs:242-246`): `wait_changed()` just waits forever; no actual network change detection implemented.
+
+### RTSP Streaming
+
+- **RTSP client** (`src/rtsp/client.rs`): Connection/streaming are mocked; implement retina-based RTSP connect/stream (RTP/RTCP, depacketize H.264/AAC, invoke callbacks with real frames).
+- **Stream info hardcoded** (`src/rtsp/client.rs:96-102`): Returns fake 1920x1080@30fps regardless of actual camera capabilities.
+
+### WebRTC
+
+- **WebRTC bridge** (`src/rtsp/webrtc_bridge.rs`): TODO to set up WebRTC peer connection, media tracks, and actually forward video/audio frames instead of counting bytes.
+- **SDP placeholders** (`src/clusters/webrtc_transport_provider.rs`): ICE ufrag/pwd and DTLS fingerprint are placeholder strings; replace with real credentials/certs from WebRTC stack.
+- **Unused session_id** (`src/clusters/webrtc_transport_provider.rs:246-250`): `_session_id` parameter not used in SDP generation; should generate session-specific SDP.
+
+### Camera Cluster
+
+- **Video parameters hardcoded** (`src/clusters/camera_av_stream_mgmt.rs`): Resolutions, bitrates, sample rates hardcoded; should match actual camera capabilities.
+- **Snapshot commands** (`src/matter/clusters/camera_av_stream_mgmt.rs:997-1004`): `SnapshotStreamAllocate`/`Deallocate` return `InvalidAction` error; not implemented.
+- **Silent no-op commands**: `SetStreamPriorities`, `SetViewport` accept but do nothing.
+
+### Doorbell
+
+- **Doorbell event notification** (`src/main.rs:78`, `src/device/video_doorbell.rs:154`): Sets atomic flag but doesn't send Matter event notification to controllers.
+- **Empty DoorbellConfig** (`src/config.rs:41-44`): Struct has no fields; either add doorbell-specific config or remove.
+
+### Error Handling
+
+- **Panic on missing interface** (`src/matter/netif.rs:54-59`): Panics if no suitable network interface found; could return `Result` for graceful handling.
 
 ## License
 

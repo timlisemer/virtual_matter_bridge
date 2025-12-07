@@ -41,9 +41,6 @@ pub enum BridgeError {
     #[error("Doorbell press simulation failed: {0}")]
     DoorbellSimulationFailed(String),
 
-    #[error("Chime playback failed: {0}")]
-    ChimePlaybackFailed(String),
-
     #[error(transparent)]
     IoError(#[from] std::io::Error),
 

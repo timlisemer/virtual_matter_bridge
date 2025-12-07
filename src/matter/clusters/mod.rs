@@ -8,10 +8,8 @@
 //! outside the rs-matter crate.
 
 pub mod camera_av_stream_mgmt;
-pub mod chime;
 pub mod webrtc_transport_provider;
 
 // Re-export for convenience
 pub use camera_av_stream_mgmt::CameraAvStreamMgmtHandler;
-pub use chime::ChimeHandler;
 pub use webrtc_transport_provider::WebRtcTransportProviderHandler;

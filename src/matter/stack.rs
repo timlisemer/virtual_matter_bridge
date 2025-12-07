@@ -14,12 +14,11 @@ use nix::sys::socket::{AddressFamily, SockaddrLike};
 use socket2::{Domain, Protocol, Socket, Type};
 use static_cell::StaticCell;
 
-use super::clusters::{CameraAvStreamMgmtHandler, ChimeHandler, WebRtcTransportProviderHandler};
+use super::clusters::{CameraAvStreamMgmtHandler, WebRtcTransportProviderHandler};
 use super::device_types::DEV_TYPE_VIDEO_DOORBELL;
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
 use crate::clusters::camera_av_stream_mgmt::CameraAvStreamMgmtCluster;
-use crate::clusters::chime::ChimeCluster;
 use crate::clusters::webrtc_transport_provider::WebRtcTransportProviderCluster;
 use parking_lot::RwLock as SyncRwLock;
 use rs_matter::dm::IMBuffer;
@@ -200,15 +199,14 @@ const NODE: Node<'static> = Node {
     endpoints: &[
         // Endpoint 0: Root endpoint (required for all Matter devices)
         endpoints::root_endpoint(NetworkType::Ethernet),
-        // Endpoint 1: Video Doorbell with camera, WebRTC, and chime clusters
+        // Endpoint 1: Video Doorbell with camera and WebRTC clusters
         Endpoint {
             id: 1,
             device_types: devices!(DEV_TYPE_VIDEO_DOORBELL),
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
                 CameraAvStreamMgmtHandler::CLUSTER,
-                WebRtcTransportProviderHandler::CLUSTER,
-                ChimeHandler::CLUSTER
+                WebRtcTransportProviderHandler::CLUSTER
             ),
         },
     ],
@@ -227,7 +225,6 @@ fn dm_handler<'a>(
     matter: &'a Matter<'a>,
     camera_handler: &'a CameraAvStreamMgmtHandler,
     webrtc_handler: &'a WebRtcTransportProviderHandler,
-    chime_handler: &'a ChimeHandler,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -251,10 +248,6 @@ fn dm_handler<'a>(
                     .chain(
                         EpClMatcher::new(Some(1), Some(WebRtcTransportProviderHandler::CLUSTER.id)),
                         Async(webrtc_handler),
-                    )
-                    .chain(
-                        EpClMatcher::new(Some(1), Some(ChimeHandler::CLUSTER.id)),
-                        Async(chime_handler),
                     ),
             ),
         ),
@@ -276,7 +269,6 @@ pub async fn run_matter_stack(
     _config: &MatterConfig,
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
     webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
-    chime_cluster: Arc<SyncRwLock<ChimeCluster>>,
 ) -> Result<(), Error> {
     info!("Initializing Matter stack...");
 
@@ -400,10 +392,9 @@ pub async fn run_matter_stack(
         CameraAvStreamMgmtHandler::new(Dataver::new_rand(matter.rand()), camera_cluster);
     let webrtc_handler =
         WebRtcTransportProviderHandler::new(Dataver::new_rand(matter.rand()), webrtc_cluster);
-    let chime_handler = ChimeHandler::new(Dataver::new_rand(matter.rand()), chime_cluster);
 
     // Create the data model with our video doorbell handlers
-    let handler = dm_handler(matter, &camera_handler, &webrtc_handler, &chime_handler);
+    let handler = dm_handler(matter, &camera_handler, &webrtc_handler);
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 
     // Create the responder that handles incoming Matter requests

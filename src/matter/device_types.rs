@@ -13,7 +13,6 @@ use rs_matter::dm::DeviceType;
 /// Required clusters:
 /// - CameraAvStreamManagement (0x0551)
 /// - WebRTCTransportProvider (0x0553)
-/// - Chime (0x0556)
 /// - Descriptor (standard)
 pub const DEV_TYPE_VIDEO_DOORBELL: DeviceType = DeviceType {
     dtype: 0x0012,

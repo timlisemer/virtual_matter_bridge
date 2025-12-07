@@ -46,7 +46,6 @@ async fn main() {
     // These need to be created before spawning the Matter thread
     let camera_cluster = device.read().camera_cluster();
     let webrtc_cluster = device.read().webrtc_cluster();
-    let chime_cluster = device.read().chime_cluster();
 
     // Initialize the device - use spawn_blocking since initialize() is async but uses sync locks internally
     let device_for_init = device.clone();
@@ -72,19 +71,11 @@ async fn main() {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            // Check if running and get chime cluster reference
-            let (is_running, chime_cluster) = {
-                let device_lock = device_clone.read();
-                (device_lock.is_running(), device_lock.chime_cluster())
-            };
+            let is_running = device_clone.read().is_running();
 
             if is_running {
                 info!("Simulating doorbell press...");
-                // Play chime directly since we have the cluster reference
-                let chime = chime_cluster.read();
-                if let Err(e) = chime.play_chime_sound() {
-                    log::warn!("Failed to simulate doorbell press: {}", e);
-                }
+                // TODO: Send Matter doorbell press event notification
             } else {
                 break;
             }
@@ -104,7 +95,6 @@ async fn main() {
                 &matter_config,
                 camera_cluster,
                 webrtc_cluster,
-                chime_cluster,
             )) {
                 log::error!("Matter stack error: {:?}", e);
             }
