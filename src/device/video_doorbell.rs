@@ -152,7 +152,9 @@ impl VideoDoorbellDevice {
 
     /// Simulate a doorbell press
     pub async fn press_doorbell(&self) -> Result<()> {
-        log::info!("Doorbell pressed!");
+        log::info!(
+            "[Sim] Doorbell button pressed (state=pressed for 2s, would trigger Matter event notification)"
+        );
 
         self.doorbell_pressed.store(true, Ordering::SeqCst);
 
@@ -163,6 +165,7 @@ impl VideoDoorbellDevice {
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             doorbell_pressed.store(false, Ordering::SeqCst);
+            log::info!("[Sim] Doorbell button released (state=idle)");
         });
 
         Ok(())

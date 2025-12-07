@@ -75,8 +75,17 @@ async fn main() {
             let is_running = device_clone.read().is_running();
 
             if is_running {
-                info!("Simulating doorbell press...");
+                // Use spawn_blocking since press_doorbell is async but device uses sync RwLock
                 // TODO: Send Matter doorbell press event notification
+                let device_for_press = device_clone.clone();
+                if let Err(e) = tokio::task::spawn_blocking(move || {
+                    let device_lock = device_for_press.read();
+                    futures_lite::future::block_on(device_lock.press_doorbell())
+                })
+                .await
+                {
+                    log::error!("Doorbell press simulation failed: {}", e);
+                }
             } else {
                 break;
             }

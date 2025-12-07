@@ -81,7 +81,7 @@ Home Assistant shows **"This device has no entities"** because:
 
 **Goal:** Make the existing video doorbell show entities in Home Assistant
 
-- [ ] Add OnOff cluster to video doorbell endpoint (exposes armed/disarmed state)
+- [x] Add OnOff cluster to video doorbell endpoint (exposes armed/disarmed state)
 - [ ] Implement Software Diagnostics cluster (0x46) on endpoint 0
 - [ ] ~~Fix device type registration (correct Matter 1.5 video doorbell ID)~~ - Skipped: Home Assistant does not support Matter 1.5 camera device types yet
 
