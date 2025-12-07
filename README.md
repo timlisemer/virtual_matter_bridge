@@ -1,35 +1,39 @@
 # Virtual Matter Bridge
 
-A Rust application that exposes RTSP camera streams as Matter 1.5 video doorbell devices, enabling integration with Matter-compatible smart home ecosystems like Apple Home, Google Home, and Amazon Alexa.
+A Rust application that creates virtual Matter devices from unstructured data sources, enabling integration with Matter-compatible smart home ecosystems like Apple Home, Google Home, Amazon Alexa, and Home Assistant.
 
 ## Overview
 
-This project implements a virtual Matter bridge that:
+This project implements a general-purpose virtual Matter bridge that can:
 
-- Connects to RTSP camera streams (e.g., IP cameras, NVRs)
-- Exposes them as Matter 1.5 Video Doorbell devices
-- Provides WebRTC-based video streaming to Matter controllers
-- Simulates doorbell press events with configurable chime sounds
+- Accept unstructured data from various sources (RTSP streams, HTTP endpoints, MQTT, etc.)
+- Process and transform it as needed
+- Export it as Matter devices to any Matter controller
+
+### Current Focus
+
+- **Video Doorbell**: RTSP camera streams exposed as Matter 1.5 video doorbell devices
+- **On/Off Switches**: Boolean data sources exposed as Matter switches (planned)
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌──────────────────────┐     ┌─────────────────┐
-│   RTSP Camera   │────▶│  Virtual Matter      │────▶│ Matter Controller│
-│  (IP Camera)    │     │      Bridge          │     │ (Apple/Google/  │
-└─────────────────┘     │                      │     │  Amazon)        │
-                        │  ┌────────────────┐  │     └─────────────────┘
-                        │  │ Video Doorbell │  │
-                        │  │    Device      │  │
-                        │  └───────┬────────┘  │
-                        │          │           │
-                        │  ┌───────┴────────┐  │
-                        │  │   Clusters:    │  │
-                        │  │ • Camera AV    │  │
-                        │  │ • WebRTC       │  │
-                        │  │ • Chime        │  │
-                        │  └────────────────┘  │
-                        └──────────────────────┘
+┌─────────────────┐     ┌──────────────────────────────┐     ┌───────────────────┐
+│  Data Sources   │     │     Virtual Matter Bridge    │     │ Matter Controller │
+│                 │     │                              │     │  (Apple/Google/   │
+│ • RTSP Cameras  │────▶│  ┌────────────────────────┐  │────▶│   Amazon/HA)      │
+│ • HTTP APIs     │     │  │   Endpoint 0 (Root)    │  │     └───────────────────┘
+│ • MQTT Topics   │     │  └────────────────────────┘  │
+│ • Files         │     │  ┌────────────────────────┐  │
+│ • Commands      │     │  │ Endpoint 1 (Aggregator)│  │
+└─────────────────┘     │  └────────────────────────┘  │
+                        │  ┌────────────────────────┐  │
+                        │  │ Endpoint 2+ (Devices)  │  │
+                        │  │ • Video Doorbell       │  │
+                        │  │ • On/Off Switch        │  │
+                        │  │ • Sensors (planned)    │  │
+                        │  └────────────────────────┘  │
+                        └──────────────────────────────┘
 ```
 
 ## Matter 1.5 Clusters Implemented
@@ -47,80 +51,86 @@ This project implements a virtual Matter bridge that:
 - [x] Project structure following Rust best practices
 - [x] Configuration system with environment variable overrides
 - [x] Error handling with `thiserror`
-- [x] **Camera AV Stream Management Cluster**
-  - Video stream allocation/deallocation
-  - Audio stream allocation/deallocation
-  - Codec support (H.264, HEVC, VVC, AV1, Opus, AAC)
-  - Resolution and framerate configuration
-  - Stream usage types (LiveView, Recording, Analysis)
-- [x] **WebRTC Transport Provider Cluster**
-  - Session creation and management
-  - SDP offer/answer generation
-  - ICE candidate handling
-  - STUN/TURN server configuration
-- [x] **Chime Cluster**
-  - Configurable chime sounds
-  - Enable/disable functionality
-  - Play chime command
-- [x] **RTSP Client** (stub implementation)
-  - URL parsing and validation
-  - Connection state management
-  - Stream info retrieval
-- [x] **RTSP to WebRTC Bridge** (stub implementation)
-  - Session management
-  - Frame forwarding infrastructure
-  - Statistics tracking
-- [x] **Video Doorbell Device**
-  - Combines all clusters
-  - Doorbell press simulation
-  - Device initialization
 - [x] **Matter Stack Integration - Commissioning**
   - Basic Matter stack initialization with `rs-matter`
   - UDP transport on port 5540 (IPv6 dual-stack)
   - Commissioning window (PASE) with QR code and manual pairing code
-  - mDNS advertisement via direct multicast (`mdns-sd` crate)
+  - mDNS advertisement via `BuiltinMdnsResponder`
   - PASE handshake (successful key exchange)
   - Certificate chain requests (DAC, PAI)
   - Attestation and CSR generation
   - NOC (Node Operational Certificate) installation
-  - Fabric creation and operational discovery (\_matter.\_tcp)
+  - Fabric creation and operational discovery (`_matter._tcp`)
+  - Multi-admin commissioning (phone + Home Assistant)
+- [x] **Cluster Handlers (stub implementations)**
+  - Camera AV Stream Management (0x0551)
+  - WebRTC Transport Provider (0x0553)
+  - Chime (0x0556)
 
-### In Progress
+### Current Issue
 
-- [ ] **Matter Stack Integration - Data Model**
-  - [ ] Connect clusters to `rs-matter` data model
-  - [ ] Implement cluster attribute read/write handlers
-  - [ ] Implement cluster command handlers
-  - [ ] Device attestation with production credentials
-  - [ ] Fabric management persistence (currently in-memory)
-- [ ] **Actual RTSP Streaming**
-  - Integration with `retina` crate for H.264/AAC depacketization
-  - RTP/RTCP handling
-  - Frame extraction and buffering
+Home Assistant shows **"This device has no entities"** because:
 
-### Planned
+- Current clusters (Camera AV, WebRTC, Chime) are protocol-level, not user-facing
+- No standard clusters like OnOff that HA recognizes as entities
+- Cluster handlers return placeholder values
 
-- [ ] **WebRTC Integration**
-  - Peer connection establishment with `webrtc` crate
-  - Media track creation
-  - ICE connectivity checks
-  - DTLS-SRTP encryption
-- [ ] **H.264 to WebRTC Transcoding**
-  - RTP packetization for WebRTC
-  - Timestamp synchronization
-  - Keyframe detection and handling
-- [ ] **Persistent Storage**
-  - Fabric credentials
-  - Device configuration
-- [ ] **Two-Way Audio** (optional)
-  - Microphone input from Matter controller
-  - Audio forwarding to RTSP camera (if supported)
-- [ ] **Motion Detection Events**
-  - Zone management cluster
-  - Event notifications to Matter controllers
-- [ ] **Snapshot Support**
-  - Still image capture
-  - Snapshot stream management
+---
+
+## Development Roadmap
+
+### Phase 1: Fix Current Video Doorbell (Make Entities Appear)
+
+**Goal:** Make the existing video doorbell show entities in Home Assistant
+
+- [ ] Add OnOff cluster to video doorbell endpoint (exposes armed/disarmed state)
+- [ ] Implement Software Diagnostics cluster (0x46) on endpoint 0
+- [ ] Connect Chime cluster to actual doorbell state
+- [ ] Fix device type registration (correct Matter 1.5 video doorbell ID)
+
+### Phase 2: Multi-Device Bridge Architecture
+
+**Goal:** Refactor to support multiple device types
+
+- [ ] Create device abstraction layer (trait for generic Matter device)
+- [ ] Implement configuration system for devices (YAML/TOML config file)
+- [ ] Create endpoint manager (dynamic endpoint allocation)
+- [ ] Implement proper Matter bridge topology (`DEV_TYPE_AGGREGATOR` + `DEV_TYPE_BRIDGED_NODE`)
+
+### Phase 3: On/Off Switch Device Type
+
+**Goal:** Add support for simple On/Off switches
+
+- [ ] Create OnOffSwitch device type using rs-matter's `OnOffHandler`
+- [ ] Create data source abstraction (trait for boolean data sources)
+- [ ] Implement data source backends: HTTP endpoint, MQTT, file, command execution
+- [ ] Add configuration for switch devices (source URL, polling interval, read-only mode)
+
+### Phase 4: Complete Video Doorbell Implementation
+
+**Goal:** Make video doorbell fully functional with real streaming
+
+- [ ] Implement actual RTSP client (`retina` crate for H.264/AAC)
+- [ ] Implement WebRTC peer connections (`webrtc` crate)
+- [ ] Bridge RTSP to WebRTC (RTP packetization, timestamp sync)
+- [ ] Implement doorbell press events (Matter event notifications, external trigger API)
+
+### Phase 5: Additional Device Types
+
+**Goal:** Expand supported device types
+
+- [ ] Sensor devices (temperature, humidity, contact, occupancy)
+- [ ] Dimmable light/switch (LevelControl cluster)
+- [ ] Thermostat (if needed)
+
+### Phase 6: Production Readiness
+
+**Goal:** Make the bridge production-ready
+
+- [ ] Device attestation (replace test credentials with production DAC)
+- [ ] Persistent storage (fabric credentials, device configuration)
+- [ ] Error handling and recovery (reconnection logic, graceful degradation)
+- [ ] Logging and monitoring (structured logging, health endpoints)
 
 ## Configuration
 
@@ -148,11 +158,11 @@ The detected interface is logged at startup. If auto-detection fails, set `MATTE
 
 ## NixOS Configuration
 
-This application uses direct mDNS multicast via the `mdns-sd` crate. Disable Avahi to avoid conflicts:
+This application uses rs-matter's built-in mDNS responder. Disable Avahi to avoid conflicts:
 
 ```nix
 {
-  # Disable Avahi - we use direct mDNS instead
+  # Disable Avahi - we use rs-matter's built-in mDNS
   services.avahi.enable = false;
 
   # Open firewall for Matter
@@ -289,6 +299,7 @@ This application uses rs-matter's built-in `BuiltinMdnsResponder` for mDNS servi
 3. **IPv6 source address binding**: The Matter UDP socket binds to the specific IPv6 address advertised in mDNS, ensuring response packets have the correct source address for multi-admin commissioning.
 
 The network interface implementation:
+
 - Filters to a single auto-detected or configured network interface
 - Filters out link-local IPv6 addresses (fe80::/10)
 - Filters out Thread mesh addresses (fd00::/8 ULAs)
@@ -325,8 +336,7 @@ cp .env.example .env
 
 Key dependencies:
 
-- **rs-matter** - Rust Matter protocol implementation (git: main branch)
-- **mdns-sd** - Direct mDNS multicast for service discovery
+- **rs-matter** - Rust Matter protocol implementation (git: main branch, includes mDNS)
 - **webrtc** - WebRTC stack for video streaming
 - **retina** - RTSP client for camera connections
 - **tokio** - Async runtime
