@@ -47,6 +47,10 @@ impl<'a> DirectMdnsResponder<'a> {
     ///
     /// This will register and deregister mDNS services as the Matter stack
     /// opens/closes commissioning windows.
+    ///
+    /// IMPORTANT: This must run in the same async executor as the Matter stack
+    /// to avoid RefCell borrow conflicts. rs-matter uses RefCell for internal state,
+    /// which is not thread-safe.
     pub async fn run(&mut self) -> Result<(), Error> {
         // Create the mDNS daemon
         let daemon = ServiceDaemon::new().map_err(|e| {
@@ -79,21 +83,14 @@ impl<'a> DirectMdnsResponder<'a> {
         loop {
             self.matter.wait_mdns().await;
 
-            // Try to get mDNS services with retry logic.
-            // rs-matter uses RefCell for internal state (pase_mgr, fabric_mgr), which
-            // is not thread-safe. When the main thread signals mDNS update needed,
-            // it may still hold a borrow. We retry with delays to avoid BorrowMutError.
-            let services = match self.get_mdns_services_with_retry() {
-                Ok(services) => services,
-                Err(e) => {
-                    log::error!(
-                        "Failed to get mDNS services after retries: {:?}. \
-                         mDNS update skipped, will retry on next notification.",
-                        e
-                    );
-                    continue;
-                }
-            };
+            // Direct call to mdns_services - safe because we're in the same
+            // async executor as the Matter stack, so RefCell borrows are
+            // properly sequenced
+            let mut services = HashSet::new();
+            self.matter.mdns_services(|service| {
+                services.insert(service);
+                Ok(())
+            })?;
 
             log::info!("mDNS services changed, updating...");
 
@@ -101,73 +98,6 @@ impl<'a> DirectMdnsResponder<'a> {
 
             log::info!("mDNS services updated");
         }
-    }
-
-    /// Get mDNS services with retry logic to handle RefCell borrow conflicts.
-    ///
-    /// rs-matter uses RefCell internally, which can panic with BorrowMutError if
-    /// the main thread is still holding a borrow when we try to access services.
-    /// This method retries with increasing delays to work around the race condition.
-    fn get_mdns_services_with_retry(&self) -> Result<HashSet<MatterMdnsService>, Error> {
-        const MAX_RETRIES: u32 = 5;
-        const INITIAL_DELAY_MS: u64 = 50;
-
-        for attempt in 0..MAX_RETRIES {
-            if attempt > 0 {
-                let delay = INITIAL_DELAY_MS * (1 << attempt); // Exponential backoff
-                log::debug!(
-                    "Retrying mDNS services fetch (attempt {}/{}, delay {}ms)",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    delay
-                );
-                std::thread::sleep(std::time::Duration::from_millis(delay));
-            }
-
-            // Use catch_unwind to handle RefCell BorrowMutError panics gracefully
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut services = HashSet::new();
-                self.matter.mdns_services(|service| {
-                    services.insert(service);
-                    Ok(())
-                })?;
-                Ok::<_, Error>(services)
-            }));
-
-            match result {
-                Ok(Ok(services)) => return Ok(services),
-                Ok(Err(e)) => {
-                    log::warn!(
-                        "mdns_services() returned error on attempt {}: {:?}",
-                        attempt + 1,
-                        e
-                    );
-                }
-                Err(panic_info) => {
-                    // Extract panic message if possible
-                    let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        (*s).to_string()
-                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "unknown panic".to_string()
-                    };
-
-                    log::warn!(
-                        "mdns_services() panicked on attempt {} (RefCell borrow conflict): {}",
-                        attempt + 1,
-                        panic_msg
-                    );
-                }
-            }
-        }
-
-        log::error!(
-            "Failed to get mDNS services after {} attempts due to RefCell borrow conflicts. \
-             This is a known limitation of rs-matter's thread-unsafe RefCell usage.",
-            MAX_RETRIES
-        );
-        Err(rs_matter::error::ErrorCode::MdnsError.into())
     }
 
     async fn update_services(

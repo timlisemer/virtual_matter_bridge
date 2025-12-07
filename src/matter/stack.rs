@@ -2,7 +2,7 @@ use std::net::UdpSocket;
 use std::pin::pin;
 use std::sync::OnceLock;
 
-use embassy_futures::select::{select, select3};
+use embassy_futures::select::{select, select4};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use log::{error, info};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -216,22 +216,11 @@ pub async fn run_matter_stack(
     let logging_socket = LoggingUdpSocket::new(&socket);
     let mut transport = pin!(matter.run(&logging_socket, &logging_socket));
 
-    // Run mDNS in a separate thread - mdns-sd's daemon blocks async_io's reactor
-    // when run in the same async context
-    //
-    // SAFETY: matter lives for 'static (in StaticCell) and the mDNS thread
-    // only reads from it. The thread will be terminated when the process exits.
-    let matter_addr = matter as *const Matter<'_> as usize;
-    std::thread::Builder::new()
-        .name("mdns".into())
-        .spawn(move || {
-            let matter: &Matter<'_> = unsafe { &*(matter_addr as *const Matter<'_>) };
-            if let Err(e) = futures_lite::future::block_on(run_mdns(matter)) {
-                log::error!("mDNS error: {:?}", e);
-            }
-        })
-        .expect("Failed to spawn mDNS thread");
-    info!("mDNS responder started on separate thread");
+    // Create mDNS responder - runs in the same async executor as Matter stack
+    // This avoids RefCell borrow conflicts that occur when mDNS runs in a separate thread
+    // (mdns-sd's ServiceDaemon spawns its own internal thread for multicast I/O)
+    let mut mdns_responder = DirectMdnsResponder::new(matter, get_interface_name());
+    let mut mdns = pin!(mdns_responder.run());
 
     // Run the responder
     let mut respond = pin!(responder.run::<4, 4>());
@@ -239,10 +228,11 @@ pub async fn run_matter_stack(
     // Run data model background job (handles subscriptions)
     let mut dm_job = pin!(dm.run());
 
-    // Run all components concurrently
-    // Note: mDNS runs in its own thread to avoid blocking async_io reactor
-    let result = select3(
+    // Run all components concurrently in the same async executor
+    // mDNS is included here to avoid RefCell borrow conflicts with Matter's internal state
+    let result = select4(
         &mut transport,
+        &mut mdns,
         select(&mut respond, &mut dm_job).coalesce(),
         // Placeholder for future persistence
         core::future::pending::<Result<(), Error>>(),
@@ -256,12 +246,4 @@ pub async fn run_matter_stack(
     }
 
     Ok(())
-}
-
-/// Run mDNS for device discovery using direct multicast (bypasses broken Avahi D-Bus)
-async fn run_mdns(matter: &Matter<'_>) -> Result<(), Error> {
-    // Use the same interface as FilteredNetifs
-    DirectMdnsResponder::new(matter, get_interface_name())
-        .run()
-        .await
 }
