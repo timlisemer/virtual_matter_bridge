@@ -82,7 +82,7 @@ Home Assistant shows **"This device has no entities"** because:
 **Goal:** Make the existing video doorbell show entities in Home Assistant
 
 - [x] Add OnOff cluster to video doorbell endpoint (exposes armed/disarmed state)
-- [ ] Implement Software Diagnostics cluster (0x46) on endpoint 0
+- [x] Implement Software Diagnostics cluster (0x46) on endpoint 0
 - [ ] ~~Fix device type registration (correct Matter 1.5 video doorbell ID)~~ - Skipped: Home Assistant does not support Matter 1.5 camera device types yet
 
 ### Phase 2: Multi-Device Bridge Architecture
@@ -248,17 +248,7 @@ When commissioning starts, you should see PASE packets from the phone to your PC
 
 ### Known Issues
 
-**Software Diagnostics Cluster Not Implemented (cluster 0x46):**
-
-Home Assistant queries for cluster 70 (0x46 = Software Diagnostics) on endpoint 0, which is not implemented:
-
-```
-Error processing attribute read: AttrStatus { path: AttrPath { endpoint: Some(0), cluster: Some(70), attr: Some(6) }, status: UnsupportedCluster }
-```
-
-This is non-fatal - HA continues to work but won't display software version info.
-
-**TODO:** Implement Software Diagnostics cluster on endpoint 0.
+None currently - Software Diagnostics cluster (0x46) has been implemented.
 
 ### Previous Issues (Resolved)
 

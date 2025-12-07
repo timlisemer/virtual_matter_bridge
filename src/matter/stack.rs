@@ -1,4 +1,6 @@
-use super::clusters::{CameraAvStreamMgmtHandler, WebRtcTransportProviderHandler};
+use super::clusters::{
+    CameraAvStreamMgmtHandler, SoftwareDiagHandler, WebRtcTransportProviderHandler,
+};
 use super::device_types::DEV_TYPE_VIDEO_DOORBELL;
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
@@ -227,6 +229,7 @@ fn dm_handler<'a>(
     camera_handler: &'a CameraAvStreamMgmtHandler,
     webrtc_handler: &'a WebRtcTransportProviderHandler,
     on_off_handler: &'a on_off::OnOffHandler<'a, &'a DoorbellOnOffHooks, NoLevelControl>,
+    software_diag_handler: &'a SoftwareDiagHandler,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -237,20 +240,29 @@ fn dm_handler<'a>(
             endpoints::with_sys(
                 &false,
                 matter.rand(),
-                // Chain handlers for endpoint 1 clusters
+                // Chain handlers for endpoint 0 (root) and endpoint 1 (video doorbell)
                 EmptyHandler
+                    // Endpoint 0: Software Diagnostics
+                    .chain(
+                        EpClMatcher::new(Some(0), Some(SoftwareDiagHandler::CLUSTER.id)),
+                        Async(software_diag_handler),
+                    )
+                    // Endpoint 1: Descriptor
                     .chain(
                         EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
                         Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
                     )
+                    // Endpoint 1: OnOff (armed/disarmed)
                     .chain(
                         EpClMatcher::new(Some(1), Some(DoorbellOnOffHooks::CLUSTER.id)),
                         on_off::HandlerAsyncAdaptor(on_off_handler),
                     )
+                    // Endpoint 1: Camera AV Stream Management
                     .chain(
                         EpClMatcher::new(Some(1), Some(CameraAvStreamMgmtHandler::CLUSTER.id)),
                         Async(camera_handler),
                     )
+                    // Endpoint 1: WebRTC Transport Provider
                     .chain(
                         EpClMatcher::new(Some(1), Some(WebRtcTransportProviderHandler::CLUSTER.id)),
                         Async(webrtc_handler),
@@ -408,8 +420,17 @@ pub async fn run_matter_stack(
         on_off_hooks.as_ref(),
     );
 
+    // Create Software Diagnostics handler for endpoint 0
+    let software_diag_handler = SoftwareDiagHandler::new(Dataver::new_rand(matter.rand()));
+
     // Create the data model with our video doorbell handlers
-    let handler = dm_handler(matter, &camera_handler, &webrtc_handler, &on_off_handler);
+    let handler = dm_handler(
+        matter,
+        &camera_handler,
+        &webrtc_handler,
+        &on_off_handler,
+        &software_diag_handler,
+    );
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 
     // Create the responder that handles incoming Matter requests
