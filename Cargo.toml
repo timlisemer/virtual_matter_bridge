@@ -66,6 +66,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Random generation (for session IDs, etc.)
 rand = "0.8"
 
+# Platform-specific directories (for config/data paths)
+dirs = "5"
+
 # UUID generation
 uuid = { version = "1", features = ["v4"] }
 

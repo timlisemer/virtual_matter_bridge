@@ -5,6 +5,7 @@ A Rust application that exposes RTSP camera streams as Matter 1.5 video doorbell
 ## Overview
 
 This project implements a virtual Matter bridge that:
+
 - Connects to RTSP camera streams (e.g., IP cameras, NVRs)
 - Exposes them as Matter 1.5 Video Doorbell devices
 - Provides WebRTC-based video streaming to Matter controllers
@@ -33,11 +34,11 @@ This project implements a virtual Matter bridge that:
 
 ## Matter 1.5 Clusters Implemented
 
-| Cluster | ID | Status | Description |
-|---------|-----|--------|-------------|
+| Cluster                     | ID       | Status         | Description                                      |
+| --------------------------- | -------- | -------------- | ------------------------------------------------ |
 | Camera AV Stream Management | `0x0551` | ✅ Implemented | Video/audio stream allocation, codec negotiation |
-| WebRTC Transport Provider | `0x0553` | ✅ Implemented | WebRTC session management, SDP/ICE handling |
-| Chime | `0x0556` | ✅ Implemented | Doorbell sounds configuration and playback |
+| WebRTC Transport Provider   | `0x0553` | ✅ Implemented | WebRTC session management, SDP/ICE handling      |
+| Chime                       | `0x0556` | ✅ Implemented | Doorbell sounds configuration and playback       |
 
 ## Project Status
 
@@ -82,7 +83,7 @@ This project implements a virtual Matter bridge that:
   - Certificate chain requests (DAC, PAI)
   - Attestation and CSR generation
   - NOC (Node Operational Certificate) installation
-  - Fabric creation and operational discovery (_matter._tcp)
+  - Fabric creation and operational discovery (\_matter.\_tcp)
 
 ### In Progress
 
@@ -125,19 +126,20 @@ This project implements a virtual Matter bridge that:
 
 Configuration is loaded from environment variables with sensible defaults:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MATTER_INTERFACE` | Auto-detected | Network interface for Matter/mDNS (e.g., `eth0`, `enp14s0`) |
-| `RTSP_URL` | `rtsp://username:password@10.0.0.38:554/h264Preview_01_main` | Camera RTSP stream URL |
-| `RTSP_USERNAME` | - | RTSP authentication username |
-| `RTSP_PASSWORD` | - | RTSP authentication password |
-| `DEVICE_NAME` | `Virtual Doorbell` | Matter device name |
-| `MATTER_DISCRIMINATOR` | `3840` | Matter pairing discriminator |
-| `MATTER_PASSCODE` | `20202021` | Matter pairing passcode |
+| Variable               | Default                                                      | Description                                                 |
+| ---------------------- | ------------------------------------------------------------ | ----------------------------------------------------------- |
+| `MATTER_INTERFACE`     | Auto-detected                                                | Network interface for Matter/mDNS (e.g., `eth0`, `enp14s0`) |
+| `RTSP_URL`             | `rtsp://username:password@10.0.0.38:554/h264Preview_01_main` | Camera RTSP stream URL                                      |
+| `RTSP_USERNAME`        | -                                                            | RTSP authentication username                                |
+| `RTSP_PASSWORD`        | -                                                            | RTSP authentication password                                |
+| `DEVICE_NAME`          | `Virtual Doorbell`                                           | Matter device name                                          |
+| `MATTER_DISCRIMINATOR` | `3840`                                                       | Matter pairing discriminator                                |
+| `MATTER_PASSCODE`      | `20202021`                                                   | Matter pairing passcode                                     |
 
 ### Network Interface Auto-Detection
 
 If `MATTER_INTERFACE` is not set, the application automatically detects the first suitable network interface by looking for:
+
 1. Non-loopback interfaces that are running
 2. Interfaces with an IPv4 address
 3. Preferring common interface name patterns (`eth*`, `enp*`, `eno*`, `ens*`, `wlan*`, `wlp*`)
@@ -219,15 +221,18 @@ If the device is not discoverable:
 ### Debugging Commissioning
 
 **Verify mDNS queries and responses:**
+
 ```bash
 sudo tcpdump -i enp14s0 -n port 5353 -vv
 ```
 
 When the phone scans for Matter devices, you should see:
+
 - Phone queries `_matterc._udp.local.` (PTR query)
 - PC responds with service info including `SRV tim-pc.local.:5540` and TXT records
 
 **Verify Matter UDP traffic on port 5540:**
+
 ```bash
 sudo tcpdump -i enp14s0 -n udp port 5540
 ```
@@ -288,6 +293,7 @@ This application uses **direct mDNS multicast** via the `mdns-sd` crate. This ap
 2. **No daemon dependency**: Works without requiring any system mDNS daemon.
 
 The `DirectMdnsResponder` in `src/matter/mdns.rs`:
+
 - Binds exclusively to the auto-detected or configured network interface
 - Filters out link-local IPv6 addresses (fe80::/10)
 - Filters out Thread mesh addresses (fd00::/8 ULAs)
@@ -324,6 +330,7 @@ cp .env.example .env
 ## Dependencies
 
 Key dependencies:
+
 - **rs-matter** - Rust Matter protocol implementation (git: main branch)
 - **mdns-sd** - Direct mDNS multicast for service discovery
 - **webrtc** - WebRTC stack for video streaming
@@ -342,6 +349,7 @@ Key dependencies:
 ## Matter Commissioning
 
 When the application starts, it displays:
+
 - A QR code for mobile app pairing
 - A setup code: `MT:-24J0AFN00KA064IJ3P0WISA0DK5N1K8SQ1RYCU1O0`
 - A manual pairing code: `3497-0112-332`
@@ -370,24 +378,29 @@ After commissioning, the device transitions from commissionable (`_matterc._udp`
 The following features are currently stub implementations or use placeholder values:
 
 ### Matter Device Model
+
 - **Device Type**: Uses `DEV_TYPE_ON_OFF_LIGHT` as placeholder (not video doorbell device type)
 - **Device Type ID**: `0x0012` is a placeholder value (needs actual Matter 1.5 spec value)
 - **Clusters**: Not connected to rs-matter data model - no actual attribute/command handlers
 
 ### RTSP Streaming
+
 - **RTSP Client**: Stub that returns fake 1920x1080@30fps stream info
 - **Frame Generation**: Produces placeholder frames (zeros) instead of actual video data
 
 ### WebRTC
+
 - **WebRTC Bridge**: Frame forwarding is a no-op (counts frames but doesn't transmit)
 - **SDP Generation**: Uses placeholder values for ICE credentials and DTLS fingerprints
 - **Peer Connections**: Not implemented
 
 ### Testing/Debug Code
+
 - **Doorbell Simulation**: Automatically triggers doorbell press every 30 seconds for testing
 - **Fabric Persistence**: Credentials stored in memory only (lost on restart)
 
 ## Open TODOs and Placeholders (code-level)
+
 - Matter stack (`src/matter/stack.rs`): still uses test device credentials and includes a TODO to build proper static device info from `MatterConfig`.
 - Matter thread setup (`src/main.rs`): cluster handlers are seeded with placeholder dataver randomness (`Dataver::new(0)`); switch to real rs-matter datavers.
 - Video doorbell device type (`src/device/video_doorbell.rs`): device type ID is a placeholder; replace with the official Matter 1.5 video doorbell ID.

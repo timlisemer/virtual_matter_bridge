@@ -1,6 +1,8 @@
+use std::fs;
 use std::net::UdpSocket;
+use std::path::PathBuf;
 use std::pin::pin;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use embassy_futures::select::{select, select4};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -13,6 +15,10 @@ use super::device_types::DEV_TYPE_VIDEO_DOORBELL;
 use super::logging_udp::LoggingUdpSocket;
 use super::mdns::DirectMdnsResponder;
 use super::netif::{FilteredNetifs, get_interface_name};
+use crate::clusters::camera_av_stream_mgmt::CameraAvStreamMgmtCluster;
+use crate::clusters::chime::ChimeCluster;
+use crate::clusters::webrtc_transport_provider::WebRtcTransportProviderCluster;
+use parking_lot::RwLock as SyncRwLock;
 use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::clusters::net_comm::NetworkType;
@@ -39,6 +45,86 @@ use crate::config::MatterConfig;
 static MATTER: StaticCell<Matter> = StaticCell::new();
 static BUFFERS: StaticCell<PooledBuffers<10, NoopRawMutex, IMBuffer>> = StaticCell::new();
 static SUBSCRIPTIONS: StaticCell<DefaultSubscriptions> = StaticCell::new();
+
+/// Directory for fabric persistence data
+const PERSIST_DIR: &str = ".config/virtual-matter-bridge";
+const FABRICS_FILE: &str = "fabrics.bin";
+
+/// Get the path to the fabrics persistence file
+fn get_fabrics_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(PERSIST_DIR).join(FABRICS_FILE))
+}
+
+/// Load fabrics from persistent storage
+fn load_fabrics(matter: &Matter) -> Result<bool, Error> {
+    let Some(path) = get_fabrics_path() else {
+        info!("Could not determine home directory for fabric persistence");
+        return Ok(false);
+    };
+
+    if !path.exists() {
+        info!("No persisted fabrics found at {:?}", path);
+        return Ok(false);
+    }
+
+    match fs::read(&path) {
+        Ok(data) => {
+            if data.is_empty() {
+                info!("Persisted fabrics file is empty");
+                return Ok(false);
+            }
+            match matter.load_fabrics(&data) {
+                Ok(()) => {
+                    info!("Loaded fabrics from {:?}", path);
+                    Ok(true)
+                }
+                Err(e) => {
+                    error!("Failed to parse persisted fabrics: {:?}", e);
+                    // Don't fail startup, just start fresh
+                    Ok(false)
+                }
+            }
+        }
+        Err(e) => {
+            error!("Failed to read fabrics file {:?}: {}", path, e);
+            Ok(false)
+        }
+    }
+}
+
+/// Save fabrics to persistent storage
+fn save_fabrics(matter: &Matter) -> Result<(), Error> {
+    let Some(path) = get_fabrics_path() else {
+        error!("Could not determine home directory for fabric persistence");
+        return Ok(());
+    };
+
+    // Ensure directory exists
+    if let Some(parent) = path.parent()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        error!("Failed to create persistence directory {:?}: {}", parent, e);
+        return Ok(());
+    }
+
+    // Store fabrics - use a reasonably large buffer
+    let mut buf = vec![0u8; 8192];
+    match matter.store_fabrics(&mut buf) {
+        Ok(len) => {
+            buf.truncate(len);
+            if let Err(e) = fs::write(&path, &buf) {
+                error!("Failed to write fabrics to {:?}: {}", path, e);
+            } else {
+                info!("Saved fabrics to {:?} ({} bytes)", path, len);
+            }
+        }
+        Err(e) => {
+            error!("Failed to serialize fabrics: {:?}", e);
+        }
+    }
+
+    Ok(())
+}
 
 /// Node definition for our Matter Video Doorbell device
 const NODE: Node<'static> = Node {
@@ -120,9 +206,9 @@ fn dm_handler<'a>(
 /// TODO: Create proper static device info from MatterConfig
 pub async fn run_matter_stack(
     _config: &MatterConfig,
-    camera_handler: &CameraAvStreamMgmtHandler,
-    webrtc_handler: &WebRtcTransportProviderHandler,
-    chime_handler: &ChimeHandler,
+    camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
+    webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
+    chime_cluster: Arc<SyncRwLock<ChimeCluster>>,
 ) -> Result<(), Error> {
     info!("Initializing Matter stack...");
 
@@ -173,26 +259,35 @@ pub async fn run_matter_stack(
     })?;
     info!("Matter UDP socket bound to {:?}", MATTER_SOCKET_BIND_ADDR);
 
-    // Open the commissioning window to allow pairing
-    // This triggers mDNS advertisement
+    // Try to load existing fabrics from persistent storage
+    let was_commissioned = load_fabrics(matter)?;
+
+    // Only open commissioning window if device is not already commissioned
     const COMM_WINDOW_TIMEOUT_SECS: u16 = 900; // 15 minutes
-    info!(
-        "Opening commissioning window for {} seconds...",
-        COMM_WINDOW_TIMEOUT_SECS
-    );
-    matter.open_basic_comm_window(COMM_WINDOW_TIMEOUT_SECS)?;
+    if was_commissioned {
+        info!("Device already commissioned, skipping commissioning window");
+        info!("  (Delete {:?} to reset commissioning)", get_fabrics_path());
+    } else {
+        info!(
+            "Opening commissioning window for {} seconds...",
+            COMM_WINDOW_TIMEOUT_SECS
+        );
+        matter.open_basic_comm_window(COMM_WINDOW_TIMEOUT_SECS)?;
 
-    // Print commissioning info
-    info!("Matter device ready for commissioning");
-    info!("  Discriminator: {}", TEST_DEV_COMM.discriminator);
-    info!("  Passcode: {}", TEST_DEV_COMM.password);
+        // Print commissioning info
+        info!("Matter device ready for commissioning");
+        info!("  Discriminator: {}", TEST_DEV_COMM.discriminator);
+        info!("  Passcode: {}", TEST_DEV_COMM.password);
 
-    if let Err(e) = matter.print_standard_qr_text(DiscoveryCapabilities::IP) {
-        error!("Failed to print QR text: {:?}", e);
-    }
+        if let Err(e) = matter.print_standard_qr_text(DiscoveryCapabilities::IP) {
+            error!("Failed to print QR text: {:?}", e);
+        }
 
-    if let Err(e) = matter.print_standard_qr_code(QrTextType::Unicode, DiscoveryCapabilities::IP) {
-        error!("Failed to print QR code: {:?}", e);
+        if let Err(e) =
+            matter.print_standard_qr_code(QrTextType::Unicode, DiscoveryCapabilities::IP)
+        {
+            error!("Failed to print QR code: {:?}", e);
+        }
     }
 
     // Initialize pooled buffers in static memory
@@ -203,8 +298,16 @@ pub async fn run_matter_stack(
         .uninit()
         .init_with(DefaultSubscriptions::init());
 
+    // Create handlers with properly randomized Dataver seeds
+    // This is critical for subscription/attribute change tracking to work correctly
+    let camera_handler =
+        CameraAvStreamMgmtHandler::new(Dataver::new_rand(matter.rand()), camera_cluster);
+    let webrtc_handler =
+        WebRtcTransportProviderHandler::new(Dataver::new_rand(matter.rand()), webrtc_cluster);
+    let chime_handler = ChimeHandler::new(Dataver::new_rand(matter.rand()), chime_cluster);
+
     // Create the data model with our video doorbell handlers
-    let handler = dm_handler(matter, camera_handler, webrtc_handler, chime_handler);
+    let handler = dm_handler(matter, &camera_handler, &webrtc_handler, &chime_handler);
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 
     // Create the responder that handles incoming Matter requests
@@ -228,14 +331,32 @@ pub async fn run_matter_stack(
     // Run data model background job (handles subscriptions)
     let mut dm_job = pin!(dm.run());
 
+    // Persistence task - saves fabrics when they change
+    let persist_task = async {
+        loop {
+            // Wait for notification that something changed
+            matter.wait_persist().await;
+
+            // Check if fabrics changed and need to be persisted
+            if matter.fabrics_changed() {
+                info!("Fabrics changed, persisting...");
+                if let Err(e) = save_fabrics(matter) {
+                    error!("Failed to persist fabrics: {:?}", e);
+                }
+            }
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), Error>(())
+    };
+    let mut persist = pin!(persist_task);
+
     // Run all components concurrently in the same async executor
     // mDNS is included here to avoid RefCell borrow conflicts with Matter's internal state
     let result = select4(
         &mut transport,
         &mut mdns,
         select(&mut respond, &mut dm_job).coalesce(),
-        // Placeholder for future persistence
-        core::future::pending::<Result<(), Error>>(),
+        &mut persist,
     )
     .coalesce()
     .await;

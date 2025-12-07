@@ -11,12 +11,8 @@ mod rtsp;
 
 use crate::config::Config;
 use crate::device::video_doorbell::VideoDoorbellDevice;
-use crate::matter::clusters::{
-    CameraAvStreamMgmtHandler, ChimeHandler, WebRtcTransportProviderHandler,
-};
 use log::info;
 use parking_lot::RwLock as SyncRwLock;
-use rs_matter::dm::Dataver;
 use std::sync::Arc;
 use tokio::signal;
 
@@ -101,20 +97,14 @@ async fn main() {
         .name("matter-stack".into())
         .stack_size(550 * 1024) // 550KB stack for Matter operations (matches rs-matter examples)
         .spawn(move || {
-            // Create handlers that wrap the cluster instances
-            // Note: rand is a placeholder - rs-matter's Matter instance will provide proper rand
-            let camera_handler = CameraAvStreamMgmtHandler::new(Dataver::new(0), camera_cluster);
-            let webrtc_handler =
-                WebRtcTransportProviderHandler::new(Dataver::new(0), webrtc_cluster);
-            let chime_handler = ChimeHandler::new(Dataver::new(0), chime_cluster);
-
             // Run the Matter stack (blocking) - futures_lite::block_on works with async_io
             // when async_io::Async is used for socket creation
+            // Handlers are now created inside run_matter_stack with proper random Dataver seeds
             if let Err(e) = futures_lite::future::block_on(matter::run_matter_stack(
                 &matter_config,
-                &camera_handler,
-                &webrtc_handler,
-                &chime_handler,
+                camera_cluster,
+                webrtc_cluster,
+                chime_cluster,
             )) {
                 log::error!("Matter stack error: {:?}", e);
             }
