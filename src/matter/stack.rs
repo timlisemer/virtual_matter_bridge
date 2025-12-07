@@ -1,13 +1,15 @@
 use super::clusters::{CameraAvStreamMgmtHandler, IcdMgmtHandler, WebRtcTransportProviderHandler};
 use super::device_types::DEV_TYPE_VIDEO_DOORBELL;
+use super::icd::{IcdStore, run_startup_checkins};
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
+use super::subscription_persistence::{SubscriptionStore, run_subscription_resumption};
 use crate::clusters::camera_av_stream_mgmt::CameraAvStreamMgmtCluster;
 use crate::clusters::webrtc_transport_provider::WebRtcTransportProviderCluster;
 use crate::device::on_off_hooks::DoorbellOnOffHooks;
 use embassy_futures::select::{select, select4};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use log::{error, info};
+use log::{error, info, warn};
 use nix::ifaddrs::getifaddrs;
 use nix::net::if_::if_nametoindex;
 use nix::sys::socket::{AddressFamily, SockaddrLike};
@@ -117,6 +119,8 @@ fn get_interface_index(interface_name: &str) -> Result<u32, Error> {
 /// Directory for persistence data
 const PERSIST_DIR: &str = ".config/virtual-matter-bridge";
 const PERSIST_FILE: &str = "matter.bin";
+const ICD_PERSIST_FILE: &str = "icd_state.json";
+const SUBSCRIPTIONS_FILE: &str = "subscriptions.json";
 
 /// Get the persistence file path
 fn get_persist_path() -> PathBuf {
@@ -124,6 +128,22 @@ fn get_persist_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(PERSIST_DIR)
         .join(PERSIST_FILE)
+}
+
+/// Get the ICD persistence file path
+fn get_icd_persist_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(PERSIST_DIR)
+        .join(ICD_PERSIST_FILE)
+}
+
+/// Get the subscriptions persistence file path
+fn get_subscriptions_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(PERSIST_DIR)
+        .join(SUBSCRIPTIONS_FILE)
 }
 
 /// Node definition for our Matter Video Doorbell device
@@ -156,6 +176,10 @@ const NODE: Node<'static> = Node {
 
 /// Cached network interface filter (lazily initialized)
 static NETIFS: OnceLock<FilteredNetifs> = OnceLock::new();
+/// ICD store (persistent shared state)
+static ICD_STORE: OnceLock<Arc<IcdStore>> = OnceLock::new();
+/// Subscription store (persistent shared state)
+static SUBSCRIPTION_STORE: OnceLock<Arc<SubscriptionStore>> = OnceLock::new();
 
 /// Get the network interface filter, auto-detecting if necessary.
 fn get_netifs() -> &'static FilteredNetifs {
@@ -324,6 +348,47 @@ pub async fn run_matter_stack(
         // Continue anyway - will start fresh
     }
 
+    let icd_persist_path = get_icd_persist_path();
+    let icd_store = ICD_STORE
+        .get_or_init(|| Arc::new(IcdStore::new(icd_persist_path.clone())))
+        .clone();
+    if let Err(e) = icd_store.load() {
+        error!(
+            "Failed to load ICD state from {:?}: {:?}",
+            icd_persist_path, e
+        );
+    }
+
+    // Initialize subscription store for persistence
+    let subscription_store = SUBSCRIPTION_STORE
+        .get_or_init(|| Arc::new(SubscriptionStore::new(get_subscriptions_path())))
+        .clone();
+
+    // Send ICD Check-In messages to registered clients after restart
+    // This signals controllers to re-establish CASE sessions
+    if matter.is_commissioned() && !icd_store.all_clients().is_empty() {
+        info!("Sending ICD Check-In messages to registered clients...");
+        // Run the Check-In sender synchronously before main loop
+        // Use the bind_addr as local address hint
+        let runtime = tokio::runtime::Handle::try_current()
+            .or_else(|_| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map(|rt| rt.handle().clone())
+            })
+            .ok();
+
+        if let Some(rt) = runtime {
+            let icd_store_clone = icd_store.clone();
+            if let Err(e) = rt.block_on(run_startup_checkins(icd_store_clone, Some(bind_addr))) {
+                error!("Failed to send ICD Check-In messages: {:?}", e);
+            }
+        } else {
+            warn!("No tokio runtime available for ICD Check-In messages");
+        }
+    }
+
     // Only open commissioning window if device is not already commissioned
     const COMM_WINDOW_TIMEOUT_SECS: u16 = 900; // 15 minutes
     if matter.is_commissioned() {
@@ -377,7 +442,12 @@ pub async fn run_matter_stack(
 
     // Create ICD Management handler for endpoint 0
     // This satisfies Home Assistant's queries for cluster 0x46
-    let icd_mgmt_handler = IcdMgmtHandler::new(Dataver::new_rand(matter.rand()));
+    // Also records subscription info for session recovery after restart
+    let icd_mgmt_handler = IcdMgmtHandler::new(
+        Dataver::new_rand(matter.rand()),
+        icd_store.clone(),
+        subscription_store.clone(),
+    );
 
     // Create the data model with our video doorbell handlers
     let handler = dm_handler(
@@ -485,13 +555,17 @@ pub async fn run_matter_stack(
     // Persistence task - uses Psm to automatically save state when it changes
     let mut persist = pin!(psm.run(&persist_path, matter, NO_NETWORKS));
 
+    // Subscription resumption task - runs on startup if we have persisted subscriptions
+    // Controllers will see our mDNS announcements and initiate CASE
+    let mut sub_resume = pin!(run_subscription_resumption(subscription_store));
+
     // Run all components concurrently in the same async executor
     // mDNS is included here to avoid RefCell borrow conflicts with Matter's internal state
     let result = select4(
         &mut transport,
         &mut mdns,
         select(&mut respond, &mut dm_job).coalesce(),
-        &mut persist,
+        select(&mut persist, &mut sub_resume).coalesce(),
     )
     .coalesce()
     .await;

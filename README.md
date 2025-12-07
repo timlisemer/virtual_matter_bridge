@@ -64,6 +64,7 @@ This project implements a general-purpose virtual Matter bridge that can:
 - [x] **Cluster Handlers (stub implementations)**
   - Camera AV Stream Management (0x0551)
   - WebRTC Transport Provider (0x0553)
+- [x] ICD Management cluster (0x46) with startup Check-In persistence and admin commands (Register/Unregister/StayActive) to help controllers recover sessions after reboot.
 
 ### Current Issue
 
