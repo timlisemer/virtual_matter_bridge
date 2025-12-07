@@ -1,6 +1,6 @@
 use super::clusters::{CameraAvStreamMgmtHandler, IcdMgmtHandler, WebRtcTransportProviderHandler};
 use super::device_types::DEV_TYPE_VIDEO_DOORBELL;
-use super::icd::{IcdStore, run_startup_checkins};
+use super::icd::IcdStore;
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
 use super::subscription_persistence::{SubscriptionStore, run_subscription_resumption};
@@ -9,7 +9,7 @@ use crate::clusters::webrtc_transport_provider::WebRtcTransportProviderCluster;
 use crate::device::on_off_hooks::DoorbellOnOffHooks;
 use embassy_futures::select::{select, select4};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use log::{error, info, warn};
+use log::{error, info};
 use nix::ifaddrs::getifaddrs;
 use nix::net::if_::if_nametoindex;
 use nix::sys::socket::{AddressFamily, SockaddrLike};
@@ -363,31 +363,6 @@ pub async fn run_matter_stack(
     let subscription_store = SUBSCRIPTION_STORE
         .get_or_init(|| Arc::new(SubscriptionStore::new(get_subscriptions_path())))
         .clone();
-
-    // Send ICD Check-In messages to registered clients after restart
-    // This signals controllers to re-establish CASE sessions
-    if matter.is_commissioned() && !icd_store.all_clients().is_empty() {
-        info!("Sending ICD Check-In messages to registered clients...");
-        // Run the Check-In sender synchronously before main loop
-        // Use the bind_addr as local address hint
-        let runtime = tokio::runtime::Handle::try_current()
-            .or_else(|_| {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map(|rt| rt.handle().clone())
-            })
-            .ok();
-
-        if let Some(rt) = runtime {
-            let icd_store_clone = icd_store.clone();
-            if let Err(e) = rt.block_on(run_startup_checkins(icd_store_clone, Some(bind_addr))) {
-                error!("Failed to send ICD Check-In messages: {:?}", e);
-            }
-        } else {
-            warn!("No tokio runtime available for ICD Check-In messages");
-        }
-    }
 
     // Only open commissioning window if device is not already commissioned
     const COMM_WINDOW_TIMEOUT_SECS: u16 = 900; // 15 minutes

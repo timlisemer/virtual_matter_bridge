@@ -64,7 +64,7 @@ This project implements a general-purpose virtual Matter bridge that can:
 - [x] **Cluster Handlers (stub implementations)**
   - Camera AV Stream Management (0x0551)
   - WebRTC Transport Provider (0x0553)
-- [x] ICD Management cluster (0x46) with startup Check-In persistence and admin commands (Register/Unregister/StayActive) to help controllers recover sessions after reboot.
+- [x] ICD Management cluster (0x46) for always-on devices (required by Home Assistant)
 
 ### Current Issue
 
@@ -336,11 +336,13 @@ The recovery time includes:
 3. **User experience could be improved** with better logging to indicate recovery is in progress
 4. **The MRP error is expected** - It indicates the system correctly handling stale state
 
-#### Recommendations
+#### Implementation
 
-1. **Add informative logging** - Log when waiting for controllers to reconnect and when recovery completes
-2. **Remove ICD Check-In dead code** - Simplify to basic ICD Management without Check-In protocol
-3. **Document expected recovery time** - Users should expect 1-3 minutes for full recovery after restart
+Based on these findings, the implementation was simplified:
+
+1. **Informative logging added** - Device logs when waiting for controllers and when recovery completes
+2. **ICD Management simplified** - Removed Check-In Protocol (feature_map: 0) since it's for battery-powered devices
+3. **Session recovery is automatic** - Controllers handle it via MRP timeout + CASE re-establishment
 
 ### Previous Issues (Resolved)
 
