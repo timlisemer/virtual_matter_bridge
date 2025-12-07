@@ -1,6 +1,4 @@
-use super::clusters::{
-    CameraAvStreamMgmtHandler, SoftwareDiagHandler, WebRtcTransportProviderHandler,
-};
+use super::clusters::{CameraAvStreamMgmtHandler, IcdMgmtHandler, WebRtcTransportProviderHandler};
 use super::device_types::DEV_TYPE_VIDEO_DOORBELL;
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
@@ -16,7 +14,6 @@ use nix::sys::socket::{AddressFamily, SockaddrLike};
 use parking_lot::RwLock as SyncRwLock;
 use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
-use rs_matter::dm::clusters::net_comm::NetworkType;
 use rs_matter::dm::clusters::on_off::{self, NoLevelControl, OnOffHooks};
 use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::dm::endpoints;
@@ -199,8 +196,16 @@ fn save_fabrics(matter: &Matter) -> Result<(), Error> {
 const NODE: Node<'static> = Node {
     id: 0,
     endpoints: &[
-        // Endpoint 0: Root endpoint (required for all Matter devices)
-        endpoints::root_endpoint(NetworkType::Ethernet),
+        // Endpoint 0: Root endpoint with ICD Management cluster added
+        // We add ICD Management (0x46) to satisfy Home Assistant's queries
+        Endpoint {
+            id: 0,
+            device_types: devices!(rs_matter::dm::devices::DEV_TYPE_ROOT_NODE),
+            clusters: clusters!(
+                eth;
+                IcdMgmtHandler::CLUSTER
+            ),
+        },
         // Endpoint 1: Video Doorbell with camera and WebRTC clusters
         Endpoint {
             id: 1,
@@ -229,7 +234,7 @@ fn dm_handler<'a>(
     camera_handler: &'a CameraAvStreamMgmtHandler,
     webrtc_handler: &'a WebRtcTransportProviderHandler,
     on_off_handler: &'a on_off::OnOffHandler<'a, &'a DoorbellOnOffHooks, NoLevelControl>,
-    software_diag_handler: &'a SoftwareDiagHandler,
+    icd_mgmt_handler: &'a IcdMgmtHandler,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -242,10 +247,10 @@ fn dm_handler<'a>(
                 matter.rand(),
                 // Chain handlers for endpoint 0 (root) and endpoint 1 (video doorbell)
                 EmptyHandler
-                    // Endpoint 0: Software Diagnostics
+                    // Endpoint 0: ICD Management
                     .chain(
-                        EpClMatcher::new(Some(0), Some(SoftwareDiagHandler::CLUSTER.id)),
-                        Async(software_diag_handler),
+                        EpClMatcher::new(Some(0), Some(IcdMgmtHandler::CLUSTER.id)),
+                        Async(icd_mgmt_handler),
                     )
                     // Endpoint 1: Descriptor
                     .chain(
@@ -420,8 +425,9 @@ pub async fn run_matter_stack(
         on_off_hooks.as_ref(),
     );
 
-    // Create Software Diagnostics handler for endpoint 0
-    let software_diag_handler = SoftwareDiagHandler::new(Dataver::new_rand(matter.rand()));
+    // Create ICD Management handler for endpoint 0
+    // This satisfies Home Assistant's queries for cluster 0x46
+    let icd_mgmt_handler = IcdMgmtHandler::new(Dataver::new_rand(matter.rand()));
 
     // Create the data model with our video doorbell handlers
     let handler = dm_handler(
@@ -429,7 +435,7 @@ pub async fn run_matter_stack(
         &camera_handler,
         &webrtc_handler,
         &on_off_handler,
-        &software_diag_handler,
+        &icd_mgmt_handler,
     );
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 

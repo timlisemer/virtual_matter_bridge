@@ -8,10 +8,10 @@
 //! outside the rs-matter crate.
 
 pub mod camera_av_stream_mgmt;
-pub mod software_diag;
+pub mod icd_mgmt;
 pub mod webrtc_transport_provider;
 
 // Re-export for convenience
 pub use camera_av_stream_mgmt::CameraAvStreamMgmtHandler;
-pub use software_diag::SoftwareDiagHandler;
+pub use icd_mgmt::IcdMgmtHandler;
 pub use webrtc_transport_provider::WebRtcTransportProviderHandler;
