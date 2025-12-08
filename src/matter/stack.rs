@@ -1,7 +1,10 @@
 use super::clusters::{
-    BooleanStateHandler, CameraAvStreamMgmtHandler, TimeSyncHandler, WebRtcTransportProviderHandler,
+    BooleanStateHandler, CameraAvStreamMgmtHandler, OccupancySensingHandler, TimeSyncHandler,
+    WebRtcTransportProviderHandler,
 };
-use super::device_types::{DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_VIDEO_DOORBELL};
+use super::device_types::{
+    DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_VIDEO_DOORBELL,
+};
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
 use super::subscription_persistence::{SubscriptionStore, run_subscription_resumption};
@@ -49,9 +52,9 @@ use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::{Arc, OnceLock};
 
-use super::clusters::boolean_state;
+use super::clusters::{boolean_state, occupancy_sensing};
 use crate::config::MatterConfig;
-use crate::sensors::{BooleanSensor, ClusterNotifier, NotifiableSensor};
+use crate::sensors::{ClusterNotifier, ContactSensor, NotifiableSensor, OccupancySensor};
 
 /// Static cells for Matter resources (required for 'static lifetime)
 static MATTER: StaticCell<Matter> = StaticCell::new();
@@ -175,6 +178,12 @@ const NODE: Node<'static> = Node {
             device_types: devices!(DEV_TYPE_CONTACT_SENSOR),
             clusters: clusters!(desc::DescHandler::CLUSTER, BooleanStateHandler::CLUSTER),
         },
+        // Endpoint 3: Occupancy Sensor (motion/presence sensor)
+        Endpoint {
+            id: 3,
+            device_types: devices!(DEV_TYPE_OCCUPANCY_SENSOR),
+            clusters: clusters!(desc::DescHandler::CLUSTER, OccupancySensingHandler::CLUSTER),
+        },
     ],
 };
 
@@ -196,6 +205,7 @@ fn dm_handler<'a>(
     on_off_handler: &'a on_off::OnOffHandler<'a, &'a DoorbellOnOffHooks, NoLevelControl>,
     time_sync_handler: &'a TimeSyncHandler,
     boolean_state_handler: &'a BooleanStateHandler,
+    occupancy_sensing_handler: &'a OccupancySensingHandler,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -242,6 +252,16 @@ fn dm_handler<'a>(
                     .chain(
                         EpClMatcher::new(Some(2), Some(BooleanStateHandler::CLUSTER.id)),
                         Async(boolean_state_handler),
+                    )
+                    // Endpoint 3: Descriptor (Occupancy Sensor)
+                    .chain(
+                        EpClMatcher::new(Some(3), Some(desc::DescHandler::CLUSTER.id)),
+                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
+                    )
+                    // Endpoint 3: OccupancySensing
+                    .chain(
+                        EpClMatcher::new(Some(3), Some(OccupancySensingHandler::CLUSTER.id)),
+                        Async(occupancy_sensing_handler),
                     ),
             ),
         ),
@@ -264,7 +284,8 @@ pub async fn run_matter_stack(
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
     webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
     on_off_hooks: Arc<DoorbellOnOffHooks>,
-    test_sensor: Arc<BooleanSensor>,
+    contact_sensor: Arc<ContactSensor>,
+    occupancy_sensor: Arc<OccupancySensor>,
 ) -> Result<(), Error> {
     info!("Initializing Matter stack...");
 
@@ -414,13 +435,20 @@ pub async fn run_matter_stack(
     let sensor_notify = SENSOR_NOTIFY.uninit().init_with(Signal::new());
     let sensor_notify_ref: &'static Signal<CriticalSectionRawMutex, ()> = sensor_notify;
 
-    // Wire up the boolean sensor to push live updates to Matter subscriptions
+    // Wire up the contact sensor to push live updates to Matter subscriptions
     // When sensor.set() or sensor.toggle() is called, it signals sensor_notify,
     // which wakes the forwarding task to call subscriptions.notify_cluster_changed()
-    test_sensor.set_notifier(ClusterNotifier::new(
+    contact_sensor.set_notifier(ClusterNotifier::new(
         sensor_notify_ref,
         2, // endpoint_id for Contact Sensor
         boolean_state::CLUSTER_ID,
+    ));
+
+    // Wire up the occupancy sensor for live updates
+    occupancy_sensor.set_notifier(ClusterNotifier::new(
+        sensor_notify_ref,
+        3, // endpoint_id for Occupancy Sensor
+        occupancy_sensing::CLUSTER_ID,
     ));
 
     // Create handlers with properly randomized Dataver seeds
@@ -431,7 +459,9 @@ pub async fn run_matter_stack(
         WebRtcTransportProviderHandler::new(Dataver::new_rand(matter.rand()), webrtc_cluster);
     let time_sync_handler = TimeSyncHandler::new(Dataver::new_rand(matter.rand()));
     let boolean_state_handler =
-        BooleanStateHandler::new(Dataver::new_rand(matter.rand()), test_sensor);
+        BooleanStateHandler::new(Dataver::new_rand(matter.rand()), contact_sensor);
+    let occupancy_sensing_handler =
+        OccupancySensingHandler::new(Dataver::new_rand(matter.rand()), occupancy_sensor);
 
     // Create OnOff handler for the doorbell's armed/disarmed state
     // new_standalone calls init internally
@@ -449,6 +479,7 @@ pub async fn run_matter_stack(
         &on_off_handler,
         &time_sync_handler,
         &boolean_state_handler,
+        &occupancy_sensing_handler,
     );
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 
@@ -567,11 +598,15 @@ pub async fn run_matter_stack(
 
     // Sensor notification forwarding task - bridges sensor signals to Matter subscriptions
     // When a sensor calls notify(), this task wakes up and triggers subscription reports
+    // Note: Both sensors share the same signal, so we notify both clusters each time.
+    // The dataver check in each handler ensures only actually-changed values trigger reports.
     let mut sensor_forward = pin!(async {
         loop {
             sensor_notify_ref.wait().await;
-            // Notify subscriptions that the BooleanState cluster on endpoint 2 has changed
+            // Notify subscriptions for Contact Sensor (endpoint 2)
             subscriptions.notify_cluster_changed(2, boolean_state::CLUSTER_ID);
+            // Notify subscriptions for Occupancy Sensor (endpoint 3)
+            subscriptions.notify_cluster_changed(3, occupancy_sensing::CLUSTER_ID);
         }
     });
 

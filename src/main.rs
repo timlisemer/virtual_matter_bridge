@@ -13,7 +13,7 @@ mod sensors;
 
 use crate::config::Config;
 use crate::inputs::CameraInput;
-use crate::sensors::BooleanSensor;
+use crate::sensors::{ContactSensor, OccupancySensor};
 use log::info;
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
@@ -45,8 +45,9 @@ async fn main() {
     // Create the camera input (handles RTSP/WebRTC)
     let camera = Arc::new(SyncRwLock::new(CameraInput::new(config)));
 
-    // Create test sensor for BooleanState cluster (Contact Sensor endpoint)
-    let test_sensor = Arc::new(BooleanSensor::new(true));
+    // Create sensors for Matter endpoints
+    let contact_sensor = Arc::new(ContactSensor::new(true)); // Contact Sensor (endpoint 2)
+    let occupancy_sensor = Arc::new(OccupancySensor::new(false)); // Occupancy Sensor (endpoint 3)
 
     // Create Matter handlers from camera clusters
     let camera_cluster = camera.read().camera_cluster();
@@ -73,20 +74,24 @@ async fn main() {
 
     // Spawn a task to simulate sensor state changes for testing
     // TODO: Replace this simulation with HTTP server endpoint
-    // POST /sensors/test_sensor { "state": true/false }
-    let sensor_for_sim = test_sensor.clone();
+    // POST /sensors/{name} { "state": true/false }
+    let contact_for_sim = contact_sensor.clone();
+    let occupancy_for_sim = occupancy_sensor.clone();
     let sensor_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            let new_state = sensor_for_sim.toggle();
-            info!("[Sim] Test sensor toggled to: {}", new_state);
+            let new_contact = contact_for_sim.toggle();
+            info!("[Sim] Contact sensor toggled to: {}", new_contact);
+            let new_occupancy = occupancy_for_sim.toggle();
+            info!("[Sim] Occupancy sensor toggled to: {}", new_occupancy);
         }
     });
 
     // Start Matter stack in a separate thread
     // Matter uses blocking I/O internally with embassy, so we run it on a dedicated thread
-    let test_sensor_for_matter = test_sensor.clone();
+    let contact_sensor_for_matter = contact_sensor.clone();
+    let occupancy_sensor_for_matter = occupancy_sensor.clone();
     let _matter_handle = std::thread::Builder::new()
         .name("matter-stack".into())
         .stack_size(550 * 1024) // 550KB stack for Matter operations (matches rs-matter examples)
@@ -96,7 +101,8 @@ async fn main() {
                 camera_cluster,
                 webrtc_cluster,
                 on_off_hooks,
-                test_sensor_for_matter,
+                contact_sensor_for_matter,
+                occupancy_sensor_for_matter,
             )) {
                 log::error!("Matter stack error: {:?}", e);
             }

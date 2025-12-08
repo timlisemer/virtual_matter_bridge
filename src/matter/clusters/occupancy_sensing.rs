@@ -1,13 +1,13 @@
-//! BooleanState cluster handler for binary sensors.
+//! OccupancySensing cluster handler for motion/presence sensors.
 //!
-//! The BooleanState cluster (0x0045) represents a simple binary sensor.
+//! The OccupancySensing cluster (0x0406) represents an occupancy sensor.
 //! Reads state from a shared BooleanSensor instance that can be updated
 //! from external sources (HTTP, simulation, etc.).
 //!
 //! Uses version tracking to detect changes and notify subscribers automatically.
 
 use super::sync_dataver_with_sensor;
-use crate::sensors::ContactSensor;
+use crate::sensors::OccupancySensor;
 use rs_matter::dm::{
     Access, Attribute, Cluster, Dataver, Handler, NonBlockingHandler, ReadContext, ReadReply,
     Reply, WriteContext,
@@ -19,56 +19,82 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use strum::FromRepr;
 
-/// Matter Cluster ID for BooleanState
-pub const CLUSTER_ID: u32 = 0x0045;
+/// Matter Cluster ID for OccupancySensing
+pub const CLUSTER_ID: u32 = 0x0406;
 
 /// Cluster revision
 pub const CLUSTER_REVISION: u16 = 1;
 
-/// Attribute IDs for the BooleanState cluster
-#[derive(Clone, Copy, Debug, Eq, PartialEq, FromRepr)]
-#[repr(u32)]
-pub enum BooleanStateAttribute {
-    /// The current state value (true/false)
-    StateValue = 0x00,
+/// Occupancy sensor type enum values
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum OccupancySensorType {
+    Pir = 0x00,
+    Ultrasonic = 0x01,
+    PirAndUltrasonic = 0x02,
+    PhysicalContact = 0x03,
 }
 
-attribute_enum!(BooleanStateAttribute);
+/// Attribute IDs for the OccupancySensing cluster
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromRepr)]
+#[repr(u32)]
+pub enum OccupancySensingAttribute {
+    /// Bitmap8 where bit 0 indicates sensed occupancy
+    Occupancy = 0x0000,
+    /// The type of sensor (PIR, Ultrasonic, PhysicalContact, etc.)
+    OccupancySensorType = 0x0001,
+    /// Bitmap of supported sensor types
+    OccupancySensorTypeBitmap = 0x0002,
+}
+
+attribute_enum!(OccupancySensingAttribute);
 
 /// Cluster metadata definition
 pub const CLUSTER: Cluster<'static> = Cluster {
     id: CLUSTER_ID,
     revision: CLUSTER_REVISION,
     feature_map: 0,
-    attributes: attributes!(Attribute::new(
-        BooleanStateAttribute::StateValue as _,
-        Access::RV,
-        rs_matter::dm::Quality::NONE
-    ),),
+    attributes: attributes!(
+        Attribute::new(
+            OccupancySensingAttribute::Occupancy as _,
+            Access::RV,
+            rs_matter::dm::Quality::NONE
+        ),
+        Attribute::new(
+            OccupancySensingAttribute::OccupancySensorType as _,
+            Access::RV,
+            rs_matter::dm::Quality::FIXED
+        ),
+        Attribute::new(
+            OccupancySensingAttribute::OccupancySensorTypeBitmap as _,
+            Access::RV,
+            rs_matter::dm::Quality::FIXED
+        ),
+    ),
     commands: &[],
     with_attrs: with!(all),
     with_cmds: with!(all),
 };
 
-/// Handler that serves a read-only BooleanState cluster.
+/// Handler that serves a read-only OccupancySensing cluster.
 ///
 /// Reads state from a shared `BooleanSensor` that can be updated from
 /// external sources (HTTP endpoints, simulation, etc.).
 ///
 /// Automatically detects sensor value changes and notifies subscribers
 /// by tracking the sensor's version number.
-pub struct BooleanStateHandler {
+pub struct OccupancySensingHandler {
     dataver: Dataver,
-    sensor: Arc<ContactSensor>,
+    sensor: Arc<OccupancySensor>,
     last_sensor_version: AtomicU32,
 }
 
-impl BooleanStateHandler {
+impl OccupancySensingHandler {
     /// Cluster definition for use in the data model
     pub const CLUSTER: Cluster<'static> = CLUSTER;
 
     /// Create a new handler with a sensor reference.
-    pub fn new(dataver: Dataver, sensor: Arc<ContactSensor>) -> Self {
+    pub fn new(dataver: Dataver, sensor: Arc<OccupancySensor>) -> Self {
         Self {
             dataver,
             sensor,
@@ -96,8 +122,18 @@ impl BooleanStateHandler {
             let mut tw = writer.writer();
 
             match attr.attr_id.try_into()? {
-                BooleanStateAttribute::StateValue => {
-                    tw.bool(tag, self.sensor.get())?;
+                OccupancySensingAttribute::Occupancy => {
+                    // Bitmap8: bit 0 = sensed occupancy (1 = occupied, 0 = unoccupied)
+                    let occupancy_bitmap: u8 = if self.sensor.get() { 0x01 } else { 0x00 };
+                    tw.u8(tag, occupancy_bitmap)?;
+                }
+                OccupancySensingAttribute::OccupancySensorType => {
+                    // PhysicalContact sensor type (virtual sensor)
+                    tw.u8(tag, OccupancySensorType::PhysicalContact as u8)?;
+                }
+                OccupancySensingAttribute::OccupancySensorTypeBitmap => {
+                    // Bitmap indicating PhysicalContact is supported (bit 3)
+                    tw.u8(tag, 0x08)?; // bit 3 = PhysicalContact
                 }
             }
         }
@@ -111,7 +147,7 @@ impl BooleanStateHandler {
     }
 }
 
-impl Handler for BooleanStateHandler {
+impl Handler for OccupancySensingHandler {
     fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
         self.read_impl(ctx, reply)
     }
@@ -121,4 +157,4 @@ impl Handler for BooleanStateHandler {
     }
 }
 
-impl NonBlockingHandler for BooleanStateHandler {}
+impl NonBlockingHandler for OccupancySensingHandler {}

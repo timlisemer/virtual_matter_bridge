@@ -1,4 +1,4 @@
-//! Boolean sensor state for Matter BooleanState cluster.
+//! Generic binary sensor state for Matter clusters.
 //!
 //! Provides thread-safe shared state for binary sensors that can be
 //! read by Matter clusters and updated from external sources.
@@ -10,35 +10,21 @@ use super::{ClusterNotifier, NotifiableSensor, Sensor};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-/// Thread-safe boolean sensor state.
+/// Thread-safe binary sensor state.
 ///
-/// Used by the BooleanState Matter cluster to expose sensor values.
+/// Used by Matter clusters to expose binary sensor values (contact, occupancy, etc.).
 /// Can be updated from any thread (e.g., HTTP handlers, simulation tasks).
 ///
 /// Implements the [`Sensor`] trait for change detection - the version
 /// is incremented each time the value changes via `set()` or `toggle()`.
-///
-/// # Example
-/// ```ignore
-/// let sensor = Arc::new(BooleanSensor::new(false));
-///
-/// // Update from HTTP handler
-/// sensor.set(true);
-///
-/// // Read from Matter cluster
-/// let value = sensor.get();
-/// ```
-// TODO: Will be updated via HTTP POST /sensors/{name}
-pub struct BooleanSensor {
+pub struct BinarySensor {
     state: AtomicBool,
     version: AtomicU32,
-    /// Notifier for live Matter subscription updates.
-    /// Set after Matter stack initialization via `set_notifier()`.
     notifier: RwLock<Option<ClusterNotifier>>,
 }
 
-impl BooleanSensor {
-    /// Create a new boolean sensor with the given initial state.
+impl BinarySensor {
+    /// Create a new binary sensor with the given initial state.
     pub fn new(initial: bool) -> Self {
         Self {
             state: AtomicBool::new(initial),
@@ -60,7 +46,6 @@ impl BooleanSensor {
         let old = self.state.swap(value, Ordering::SeqCst);
         if old != value {
             self.version.fetch_add(1, Ordering::SeqCst);
-            // Trigger instant Matter notification
             if let Some(notifier) = self.notifier.read().as_ref() {
                 notifier.notify();
             }
@@ -72,10 +57,8 @@ impl BooleanSensor {
     /// If a notifier is configured, immediately pushes the update to
     /// Matter subscribers (e.g., Home Assistant).
     pub fn toggle(&self) -> bool {
-        // fetch_xor with true flips the bit
         let old = self.state.fetch_xor(true, Ordering::SeqCst);
         self.version.fetch_add(1, Ordering::SeqCst);
-        // Trigger instant Matter notification
         if let Some(notifier) = self.notifier.read().as_ref() {
             notifier.notify();
         }
@@ -83,13 +66,13 @@ impl BooleanSensor {
     }
 }
 
-impl NotifiableSensor for BooleanSensor {
+impl NotifiableSensor for BinarySensor {
     fn set_notifier(&self, notifier: ClusterNotifier) {
         *self.notifier.write() = Some(notifier);
     }
 }
 
-impl Sensor for BooleanSensor {
+impl Sensor for BinarySensor {
     fn version(&self) -> u32 {
         self.version.load(Ordering::SeqCst)
     }
@@ -101,18 +84,18 @@ mod tests {
 
     #[test]
     fn test_initial_state() {
-        let sensor = BooleanSensor::new(true);
+        let sensor = BinarySensor::new(true);
         assert!(sensor.get());
         assert_eq!(sensor.version(), 0);
 
-        let sensor = BooleanSensor::new(false);
+        let sensor = BinarySensor::new(false);
         assert!(!sensor.get());
         assert_eq!(sensor.version(), 0);
     }
 
     #[test]
     fn test_set_increments_version() {
-        let sensor = BooleanSensor::new(false);
+        let sensor = BinarySensor::new(false);
         assert_eq!(sensor.version(), 0);
 
         sensor.set(true);
@@ -130,7 +113,7 @@ mod tests {
 
     #[test]
     fn test_toggle_increments_version() {
-        let sensor = BooleanSensor::new(false);
+        let sensor = BinarySensor::new(false);
         assert_eq!(sensor.version(), 0);
 
         let new_state = sensor.toggle();

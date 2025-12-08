@@ -7,11 +7,14 @@
 //! for change detection. Sensors that support live updates also implement
 //! [`NotifiableSensor`] to push changes instantly to Matter subscribers.
 
-pub mod door_sensor;
+mod binary_sensor;
+pub mod contact_sensor;
 pub mod notifier;
+pub mod occupancy_sensor;
 
-pub use door_sensor::BooleanSensor;
+pub use contact_sensor::ContactSensor;
 pub use notifier::ClusterNotifier;
+pub use occupancy_sensor::OccupancySensor;
 
 /// Trait for sensors with change detection.
 ///
@@ -21,15 +24,6 @@ pub use notifier::ClusterNotifier;
 /// The version number should be incremented atomically each time the sensor
 /// value changes. Handlers compare versions to detect changes and update
 /// their `Dataver` to notify subscribers.
-///
-/// # Example
-/// ```ignore
-/// impl Sensor for MySensor {
-///     fn version(&self) -> u32 {
-///         self.version.load(Ordering::SeqCst)
-///     }
-/// }
-/// ```
 pub trait Sensor: Send + Sync {
     /// Get the current version number.
     ///
@@ -41,15 +35,6 @@ pub trait Sensor: Send + Sync {
 ///
 /// Sensors implementing this trait can push updates instantly to Home Assistant
 /// when their values change, rather than waiting for polling.
-///
-/// # Example
-/// ```ignore
-/// // During Matter stack initialization:
-/// sensor.set_notifier(ClusterNotifier::new(signal, endpoint_id, cluster_id));
-///
-/// // Later, when sensor value changes (e.g., from HTTP handler):
-/// sensor.set(true);  // Automatically notifies Matter subscribers
-/// ```
 pub trait NotifiableSensor: Sensor {
     /// Set the notifier for this sensor.
     ///

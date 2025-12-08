@@ -50,3 +50,18 @@ pub const DEV_TYPE_CONTACT_SENSOR: DeviceType = DeviceType {
     dtype: 0x0015,
     drev: 1,
 };
+
+/// Matter Occupancy Sensor device type
+///
+/// Device Type ID: 0x0107 (263 decimal)
+/// Device Type Revision: 1
+///
+/// Required clusters:
+/// - OccupancySensing (0x0406)
+/// - Descriptor (standard)
+///
+/// Used for motion/presence sensors.
+pub const DEV_TYPE_OCCUPANCY_SENSOR: DeviceType = DeviceType {
+    dtype: 0x0107,
+    drev: 1,
+};
