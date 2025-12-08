@@ -3,6 +3,8 @@
 #![allow(dead_code)]
 // Allow unexpected_cfgs from rs_matter::import! macro (uses cfg(feature = "defmt"))
 #![allow(unexpected_cfgs)]
+// Increase recursion limit for deeply nested Matter handler chains
+#![recursion_limit = "256"]
 
 mod config;
 mod error;
@@ -46,14 +48,15 @@ async fn main() {
     let camera = Arc::new(SyncRwLock::new(CameraInput::new(config)));
 
     // Create sensors for Matter endpoints
-    let contact_sensor = Arc::new(ContactSensor::new(true)); // Contact Sensor (endpoint 2)
-    let occupancy_sensor = Arc::new(OccupancySensor::new(false)); // Occupancy Sensor (endpoint 3)
+    let contact_sensor = Arc::new(ContactSensor::new(true)); // Contact Sensor (endpoint 3)
+    let occupancy_sensor = Arc::new(OccupancySensor::new(false)); // Occupancy Sensor (endpoint 4)
 
-    // Create switch for Matter endpoint 4
-    let switch = Arc::new(Switch::new(true)); // Switch (endpoint 4)
+    // Create switches for Matter endpoints 5 and 6
+    let switch1 = Arc::new(Switch::new(true)); // Switch 1 (endpoint 5)
+    let switch2 = Arc::new(Switch::new(false)); // Switch 2 (endpoint 6)
 
-    // Create light for Matter endpoint 5
-    let light = Arc::new(LightSwitch::new(false)); // Light (endpoint 5)
+    // Create light for Matter endpoint 7
+    let light = Arc::new(LightSwitch::new(false)); // Light (endpoint 7)
 
     // Create Matter handlers from camera clusters
     let camera_cluster = camera.read().camera_cluster();
@@ -87,7 +90,8 @@ async fn main() {
     // Matter uses blocking I/O internally with embassy, so we run it on a dedicated thread
     let contact_sensor_for_matter = contact_sensor.clone();
     let occupancy_sensor_for_matter = occupancy_sensor.clone();
-    let switch_for_matter = switch.clone();
+    let switch1_for_matter = switch1.clone();
+    let switch2_for_matter = switch2.clone();
     let light_for_matter = light.clone();
     let _matter_handle = std::thread::Builder::new()
         .name("matter-stack".into())
@@ -100,7 +104,8 @@ async fn main() {
                 device_power,
                 contact_sensor_for_matter,
                 occupancy_sensor_for_matter,
-                switch_for_matter,
+                switch1_for_matter,
+                switch2_for_matter,
                 light_for_matter,
             )) {
                 log::error!("Matter stack error: {:?}", e);
