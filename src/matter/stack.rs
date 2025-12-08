@@ -50,6 +50,7 @@ use std::pin::pin;
 use std::sync::{Arc, OnceLock};
 
 use crate::config::MatterConfig;
+use crate::sensors::BooleanSensor;
 
 /// Static cells for Matter resources (required for 'static lifetime)
 static MATTER: StaticCell<Matter> = StaticCell::new();
@@ -259,6 +260,7 @@ pub async fn run_matter_stack(
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
     webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
     on_off_hooks: Arc<DoorbellOnOffHooks>,
+    test_sensor: Arc<BooleanSensor>,
 ) -> Result<(), Error> {
     info!("Initializing Matter stack...");
 
@@ -411,7 +413,8 @@ pub async fn run_matter_stack(
     let webrtc_handler =
         WebRtcTransportProviderHandler::new(Dataver::new_rand(matter.rand()), webrtc_cluster);
     let time_sync_handler = TimeSyncHandler::new(Dataver::new_rand(matter.rand()));
-    let boolean_state_handler = BooleanStateHandler::new(Dataver::new_rand(matter.rand()));
+    let boolean_state_handler =
+        BooleanStateHandler::new(Dataver::new_rand(matter.rand()), test_sensor);
 
     // Create OnOff handler for the doorbell's armed/disarmed state
     // new_standalone calls init internally

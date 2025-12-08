@@ -1,8 +1,10 @@
 //! BooleanState cluster handler for binary sensors.
 //!
-//! The BooleanState cluster (0x0110) represents a simple binary sensor.
-//! This implementation provides a read-only "test sensor" that is always true.
+//! The BooleanState cluster (0x0045) represents a simple binary sensor.
+//! Reads state from a shared BooleanSensor instance that can be updated
+//! from external sources (HTTP, simulation, etc.).
 
+use crate::sensors::BooleanSensor;
 use rs_matter::dm::{
     Access, Attribute, Cluster, Dataver, Handler, NonBlockingHandler, ReadContext, ReadReply,
     Reply, WriteContext,
@@ -10,6 +12,7 @@ use rs_matter::dm::{
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::TLVWrite;
 use rs_matter::{attribute_enum, attributes, with};
+use std::sync::Arc;
 use strum::FromRepr;
 
 /// Matter Cluster ID for BooleanState
@@ -43,18 +46,22 @@ pub const CLUSTER: Cluster<'static> = Cluster {
     with_cmds: with!(all),
 };
 
-/// Handler that serves a read-only BooleanState cluster (test sensor always true).
+/// Handler that serves a read-only BooleanState cluster.
+///
+/// Reads state from a shared `BooleanSensor` that can be updated from
+/// external sources (HTTP endpoints, simulation, etc.).
 pub struct BooleanStateHandler {
     dataver: Dataver,
+    sensor: Arc<BooleanSensor>,
 }
 
 impl BooleanStateHandler {
     /// Cluster definition for use in the data model
     pub const CLUSTER: Cluster<'static> = CLUSTER;
 
-    /// Create a new handler
-    pub const fn new(dataver: Dataver) -> Self {
-        Self { dataver }
+    /// Create a new handler with a sensor reference.
+    pub fn new(dataver: Dataver, sensor: Arc<BooleanSensor>) -> Self {
+        Self { dataver, sensor }
     }
 
     fn read_impl(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
@@ -75,7 +82,7 @@ impl BooleanStateHandler {
 
             match attr.attr_id.try_into()? {
                 BooleanStateAttribute::StateValue => {
-                    tw.bool(tag, true)?; // Test sensor: always true
+                    tw.bool(tag, self.sensor.get())?;
                 }
             }
         }

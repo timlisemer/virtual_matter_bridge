@@ -1,3 +1,9 @@
+//! Camera input source with RTSP and WebRTC support.
+//!
+//! This module provides a camera input that connects to an RTSP stream
+//! and exposes it via Matter camera clusters (CameraAvStreamManagement
+//! and WebRTCTransportProvider).
+
 use crate::clusters::camera_av_stream_mgmt::{
     CameraAvStreamMgmtCluster, Features as CameraFeatures, StreamUsage, VideoCodec, VideoResolution,
 };
@@ -13,26 +19,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock as AsyncRwLock;
 
-/// Matter Device Type ID for Video Doorbell
-/// Note: This is a placeholder - actual ID from Matter 1.5 spec
-pub const DEVICE_TYPE_VIDEO_DOORBELL: u32 = 0x0012;
-
-/// Video Doorbell device combining Camera and Doorbell functionality
-pub struct VideoDoorbellDevice {
+/// Camera input source combining RTSP and WebRTC functionality.
+///
+/// Connects to an RTSP camera stream and exposes it through Matter
+/// camera-related clusters for streaming to controllers.
+pub struct CameraInput {
     config: Config,
     /// Cluster instances use sync RwLock for Matter handler compatibility
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
     webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
     /// OnOff hooks for armed/disarmed state (used by rs-matter's OnOffHandler)
-    /// Uses Arc for thread-safe sharing with the Matter stack
     on_off_hooks: Arc<DoorbellOnOffHooks>,
     /// Bridge uses async RwLock for async I/O operations
     bridge: Arc<AsyncRwLock<Option<RtspWebRtcBridge>>>,
-    doorbell_pressed: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
 }
 
-impl VideoDoorbellDevice {
+impl CameraInput {
+    /// Create a new camera input with the given configuration.
     pub fn new(config: Config) -> Self {
         // Initialize camera cluster with video and audio features
         let camera_features = CameraFeatures {
@@ -75,14 +79,13 @@ impl VideoDoorbellDevice {
             webrtc_cluster: Arc::new(SyncRwLock::new(webrtc_cluster)),
             on_off_hooks: Arc::new(DoorbellOnOffHooks::new()),
             bridge: Arc::new(AsyncRwLock::new(None)),
-            doorbell_pressed: Arc::new(AtomicBool::new(false)),
             running: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Initialize the device and connect to the RTSP camera
+    /// Initialize the camera input and connect to the RTSP stream.
     pub async fn initialize(&self) -> Result<()> {
-        log::info!("Initializing Video Doorbell device...");
+        log::info!("Initializing camera input...");
 
         let bridge_config = BridgeConfig {
             ice_servers: self.get_ice_servers(),
@@ -100,11 +103,11 @@ impl VideoDoorbellDevice {
 
         self.running.store(true, Ordering::SeqCst);
 
-        log::info!("Video Doorbell device initialized successfully");
+        log::info!("Camera input initialized successfully");
         Ok(())
     }
 
-    /// Get configured ICE servers
+    /// Get configured ICE servers.
     fn get_ice_servers(&self) -> Vec<IceServer> {
         let webrtc = self.webrtc_cluster.read();
         webrtc
@@ -125,58 +128,32 @@ impl VideoDoorbellDevice {
             })
     }
 
-    /// Get the device name
+    /// Get the device name from config.
     pub fn device_name(&self) -> &str {
         &self.config.matter.device_name
     }
 
-    /// Get Matter vendor ID
+    /// Get Matter vendor ID.
     pub fn vendor_id(&self) -> u16 {
         self.config.matter.vendor_id
     }
 
-    /// Get Matter product ID
+    /// Get Matter product ID.
     pub fn product_id(&self) -> u16 {
         self.config.matter.product_id
     }
 
-    /// Get Matter discriminator
+    /// Get Matter discriminator.
     pub fn discriminator(&self) -> u16 {
         self.config.matter.discriminator
     }
 
-    /// Get Matter passcode
+    /// Get Matter passcode.
     pub fn passcode(&self) -> u32 {
         self.config.matter.passcode
     }
 
-    /// Simulate a doorbell press
-    pub async fn press_doorbell(&self) -> Result<()> {
-        log::info!(
-            "[Sim] Doorbell button pressed (state=pressed for 2s, would trigger Matter event notification)"
-        );
-
-        self.doorbell_pressed.store(true, Ordering::SeqCst);
-
-        // TODO: Send Matter doorbell press event notification to controllers
-
-        // Reset doorbell state after a short delay
-        let doorbell_pressed = self.doorbell_pressed.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-            doorbell_pressed.store(false, Ordering::SeqCst);
-            log::info!("[Sim] Doorbell button released (state=idle)");
-        });
-
-        Ok(())
-    }
-
-    /// Check if doorbell is currently pressed
-    pub fn is_doorbell_pressed(&self) -> bool {
-        self.doorbell_pressed.load(Ordering::SeqCst)
-    }
-
-    /// Request a video stream
+    /// Request a video stream.
     pub async fn request_video_stream(
         &self,
         peer_node_id: u64,
@@ -234,7 +211,7 @@ impl VideoDoorbellDevice {
         Ok((session_id, video_stream_id, sdp))
     }
 
-    /// End a video stream
+    /// End a video stream.
     pub async fn end_video_stream(&self, session_id: u16, video_stream_id: u16) -> Result<()> {
         // End WebRTC session
         {
@@ -256,34 +233,34 @@ impl VideoDoorbellDevice {
         Ok(())
     }
 
-    /// Get camera cluster for external access
+    /// Get camera cluster for external access (Matter handler).
     pub fn camera_cluster(&self) -> Arc<SyncRwLock<CameraAvStreamMgmtCluster>> {
         self.camera_cluster.clone()
     }
 
-    /// Get WebRTC cluster for external access
+    /// Get WebRTC cluster for external access (Matter handler).
     pub fn webrtc_cluster(&self) -> Arc<SyncRwLock<WebRtcTransportProviderCluster>> {
         self.webrtc_cluster.clone()
     }
 
-    /// Get OnOff hooks for external access (used by Matter stack)
+    /// Get OnOff hooks for external access (Matter stack).
     pub fn on_off_hooks(&self) -> Arc<DoorbellOnOffHooks> {
         self.on_off_hooks.clone()
     }
 
-    /// Check if the doorbell is armed
+    /// Check if the camera is armed (will notify on events).
     pub fn is_armed(&self) -> bool {
         self.on_off_hooks.is_armed()
     }
 
-    /// Check if device is running
+    /// Check if the camera input is running.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
 
-    /// Shutdown the device
+    /// Shutdown the camera input.
     pub async fn shutdown(&self) -> Result<()> {
-        log::info!("Shutting down Video Doorbell device...");
+        log::info!("Shutting down camera input...");
 
         self.running.store(false, Ordering::SeqCst);
 
@@ -295,7 +272,7 @@ impl VideoDoorbellDevice {
             }
         }
 
-        log::info!("Video Doorbell device shutdown complete");
+        log::info!("Camera input shutdown complete");
         Ok(())
     }
 }
@@ -305,24 +282,10 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_device_creation() {
+    async fn test_camera_creation() {
         let config = Config::default();
-        let device = VideoDoorbellDevice::new(config);
+        let camera = CameraInput::new(config);
 
-        assert!(!device.is_running());
-        assert!(!device.is_doorbell_pressed());
-    }
-
-    #[tokio::test]
-    async fn test_doorbell_press() {
-        let config = Config::default();
-        let device = VideoDoorbellDevice::new(config);
-
-        device.press_doorbell().await.unwrap();
-        assert!(device.is_doorbell_pressed());
-
-        // Wait for reset
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-        assert!(!device.is_doorbell_pressed());
+        assert!(!camera.is_running());
     }
 }

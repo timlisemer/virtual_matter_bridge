@@ -6,11 +6,14 @@ mod clusters;
 mod config;
 mod device;
 mod error;
+mod inputs;
 mod matter;
 mod rtsp;
+mod sensors;
 
 use crate::config::Config;
-use crate::device::video_doorbell::VideoDoorbellDevice;
+use crate::inputs::CameraInput;
+use crate::sensors::BooleanSensor;
 use log::info;
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
@@ -36,76 +39,64 @@ async fn main() {
     info!("  Product ID: 0x{:04X}", config.matter.product_id);
     info!("  Discriminator: {}", config.matter.discriminator);
 
-    // Clone config for Matter stack before moving to device
+    // Clone config for Matter stack before moving to camera input
     let matter_config = config.matter.clone();
 
-    // Create the video doorbell device
-    let device = Arc::new(SyncRwLock::new(VideoDoorbellDevice::new(config)));
+    // Create the camera input (handles RTSP/WebRTC)
+    let camera = Arc::new(SyncRwLock::new(CameraInput::new(config)));
 
-    // Create Matter handlers from device clusters
-    // These need to be created before spawning the Matter thread
-    let camera_cluster = device.read().camera_cluster();
-    let webrtc_cluster = device.read().webrtc_cluster();
-    let on_off_hooks = device.read().on_off_hooks();
+    // Create test sensor for BooleanState cluster (Contact Sensor endpoint)
+    let test_sensor = Arc::new(BooleanSensor::new(true));
 
-    // Initialize the device - use spawn_blocking since initialize() is async but uses sync locks internally
-    let device_for_init = device.clone();
+    // Create Matter handlers from camera clusters
+    let camera_cluster = camera.read().camera_cluster();
+    let webrtc_cluster = camera.read().webrtc_cluster();
+    let on_off_hooks = camera.read().on_off_hooks();
+
+    // Initialize the camera input
+    let camera_for_init = camera.clone();
     tokio::task::spawn_blocking(move || {
-        let device_lock = device_for_init.read();
+        let camera_lock = camera_for_init.read();
         futures_lite::future::block_on(async {
-            if let Err(e) = device_lock.initialize().await {
-                log::error!("Failed to initialize device: {}", e);
+            if let Err(e) = camera_lock.initialize().await {
+                log::error!("Failed to initialize camera: {}", e);
                 std::process::exit(1);
             }
         });
     })
     .await
-    .expect("Device initialization task panicked");
+    .expect("Camera initialization task panicked");
 
     info!("Virtual Matter Bridge is running");
-    info!("  - Video Doorbell device ready");
+    info!("  - Camera input ready");
     info!("  - Press Ctrl+C to exit");
 
-    // Spawn a task to simulate doorbell presses for testing
-    let device_clone = device.clone();
-    let doorbell_task = tokio::spawn(async move {
+    // Spawn a task to simulate sensor state changes for testing
+    // TODO: Replace this simulation with HTTP server endpoint
+    // POST /sensors/test_sensor { "state": true/false }
+    let sensor_for_sim = test_sensor.clone();
+    let sensor_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            let is_running = device_clone.read().is_running();
-
-            if is_running {
-                // Use spawn_blocking since press_doorbell is async but device uses sync RwLock
-                // TODO: Send Matter doorbell press event notification
-                let device_for_press = device_clone.clone();
-                if let Err(e) = tokio::task::spawn_blocking(move || {
-                    let device_lock = device_for_press.read();
-                    futures_lite::future::block_on(device_lock.press_doorbell())
-                })
-                .await
-                {
-                    log::error!("Doorbell press simulation failed: {}", e);
-                }
-            } else {
-                break;
-            }
+            let new_state = sensor_for_sim.toggle();
+            info!("[Sim] Test sensor toggled to: {}", new_state);
         }
     });
 
     // Start Matter stack in a separate thread
     // Matter uses blocking I/O internally with embassy, so we run it on a dedicated thread
+    let test_sensor_for_matter = test_sensor.clone();
     let _matter_handle = std::thread::Builder::new()
         .name("matter-stack".into())
         .stack_size(550 * 1024) // 550KB stack for Matter operations (matches rs-matter examples)
         .spawn(move || {
-            // Run the Matter stack (blocking) - futures_lite::block_on works with async_io
-            // when async_io::Async is used for socket creation
-            // Handlers are now created inside run_matter_stack with proper random Dataver seeds
             if let Err(e) = futures_lite::future::block_on(matter::run_matter_stack(
                 &matter_config,
                 camera_cluster,
                 webrtc_cluster,
                 on_off_hooks,
+                test_sensor_for_matter,
             )) {
                 log::error!("Matter stack error: {:?}", e);
             }
@@ -125,16 +116,14 @@ async fn main() {
     }
 
     // Shutdown
-    doorbell_task.abort();
+    sensor_task.abort();
 
-    // Shutdown the device - we need to do this carefully because the device
-    // uses a sync RwLock for clusters but async RwLock for the bridge
-    // The shutdown method is async, so we run it in a blocking task
-    let device_for_shutdown = device.clone();
+    // Shutdown the camera input
+    let camera_for_shutdown = camera.clone();
     tokio::task::spawn_blocking(move || {
-        let device_lock = device_for_shutdown.read();
+        let camera_lock = camera_for_shutdown.read();
         futures_lite::future::block_on(async {
-            if let Err(e) = device_lock.shutdown().await {
+            if let Err(e) = camera_lock.shutdown().await {
                 log::error!("Error during shutdown: {}", e);
             }
         });
