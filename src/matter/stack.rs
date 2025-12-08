@@ -1,6 +1,5 @@
-use super::clusters::{CameraAvStreamMgmtHandler, IcdMgmtHandler, WebRtcTransportProviderHandler};
+use super::clusters::{CameraAvStreamMgmtHandler, WebRtcTransportProviderHandler};
 use super::device_types::DEV_TYPE_VIDEO_DOORBELL;
-use super::icd::IcdStore;
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
 use super::subscription_persistence::{SubscriptionStore, run_subscription_resumption};
@@ -119,7 +118,6 @@ fn get_interface_index(interface_name: &str) -> Result<u32, Error> {
 /// Directory for persistence data
 const PERSIST_DIR: &str = ".config/virtual-matter-bridge";
 const PERSIST_FILE: &str = "matter.bin";
-const ICD_PERSIST_FILE: &str = "icd_state.json";
 const SUBSCRIPTIONS_FILE: &str = "subscriptions.json";
 
 /// Get the persistence file path
@@ -128,14 +126,6 @@ fn get_persist_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(PERSIST_DIR)
         .join(PERSIST_FILE)
-}
-
-/// Get the ICD persistence file path
-fn get_icd_persist_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(PERSIST_DIR)
-        .join(ICD_PERSIST_FILE)
 }
 
 /// Get the subscriptions persistence file path
@@ -150,16 +140,8 @@ fn get_subscriptions_path() -> PathBuf {
 const NODE: Node<'static> = Node {
     id: 0,
     endpoints: &[
-        // Endpoint 0: Root endpoint with ICD Management cluster added
-        // We add ICD Management (0x46) to satisfy Home Assistant's queries
-        Endpoint {
-            id: 0,
-            device_types: devices!(rs_matter::dm::devices::DEV_TYPE_ROOT_NODE),
-            clusters: clusters!(
-                eth;
-                IcdMgmtHandler::CLUSTER
-            ),
-        },
+        // Endpoint 0: Root endpoint with standard Matter system clusters
+        endpoints::root_endpoint(rs_matter::dm::clusters::net_comm::NetworkType::Ethernet),
         // Endpoint 1: Video Doorbell with camera and WebRTC clusters
         Endpoint {
             id: 1,
@@ -176,8 +158,6 @@ const NODE: Node<'static> = Node {
 
 /// Cached network interface filter (lazily initialized)
 static NETIFS: OnceLock<FilteredNetifs> = OnceLock::new();
-/// ICD store (persistent shared state)
-static ICD_STORE: OnceLock<Arc<IcdStore>> = OnceLock::new();
 /// Subscription store (persistent shared state)
 static SUBSCRIPTION_STORE: OnceLock<Arc<SubscriptionStore>> = OnceLock::new();
 
@@ -192,7 +172,6 @@ fn dm_handler<'a>(
     camera_handler: &'a CameraAvStreamMgmtHandler,
     webrtc_handler: &'a WebRtcTransportProviderHandler,
     on_off_handler: &'a on_off::OnOffHandler<'a, &'a DoorbellOnOffHooks, NoLevelControl>,
-    icd_mgmt_handler: &'a IcdMgmtHandler,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -203,13 +182,8 @@ fn dm_handler<'a>(
             endpoints::with_sys(
                 &false,
                 matter.rand(),
-                // Chain handlers for endpoint 0 (root) and endpoint 1 (video doorbell)
+                // Chain handlers for endpoint 1 (video doorbell)
                 EmptyHandler
-                    // Endpoint 0: ICD Management
-                    .chain(
-                        EpClMatcher::new(Some(0), Some(IcdMgmtHandler::CLUSTER.id)),
-                        Async(icd_mgmt_handler),
-                    )
                     // Endpoint 1: Descriptor
                     .chain(
                         EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
@@ -348,17 +322,6 @@ pub async fn run_matter_stack(
         // Continue anyway - will start fresh
     }
 
-    let icd_persist_path = get_icd_persist_path();
-    let icd_store = ICD_STORE
-        .get_or_init(|| Arc::new(IcdStore::new(icd_persist_path.clone())))
-        .clone();
-    if let Err(e) = icd_store.load() {
-        error!(
-            "Failed to load ICD state from {:?}: {:?}",
-            icd_persist_path, e
-        );
-    }
-
     // Initialize subscription store for persistence
     let subscription_store = SUBSCRIPTION_STORE
         .get_or_init(|| Arc::new(SubscriptionStore::new(get_subscriptions_path())))
@@ -415,23 +378,8 @@ pub async fn run_matter_stack(
         on_off_hooks.as_ref(),
     );
 
-    // Create ICD Management handler for endpoint 0
-    // This satisfies Home Assistant's queries for cluster 0x46
-    // Also records subscription info for session recovery after restart
-    let icd_mgmt_handler = IcdMgmtHandler::new(
-        Dataver::new_rand(matter.rand()),
-        icd_store.clone(),
-        subscription_store.clone(),
-    );
-
     // Create the data model with our video doorbell handlers
-    let handler = dm_handler(
-        matter,
-        &camera_handler,
-        &webrtc_handler,
-        &on_off_handler,
-        &icd_mgmt_handler,
-    );
+    let handler = dm_handler(matter, &camera_handler, &webrtc_handler, &on_off_handler);
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 
     // Create the responder that handles incoming Matter requests

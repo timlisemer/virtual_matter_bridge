@@ -64,7 +64,6 @@ This project implements a general-purpose virtual Matter bridge that can:
 - [x] **Cluster Handlers (stub implementations)**
   - Camera AV Stream Management (0x0551)
   - WebRTC Transport Provider (0x0553)
-- [x] ICD Management cluster (0x46) for always-on devices (required by Home Assistant)
 
 ### Current Issue
 
@@ -83,7 +82,6 @@ Home Assistant shows **"This device has no entities"** because:
 **Goal:** Make the existing video doorbell show entities in Home Assistant
 
 - [x] Add OnOff cluster to video doorbell endpoint (exposes armed/disarmed state)
-- [x] Implement ICD Management cluster (0x46) on endpoint 0 (satisfies Home Assistant queries)
 - [ ] ~~Fix device type registration (correct Matter 1.5 video doorbell ID)~~ - Skipped: Home Assistant does not support Matter 1.5 camera device types yet
 
 ### Phase 2: Multi-Device Bridge Architecture
@@ -277,14 +275,11 @@ The controller keeps trying to use the old encrypted session (SID:4), but the de
 
 **Initial Hypothesis: ICD Check-In Protocol**
 
-We initially implemented the ICD (Intermittently Connected Device) Management cluster with Check-In Protocol support (feature_map: 0x01), believing this would help controllers recover sessions after restart. This included:
-- RegisterClient, UnregisterClient, StayActiveRequest commands
-- Check-In message encryption and sending
-- ICD state persistence
+We initially investigated the ICD (Intermittently Connected Device) Management cluster with Check-In Protocol support, believing this would help controllers recover sessions after restart.
 
 **Finding: ICD Check-In is for sleepy devices, not session recovery**
 
-The ICD Check-In Protocol is designed for battery-powered devices that sleep and wake periodically. It is NOT the mechanism for session recovery after restart of always-on devices. Home Assistant does not call RegisterClient for normal devices.
+The ICD Check-In Protocol is designed for battery-powered devices that sleep and wake periodically. It is NOT the mechanism for session recovery after restart of always-on (hardwired) devices. Home Assistant does not use ICD Check-In for normal devices.
 
 **Root Cause Analysis**
 
@@ -332,17 +327,17 @@ The recovery time includes:
 #### Conclusions
 
 1. **Session recovery works as designed** - No code changes needed for basic functionality
-2. **ICD Check-In is unnecessary** for always-on devices - The implementation should be simplified
-3. **User experience could be improved** with better logging to indicate recovery is in progress
+2. **ICD Check-In is unnecessary** for always-on (hardwired) devices
+3. **User experience improved** with logging to indicate recovery is in progress
 4. **The MRP error is expected** - It indicates the system correctly handling stale state
 
 #### Implementation
 
-Based on these findings, the implementation was simplified:
+Based on these findings:
 
 1. **Informative logging added** - Device logs when waiting for controllers and when recovery completes
-2. **ICD Management simplified** - Removed Check-In Protocol (feature_map: 0) since it's for battery-powered devices
-3. **Session recovery is automatic** - Controllers handle it via MRP timeout + CASE re-establishment
+2. **Session recovery is automatic** - Controllers handle it via MRP timeout + CASE re-establishment
+3. **No ICD cluster needed** - This bridge is hardwired/always-on, not battery-powered
 
 ### Previous Issues (Resolved)
 

@@ -1,5 +1,4 @@
 mod dev_att;
-pub mod icd;
 mod logging_udp;
 mod netif;
 mod stack;
