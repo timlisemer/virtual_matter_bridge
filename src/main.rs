@@ -9,6 +9,7 @@ mod matter;
 
 use crate::config::Config;
 use crate::input::camera::CameraInput;
+use crate::input::simulation::run_sensor_simulation;
 use crate::matter::sensors::{ContactSensor, OccupancySensor};
 use log::info;
 use parking_lot::RwLock as SyncRwLock;
@@ -71,18 +72,7 @@ async fn main() {
     // Spawn a task to simulate sensor state changes for testing
     // TODO: Replace this simulation with HTTP server endpoint
     // POST /sensors/{name} { "state": true/false }
-    let contact_for_sim = contact_sensor.clone();
-    let occupancy_for_sim = occupancy_sensor.clone();
-    let sensor_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            let new_contact = contact_for_sim.toggle();
-            info!("[Sim] Contact sensor toggled to: {}", new_contact);
-            let new_occupancy = occupancy_for_sim.toggle();
-            info!("[Sim] Occupancy sensor toggled to: {}", new_occupancy);
-        }
-    });
+    let sensor_task = run_sensor_simulation(contact_sensor.clone(), occupancy_sensor.clone());
 
     // Start Matter stack in a separate thread
     // Matter uses blocking I/O internally with embassy, so we run it on a dedicated thread

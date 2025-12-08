@@ -7,10 +7,10 @@
 use super::webrtc_bridge::{BridgeConfig, RtspWebRtcBridge};
 use crate::config::Config;
 use crate::error::{BridgeError, Result};
-use crate::matter::clusters::camera_av_stream_mgmt_cluster::{
+use crate::matter::clusters::camera_av_stream_mgmt::{
     CameraAvStreamMgmtCluster, Features as CameraFeatures, StreamUsage, VideoCodec, VideoResolution,
 };
-use crate::matter::clusters::webrtc_transport_provider_cluster::{
+use crate::matter::clusters::webrtc_transport_provider::{
     Features as WebRtcFeatures, IceServer, WebRtcTransportProviderCluster,
 };
 use crate::matter::controls::on_off_hooks::DoorbellOnOffHooks;

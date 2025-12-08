@@ -1,3 +1,5 @@
 //! Simulated input sources for testing.
-//!
-//! Currently sensor simulation is in main.rs - will be extracted here later.
+
+mod sensors;
+
+pub use sensors::run_sensor_simulation;

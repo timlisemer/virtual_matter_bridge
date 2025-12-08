@@ -13,11 +13,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 pub mod boolean_state;
 pub mod camera_av_stream_mgmt;
-pub mod camera_av_stream_mgmt_cluster;
 pub mod occupancy_sensing;
 pub mod time_sync;
 pub mod webrtc_transport_provider;
-pub mod webrtc_transport_provider_cluster;
 
 // Re-export for convenience
 pub use boolean_state::BooleanStateHandler;

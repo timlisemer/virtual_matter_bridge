@@ -1,5 +1,5 @@
-use super::clusters::camera_av_stream_mgmt_cluster::CameraAvStreamMgmtCluster;
-use super::clusters::webrtc_transport_provider_cluster::WebRtcTransportProviderCluster;
+use super::clusters::camera_av_stream_mgmt::CameraAvStreamMgmtCluster;
+use super::clusters::webrtc_transport_provider::WebRtcTransportProviderCluster;
 use super::clusters::{
     BooleanStateHandler, CameraAvStreamMgmtHandler, OccupancySensingHandler, TimeSyncHandler,
     WebRtcTransportProviderHandler,
