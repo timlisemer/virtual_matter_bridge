@@ -7,7 +7,6 @@ use super::device_types::{
 };
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
-use super::subscription_persistence::{SubscriptionStore, run_subscription_resumption};
 use crate::clusters::camera_av_stream_mgmt::CameraAvStreamMgmtCluster;
 use crate::clusters::webrtc_transport_provider::WebRtcTransportProviderCluster;
 use crate::device::on_off_hooks::DoorbellOnOffHooks;
@@ -61,7 +60,6 @@ static MATTER: StaticCell<Matter> = StaticCell::new();
 static BUFFERS: StaticCell<PooledBuffers<10, NoopRawMutex, IMBuffer>> = StaticCell::new();
 static SUBSCRIPTIONS: StaticCell<DefaultSubscriptions> = StaticCell::new();
 static PSM: StaticCell<Psm<4096>> = StaticCell::new();
-static PERSIST_NOTIFY: StaticCell<Signal<NoopRawMutex, ()>> = StaticCell::new();
 /// Signal for sensor change notifications (wakes subscription processor)
 /// Uses CriticalSectionRawMutex because sensors are updated from different threads
 static SENSOR_NOTIFY: StaticCell<Signal<CriticalSectionRawMutex, ()>> = StaticCell::new();
@@ -131,7 +129,6 @@ fn get_interface_index(interface_name: &str) -> Result<u32, Error> {
 /// Directory for persistence data
 const PERSIST_DIR: &str = ".config/virtual-matter-bridge";
 const PERSIST_FILE: &str = "matter.bin";
-const SUBSCRIPTIONS_FILE: &str = "subscriptions.json";
 
 /// Get the persistence file path
 fn get_persist_path() -> PathBuf {
@@ -139,14 +136,6 @@ fn get_persist_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(PERSIST_DIR)
         .join(PERSIST_FILE)
-}
-
-/// Get the subscriptions persistence file path
-fn get_subscriptions_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(PERSIST_DIR)
-        .join(SUBSCRIPTIONS_FILE)
 }
 
 /// Root endpoint cluster list with Time Synchronization added
@@ -189,8 +178,6 @@ const NODE: Node<'static> = Node {
 
 /// Cached network interface filter (lazily initialized)
 static NETIFS: OnceLock<FilteredNetifs> = OnceLock::new();
-/// Subscription store (persistent shared state)
-static SUBSCRIPTION_STORE: OnceLock<Arc<SubscriptionStore>> = OnceLock::new();
 
 /// Get the network interface filter, auto-detecting if necessary.
 fn get_netifs() -> &'static FilteredNetifs {
@@ -385,16 +372,6 @@ pub async fn run_matter_stack(
         // Continue anyway - will start fresh
     }
 
-    // Shared notification so multiple tasks can observe persistence events
-    let persist_notify = PERSIST_NOTIFY.uninit().init_with(Signal::new());
-    // Reborrow as shared reference to allow multiple tasks to use it
-    let persist_notify_ref: &'static Signal<NoopRawMutex, ()> = persist_notify;
-
-    // Initialize subscription store for persistence
-    let subscription_store = SUBSCRIPTION_STORE
-        .get_or_init(|| Arc::new(SubscriptionStore::new(get_subscriptions_path())))
-        .clone();
-
     // Only open commissioning window if device is not already commissioned
     const COMM_WINDOW_TIMEOUT_SECS: u16 = 900; // 15 minutes
     if matter.is_commissioned() {
@@ -576,25 +553,17 @@ pub async fn run_matter_stack(
     // Run data model background job (handles subscriptions)
     let mut dm_job = pin!(dm.run());
 
-    // Persistence task - fan out persist notifications to both storage and recovery logging
+    // Persistence task - saves Matter state to disk when signaled
     let persist_path_clone = persist_path.clone();
     let matter_ref = matter;
     let mut persist = pin!(async move {
         loop {
             matter_ref.wait_persist().await;
-            persist_notify_ref.signal(());
             if let Err(e) = psm.store(&persist_path_clone, matter_ref, NO_NETWORKS) {
                 error!("Failed to store persisted state: {:?}", e);
             }
         }
     });
-
-    // Subscription resumption task - monitors for controller reconnection after restart
-    // Logs recovery status and detects when CASE sessions are re-established
-    let mut sub_resume = pin!(run_subscription_resumption(
-        subscription_store,
-        persist_notify_ref
-    ));
 
     // Sensor notification forwarding task - bridges sensor signals to Matter subscriptions
     // When a sensor calls notify(), this task wakes up and triggers subscription reports
@@ -616,11 +585,7 @@ pub async fn run_matter_stack(
         &mut transport,
         &mut mdns,
         select(&mut respond, &mut dm_job).coalesce(),
-        select(
-            &mut persist,
-            select(&mut sub_resume, &mut sensor_forward).coalesce(),
-        )
-        .coalesce(),
+        select(&mut persist, &mut sensor_forward).coalesce(),
     )
     .coalesce()
     .await;
