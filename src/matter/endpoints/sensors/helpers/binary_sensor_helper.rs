@@ -6,8 +6,7 @@
 //! Supports live Matter subscription updates - when the value changes,
 //! the notification is pushed instantly to Home Assistant.
 
-use super::super::{NotifiableSensor, Sensor};
-use super::notifier::ClusterNotifier;
+use crate::matter::endpoints::endpoints_helpers::{ClusterNotifier, NotifiableSensor, Sensor};
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -18,13 +17,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 ///
 /// Implements the [`Sensor`] trait for change detection - the version
 /// is incremented each time the value changes via `set()` or `toggle()`.
-pub struct BinarySensor {
+pub struct BinarySensorHelper {
     state: AtomicBool,
     version: AtomicU32,
     notifier: RwLock<Option<ClusterNotifier>>,
 }
 
-impl BinarySensor {
+impl BinarySensorHelper {
     /// Create a new binary sensor with the given initial state.
     pub fn new(initial: bool) -> Self {
         Self {
@@ -67,13 +66,13 @@ impl BinarySensor {
     }
 }
 
-impl NotifiableSensor for BinarySensor {
+impl NotifiableSensor for BinarySensorHelper {
     fn set_notifier(&self, notifier: ClusterNotifier) {
         *self.notifier.write() = Some(notifier);
     }
 }
 
-impl Sensor for BinarySensor {
+impl Sensor for BinarySensorHelper {
     fn version(&self) -> u32 {
         self.version.load(Ordering::SeqCst)
     }
@@ -85,18 +84,18 @@ mod tests {
 
     #[test]
     fn test_initial_state() {
-        let sensor = BinarySensor::new(true);
+        let sensor = BinarySensorHelper::new(true);
         assert!(sensor.get());
         assert_eq!(sensor.version(), 0);
 
-        let sensor = BinarySensor::new(false);
+        let sensor = BinarySensorHelper::new(false);
         assert!(!sensor.get());
         assert_eq!(sensor.version(), 0);
     }
 
     #[test]
     fn test_set_increments_version() {
-        let sensor = BinarySensor::new(false);
+        let sensor = BinarySensorHelper::new(false);
         assert_eq!(sensor.version(), 0);
 
         sensor.set(true);
@@ -114,7 +113,7 @@ mod tests {
 
     #[test]
     fn test_toggle_increments_version() {
-        let sensor = BinarySensor::new(false);
+        let sensor = BinarySensorHelper::new(false);
         assert_eq!(sensor.version(), 0);
 
         let new_state = sensor.toggle();

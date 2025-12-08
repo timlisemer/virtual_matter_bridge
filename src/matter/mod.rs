@@ -4,8 +4,11 @@ mod netif;
 mod stack;
 
 pub mod clusters;
-pub mod controls;
 pub mod device_types;
-pub mod sensors;
+pub mod endpoints;
 
 pub use stack::run_matter_stack;
+
+// Re-export from endpoints for convenience
+pub use endpoints::controls;
+pub use endpoints::sensors;

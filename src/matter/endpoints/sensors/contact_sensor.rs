@@ -2,10 +2,10 @@
 //!
 //! Exposes as Matter Contact Sensor device type (0x0015).
 
-use super::helpers::binary_sensor::BinarySensor;
+use super::helpers::BinarySensorHelper;
 
 /// Contact sensor (door/window open/close).
 ///
-/// Type alias for [`BinarySensor`] - exposed as Matter Contact Sensor (0x0015)
+/// Type alias for [`BinarySensorHelper`] - exposed as Matter Contact Sensor (0x0015)
 /// using the BooleanState cluster (0x0045).
-pub type ContactSensor = BinarySensor;
+pub type ContactSensor = BinarySensorHelper;

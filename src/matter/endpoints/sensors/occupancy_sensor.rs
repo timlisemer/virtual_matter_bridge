@@ -2,10 +2,10 @@
 //!
 //! Exposes as Matter Occupancy Sensor device type (0x0107).
 
-use super::helpers::binary_sensor::BinarySensor;
+use super::helpers::BinarySensorHelper;
 
 /// Occupancy sensor (motion/presence detection).
 ///
-/// Type alias for [`BinarySensor`] - exposed as Matter Occupancy Sensor (0x0107)
+/// Type alias for [`BinarySensorHelper`] - exposed as Matter Occupancy Sensor (0x0107)
 /// using the OccupancySensing cluster (0x0406).
-pub type OccupancySensor = BinarySensor;
+pub type OccupancySensor = BinarySensorHelper;

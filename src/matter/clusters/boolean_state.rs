@@ -6,7 +6,7 @@
 //!
 //! Uses version tracking to detect changes and notify subscribers automatically.
 
-use super::super::sensors::ContactSensor;
+use super::super::endpoints::sensors::ContactSensor;
 use super::sync_dataver_with_sensor;
 use rs_matter::dm::{
     Access, Attribute, Cluster, Dataver, Handler, NonBlockingHandler, ReadContext, ReadReply,

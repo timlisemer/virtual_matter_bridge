@@ -1,15 +1,15 @@
 //! Cluster change notifier for live Matter subscription updates.
 //!
-//! When sensors change, they need to immediately notify the Matter subscription
+//! When sensors or controls change, they need to immediately notify the Matter subscription
 //! system so updates are pushed to controllers (like Home Assistant) instantly.
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 
-/// Notifies Matter subscriptions when sensor values change.
+/// Notifies Matter subscriptions when endpoint values change.
 ///
-/// This is the bridge between sensors and the Matter stack.
-/// When a sensor calls `notify()`, it wakes the subscription processor
+/// This is the bridge between sensors/controls and the Matter stack.
+/// When a sensor or control calls `notify()`, it wakes the subscription processor
 /// to immediately push updates to controllers.
 ///
 /// # Usage

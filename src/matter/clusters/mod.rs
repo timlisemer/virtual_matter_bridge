@@ -7,7 +7,7 @@
 //! because the provisional camera clusters have path resolution issues when used from
 //! outside the rs-matter crate.
 
-use super::sensors::Sensor;
+use super::endpoints::endpoints_helpers::Sensor;
 use rs_matter::dm::Dataver;
 use std::sync::atomic::{AtomicU32, Ordering};
 
