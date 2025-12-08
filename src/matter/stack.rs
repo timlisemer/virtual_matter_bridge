@@ -6,10 +6,10 @@ use super::clusters::{
 };
 use super::device_info::DEV_INFO;
 use super::device_types::{
-    DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_ON_OFF_PLUG_IN_UNIT,
-    DEV_TYPE_VIDEO_DOORBELL,
+    DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_ON_OFF_LIGHT,
+    DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_VIDEO_DOORBELL,
 };
-use super::endpoints::controls::Switch;
+use super::endpoints::controls::{LightSwitch, Switch};
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
 use embassy_futures::select::{select, select4};
@@ -181,6 +181,12 @@ const NODE: Node<'static> = Node {
             device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT),
             clusters: clusters!(desc::DescHandler::CLUSTER, Switch::CLUSTER),
         },
+        // Endpoint 5: On/Off Light (addable light)
+        Endpoint {
+            id: 5,
+            device_types: devices!(DEV_TYPE_ON_OFF_LIGHT),
+            clusters: clusters!(desc::DescHandler::CLUSTER, LightSwitch::CLUSTER),
+        },
     ],
 };
 
@@ -203,6 +209,7 @@ fn dm_handler<'a>(
     boolean_state_handler: &'a BooleanStateHandler,
     occupancy_sensing_handler: &'a OccupancySensingHandler,
     switch_handler: &'a on_off::OnOffHandler<'a, &'a Switch, NoLevelControl>,
+    light_handler: &'a on_off::OnOffHandler<'a, &'a LightSwitch, NoLevelControl>,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -269,6 +276,16 @@ fn dm_handler<'a>(
                     .chain(
                         EpClMatcher::new(Some(4), Some(Switch::CLUSTER.id)),
                         on_off::HandlerAsyncAdaptor(switch_handler),
+                    )
+                    // Endpoint 5: Descriptor (Light)
+                    .chain(
+                        EpClMatcher::new(Some(5), Some(desc::DescHandler::CLUSTER.id)),
+                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
+                    )
+                    // Endpoint 5: OnOff (light)
+                    .chain(
+                        EpClMatcher::new(Some(5), Some(LightSwitch::CLUSTER.id)),
+                        on_off::HandlerAsyncAdaptor(light_handler),
                     ),
             ),
         ),
@@ -285,6 +302,7 @@ fn dm_handler<'a>(
 /// The handlers bridge the existing cluster business logic to rs-matter's data model.
 ///
 /// Note: Currently uses test device credentials for development.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_matter_stack(
     _config: &MatterConfig,
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
@@ -293,6 +311,7 @@ pub async fn run_matter_stack(
     contact_sensor: Arc<ContactSensor>,
     occupancy_sensor: Arc<OccupancySensor>,
     switch: Arc<Switch>,
+    light: Arc<LightSwitch>,
 ) -> Result<(), Error> {
     info!("Initializing Matter stack...");
 
@@ -473,6 +492,13 @@ pub async fn run_matter_stack(
         switch.as_ref(),
     );
 
+    // Create OnOff handler for light (endpoint 5)
+    let light_handler = on_off::OnOffHandler::new_standalone(
+        Dataver::new_rand(matter.rand()),
+        5, // endpoint ID
+        light.as_ref(),
+    );
+
     // Create the data model with our video doorbell handlers
     let handler = dm_handler(
         matter,
@@ -483,6 +509,7 @@ pub async fn run_matter_stack(
         &boolean_state_handler,
         &occupancy_sensing_handler,
         &switch_handler,
+        &light_handler,
     );
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 
