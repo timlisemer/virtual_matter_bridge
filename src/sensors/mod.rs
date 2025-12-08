@@ -7,10 +7,10 @@
 //! for change detection. Sensors that support live updates also implement
 //! [`NotifiableSensor`] to push changes instantly to Matter subscribers.
 
-pub mod boolean_sensor;
+pub mod door_sensor;
 pub mod notifier;
 
-pub use boolean_sensor::BooleanSensor;
+pub use door_sensor::BooleanSensor;
 pub use notifier::ClusterNotifier;
 
 /// Trait for sensors with change detection.
