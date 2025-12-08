@@ -4,12 +4,14 @@
 //! various input sources (HTTP, simulation, etc.) and read by Matter clusters.
 //!
 //! All sensors implement the [`Sensor`] trait which provides version tracking
-//! for change detection. This allows Matter cluster handlers to detect when
-//! a sensor value has changed and notify subscribers accordingly.
+//! for change detection. Sensors that support live updates also implement
+//! [`NotifiableSensor`] to push changes instantly to Matter subscribers.
 
 pub mod boolean_sensor;
+pub mod notifier;
 
 pub use boolean_sensor::BooleanSensor;
+pub use notifier::ClusterNotifier;
 
 /// Trait for sensors with change detection.
 ///
@@ -33,4 +35,25 @@ pub trait Sensor: Send + Sync {
     ///
     /// This should be incremented each time the sensor value changes.
     fn version(&self) -> u32;
+}
+
+/// Trait for sensors that support live Matter subscription updates.
+///
+/// Sensors implementing this trait can push updates instantly to Home Assistant
+/// when their values change, rather than waiting for polling.
+///
+/// # Example
+/// ```ignore
+/// // During Matter stack initialization:
+/// sensor.set_notifier(ClusterNotifier::new(signal, endpoint_id, cluster_id));
+///
+/// // Later, when sensor value changes (e.g., from HTTP handler):
+/// sensor.set(true);  // Automatically notifies Matter subscribers
+/// ```
+pub trait NotifiableSensor: Sensor {
+    /// Set the notifier for this sensor.
+    ///
+    /// Called during Matter stack setup to wire the sensor to the
+    /// subscription notification system.
+    fn set_notifier(&self, notifier: ClusterNotifier);
 }

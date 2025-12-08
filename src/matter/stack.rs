@@ -9,7 +9,7 @@ use crate::clusters::camera_av_stream_mgmt::CameraAvStreamMgmtCluster;
 use crate::clusters::webrtc_transport_provider::WebRtcTransportProviderCluster;
 use crate::device::on_off_hooks::DoorbellOnOffHooks;
 use embassy_futures::select::{select, select4};
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::signal::Signal;
 use log::{error, info};
 use nix::ifaddrs::getifaddrs;
@@ -49,8 +49,9 @@ use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::{Arc, OnceLock};
 
+use super::clusters::boolean_state;
 use crate::config::MatterConfig;
-use crate::sensors::BooleanSensor;
+use crate::sensors::{BooleanSensor, ClusterNotifier, NotifiableSensor};
 
 /// Static cells for Matter resources (required for 'static lifetime)
 static MATTER: StaticCell<Matter> = StaticCell::new();
@@ -58,6 +59,9 @@ static BUFFERS: StaticCell<PooledBuffers<10, NoopRawMutex, IMBuffer>> = StaticCe
 static SUBSCRIPTIONS: StaticCell<DefaultSubscriptions> = StaticCell::new();
 static PSM: StaticCell<Psm<4096>> = StaticCell::new();
 static PERSIST_NOTIFY: StaticCell<Signal<NoopRawMutex, ()>> = StaticCell::new();
+/// Signal for sensor change notifications (wakes subscription processor)
+/// Uses CriticalSectionRawMutex because sensors are updated from different threads
+static SENSOR_NOTIFY: StaticCell<Signal<CriticalSectionRawMutex, ()>> = StaticCell::new();
 
 /// Static hostname storage for mDNS (needs 'static lifetime for Host struct)
 static HOSTNAME: OnceLock<String> = OnceLock::new();
@@ -406,6 +410,19 @@ pub async fn run_matter_stack(
         .uninit()
         .init_with(DefaultSubscriptions::init());
 
+    // Initialize sensor notification signal (thread-safe for cross-thread updates)
+    let sensor_notify = SENSOR_NOTIFY.uninit().init_with(Signal::new());
+    let sensor_notify_ref: &'static Signal<CriticalSectionRawMutex, ()> = sensor_notify;
+
+    // Wire up the boolean sensor to push live updates to Matter subscriptions
+    // When sensor.set() or sensor.toggle() is called, it signals sensor_notify,
+    // which wakes the forwarding task to call subscriptions.notify_cluster_changed()
+    test_sensor.set_notifier(ClusterNotifier::new(
+        sensor_notify_ref,
+        2, // endpoint_id for Contact Sensor
+        boolean_state::CLUSTER_ID,
+    ));
+
     // Create handlers with properly randomized Dataver seeds
     // This is critical for subscription/attribute change tracking to work correctly
     let camera_handler =
@@ -548,13 +565,27 @@ pub async fn run_matter_stack(
         persist_notify_ref
     ));
 
+    // Sensor notification forwarding task - bridges sensor signals to Matter subscriptions
+    // When a sensor calls notify(), this task wakes up and triggers subscription reports
+    let mut sensor_forward = pin!(async {
+        loop {
+            sensor_notify_ref.wait().await;
+            // Notify subscriptions that the BooleanState cluster on endpoint 2 has changed
+            subscriptions.notify_cluster_changed(2, boolean_state::CLUSTER_ID);
+        }
+    });
+
     // Run all components concurrently in the same async executor
     // mDNS is included here to avoid RefCell borrow conflicts with Matter's internal state
     let result = select4(
         &mut transport,
         &mut mdns,
         select(&mut respond, &mut dm_job).coalesce(),
-        select(&mut persist, &mut sub_resume).coalesce(),
+        select(
+            &mut persist,
+            select(&mut sub_resume, &mut sensor_forward).coalesce(),
+        )
+        .coalesce(),
     )
     .coalesce()
     .await;

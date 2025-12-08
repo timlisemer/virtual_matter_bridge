@@ -2,8 +2,12 @@
 //!
 //! Provides thread-safe shared state for binary sensors that can be
 //! read by Matter clusters and updated from external sources.
+//!
+//! Supports live Matter subscription updates - when the value changes,
+//! the notification is pushed instantly to Home Assistant.
 
-use super::Sensor;
+use super::{ClusterNotifier, NotifiableSensor, Sensor};
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Thread-safe boolean sensor state.
@@ -28,6 +32,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 pub struct BooleanSensor {
     state: AtomicBool,
     version: AtomicU32,
+    /// Notifier for live Matter subscription updates.
+    /// Set after Matter stack initialization via `set_notifier()`.
+    notifier: RwLock<Option<ClusterNotifier>>,
 }
 
 impl BooleanSensor {
@@ -36,6 +43,7 @@ impl BooleanSensor {
         Self {
             state: AtomicBool::new(initial),
             version: AtomicU32::new(0),
+            notifier: RwLock::new(None),
         }
     }
 
@@ -45,19 +53,39 @@ impl BooleanSensor {
     }
 
     /// Set the sensor state. Increments version if value changed.
+    ///
+    /// If a notifier is configured, immediately pushes the update to
+    /// Matter subscribers (e.g., Home Assistant).
     pub fn set(&self, value: bool) {
         let old = self.state.swap(value, Ordering::SeqCst);
         if old != value {
             self.version.fetch_add(1, Ordering::SeqCst);
+            // Trigger instant Matter notification
+            if let Some(notifier) = self.notifier.read().as_ref() {
+                notifier.notify();
+            }
         }
     }
 
     /// Toggle the sensor state and return the new value. Always increments version.
+    ///
+    /// If a notifier is configured, immediately pushes the update to
+    /// Matter subscribers (e.g., Home Assistant).
     pub fn toggle(&self) -> bool {
         // fetch_xor with true flips the bit
         let old = self.state.fetch_xor(true, Ordering::SeqCst);
         self.version.fetch_add(1, Ordering::SeqCst);
+        // Trigger instant Matter notification
+        if let Some(notifier) = self.notifier.read().as_ref() {
+            notifier.notify();
+        }
         !old
+    }
+}
+
+impl NotifiableSensor for BooleanSensor {
+    fn set_notifier(&self, notifier: ClusterNotifier) {
+        *self.notifier.write() = Some(notifier);
     }
 }
 
