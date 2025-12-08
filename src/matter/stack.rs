@@ -1,4 +1,4 @@
-use super::clusters::{CameraAvStreamMgmtHandler, WebRtcTransportProviderHandler};
+use super::clusters::{CameraAvStreamMgmtHandler, TimeSyncHandler, WebRtcTransportProviderHandler};
 use super::device_types::DEV_TYPE_VIDEO_DOORBELL;
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
@@ -18,11 +18,12 @@ use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::clusters::on_off::{self, NoLevelControl, OnOffHooks};
 use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
+use rs_matter::dm::devices;
 use rs_matter::dm::endpoints;
 use rs_matter::dm::subscriptions::DefaultSubscriptions;
 use rs_matter::dm::{
-    Async, AsyncHandler, AsyncMetadata, DataModel, Dataver, EmptyHandler, Endpoint, EpClMatcher,
-    Node,
+    Async, AsyncHandler, AsyncMetadata, Cluster, DataModel, Dataver, EmptyHandler, Endpoint,
+    EpClMatcher, Node,
 };
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
@@ -138,12 +139,19 @@ fn get_subscriptions_path() -> PathBuf {
         .join(SUBSCRIPTIONS_FILE)
 }
 
+/// Root endpoint cluster list with Time Synchronization added
+const ROOT_CLUSTERS: &[Cluster<'static>] =
+    clusters!(eth; TimeSyncHandler::CLUSTER);
+
 /// Node definition for our Matter Video Doorbell device
 const NODE: Node<'static> = Node {
     id: 0,
     endpoints: &[
-        // Endpoint 0: Root endpoint with standard Matter system clusters
-        endpoints::root_endpoint(rs_matter::dm::clusters::net_comm::NetworkType::Ethernet),
+        Endpoint {
+            id: endpoints::ROOT_ENDPOINT_ID,
+            device_types: devices!(devices::DEV_TYPE_ROOT_NODE),
+            clusters: ROOT_CLUSTERS,
+        },
         // Endpoint 1: Video Doorbell with camera and WebRTC clusters
         Endpoint {
             id: 1,
@@ -174,6 +182,7 @@ fn dm_handler<'a>(
     camera_handler: &'a CameraAvStreamMgmtHandler,
     webrtc_handler: &'a WebRtcTransportProviderHandler,
     on_off_handler: &'a on_off::OnOffHandler<'a, &'a DoorbellOnOffHooks, NoLevelControl>,
+    time_sync_handler: &'a TimeSyncHandler,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -186,6 +195,11 @@ fn dm_handler<'a>(
                 matter.rand(),
                 // Chain handlers for endpoint 1 (video doorbell)
                 EmptyHandler
+                    // Endpoint 0: Time Synchronization (read-only stub)
+                    .chain(
+                        EpClMatcher::new(Some(0), Some(TimeSyncHandler::CLUSTER.id)),
+                        Async(time_sync_handler),
+                    )
                     // Endpoint 1: Descriptor
                     .chain(
                         EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
@@ -378,6 +392,7 @@ pub async fn run_matter_stack(
         CameraAvStreamMgmtHandler::new(Dataver::new_rand(matter.rand()), camera_cluster);
     let webrtc_handler =
         WebRtcTransportProviderHandler::new(Dataver::new_rand(matter.rand()), webrtc_cluster);
+    let time_sync_handler = TimeSyncHandler::new(Dataver::new_rand(matter.rand()));
 
     // Create OnOff handler for the doorbell's armed/disarmed state
     // new_standalone calls init internally
@@ -388,7 +403,13 @@ pub async fn run_matter_stack(
     );
 
     // Create the data model with our video doorbell handlers
-    let handler = dm_handler(matter, &camera_handler, &webrtc_handler, &on_off_handler);
+    let handler = dm_handler(
+        matter,
+        &camera_handler,
+        &webrtc_handler,
+        &on_off_handler,
+        &time_sync_handler,
+    );
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 
     // Create the responder that handles incoming Matter requests
