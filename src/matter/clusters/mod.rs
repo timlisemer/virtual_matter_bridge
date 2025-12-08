@@ -7,11 +7,13 @@
 //! because the provisional camera clusters have path resolution issues when used from
 //! outside the rs-matter crate.
 
+pub mod boolean_state;
 pub mod camera_av_stream_mgmt;
 pub mod time_sync;
 pub mod webrtc_transport_provider;
 
 // Re-export for convenience
+pub use boolean_state::BooleanStateHandler;
 pub use camera_av_stream_mgmt::CameraAvStreamMgmtHandler;
 pub use time_sync::TimeSyncHandler;
 pub use webrtc_transport_provider::WebRtcTransportProviderHandler;

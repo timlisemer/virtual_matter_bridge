@@ -1,4 +1,6 @@
-use super::clusters::{CameraAvStreamMgmtHandler, TimeSyncHandler, WebRtcTransportProviderHandler};
+use super::clusters::{
+    BooleanStateHandler, CameraAvStreamMgmtHandler, TimeSyncHandler, WebRtcTransportProviderHandler,
+};
 use super::device_types::DEV_TYPE_VIDEO_DOORBELL;
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
@@ -17,8 +19,8 @@ use parking_lot::RwLock as SyncRwLock;
 use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::clusters::on_off::{self, NoLevelControl, OnOffHooks};
-use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::dm::devices;
+use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::dm::endpoints;
 use rs_matter::dm::subscriptions::DefaultSubscriptions;
 use rs_matter::dm::{
@@ -140,8 +142,7 @@ fn get_subscriptions_path() -> PathBuf {
 }
 
 /// Root endpoint cluster list with Time Synchronization added
-const ROOT_CLUSTERS: &[Cluster<'static>] =
-    clusters!(eth; TimeSyncHandler::CLUSTER);
+const ROOT_CLUSTERS: &[Cluster<'static>] = clusters!(eth; TimeSyncHandler::CLUSTER);
 
 /// Node definition for our Matter Video Doorbell device
 const NODE: Node<'static> = Node {
@@ -159,6 +160,7 @@ const NODE: Node<'static> = Node {
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
                 DoorbellOnOffHooks::CLUSTER,
+                BooleanStateHandler::CLUSTER,
                 CameraAvStreamMgmtHandler::CLUSTER,
                 WebRtcTransportProviderHandler::CLUSTER
             ),
@@ -183,6 +185,7 @@ fn dm_handler<'a>(
     webrtc_handler: &'a WebRtcTransportProviderHandler,
     on_off_handler: &'a on_off::OnOffHandler<'a, &'a DoorbellOnOffHooks, NoLevelControl>,
     time_sync_handler: &'a TimeSyncHandler,
+    boolean_state_handler: &'a BooleanStateHandler,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -209,6 +212,11 @@ fn dm_handler<'a>(
                     .chain(
                         EpClMatcher::new(Some(1), Some(DoorbellOnOffHooks::CLUSTER.id)),
                         on_off::HandlerAsyncAdaptor(on_off_handler),
+                    )
+                    // Endpoint 1: BooleanState (test sensor)
+                    .chain(
+                        EpClMatcher::new(Some(1), Some(BooleanStateHandler::CLUSTER.id)),
+                        Async(boolean_state_handler),
                     )
                     // Endpoint 1: Camera AV Stream Management
                     .chain(
@@ -393,6 +401,7 @@ pub async fn run_matter_stack(
     let webrtc_handler =
         WebRtcTransportProviderHandler::new(Dataver::new_rand(matter.rand()), webrtc_cluster);
     let time_sync_handler = TimeSyncHandler::new(Dataver::new_rand(matter.rand()));
+    let boolean_state_handler = BooleanStateHandler::new(Dataver::new_rand(matter.rand()));
 
     // Create OnOff handler for the doorbell's armed/disarmed state
     // new_standalone calls init internally
@@ -409,6 +418,7 @@ pub async fn run_matter_stack(
         &webrtc_handler,
         &on_off_handler,
         &time_sync_handler,
+        &boolean_state_handler,
     );
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 
