@@ -35,3 +35,18 @@ pub const DEV_TYPE_BASIC_VIDEO_CAMERA: DeviceType = DeviceType {
     dtype: 0x0014,
     drev: 1,
 };
+
+/// Matter Contact Sensor device type
+///
+/// Device Type ID: 0x0015 (21 decimal)
+/// Device Type Revision: 1
+///
+/// Required clusters:
+/// - BooleanState (0x0045)
+/// - Descriptor (standard)
+///
+/// Used for binary sensors (open/closed, true/false states).
+pub const DEV_TYPE_CONTACT_SENSOR: DeviceType = DeviceType {
+    dtype: 0x0015,
+    drev: 1,
+};

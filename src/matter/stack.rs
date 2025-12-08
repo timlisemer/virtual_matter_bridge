@@ -1,7 +1,7 @@
 use super::clusters::{
     BooleanStateHandler, CameraAvStreamMgmtHandler, TimeSyncHandler, WebRtcTransportProviderHandler,
 };
-use super::device_types::DEV_TYPE_VIDEO_DOORBELL;
+use super::device_types::{DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_VIDEO_DOORBELL};
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
 use super::subscription_persistence::{SubscriptionStore, run_subscription_resumption};
@@ -160,10 +160,15 @@ const NODE: Node<'static> = Node {
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
                 DoorbellOnOffHooks::CLUSTER,
-                BooleanStateHandler::CLUSTER,
                 CameraAvStreamMgmtHandler::CLUSTER,
                 WebRtcTransportProviderHandler::CLUSTER
             ),
+        },
+        // Endpoint 2: Contact Sensor (test binary sensor)
+        Endpoint {
+            id: 2,
+            device_types: devices!(DEV_TYPE_CONTACT_SENSOR),
+            clusters: clusters!(desc::DescHandler::CLUSTER, BooleanStateHandler::CLUSTER),
         },
     ],
 };
@@ -196,7 +201,7 @@ fn dm_handler<'a>(
             endpoints::with_sys(
                 &false,
                 matter.rand(),
-                // Chain handlers for endpoint 1 (video doorbell)
+                // Chain handlers for all endpoints
                 EmptyHandler
                     // Endpoint 0: Time Synchronization (read-only stub)
                     .chain(
@@ -213,11 +218,6 @@ fn dm_handler<'a>(
                         EpClMatcher::new(Some(1), Some(DoorbellOnOffHooks::CLUSTER.id)),
                         on_off::HandlerAsyncAdaptor(on_off_handler),
                     )
-                    // Endpoint 1: BooleanState (test sensor)
-                    .chain(
-                        EpClMatcher::new(Some(1), Some(BooleanStateHandler::CLUSTER.id)),
-                        Async(boolean_state_handler),
-                    )
                     // Endpoint 1: Camera AV Stream Management
                     .chain(
                         EpClMatcher::new(Some(1), Some(CameraAvStreamMgmtHandler::CLUSTER.id)),
@@ -227,6 +227,16 @@ fn dm_handler<'a>(
                     .chain(
                         EpClMatcher::new(Some(1), Some(WebRtcTransportProviderHandler::CLUSTER.id)),
                         Async(webrtc_handler),
+                    )
+                    // Endpoint 2: Descriptor (Contact Sensor)
+                    .chain(
+                        EpClMatcher::new(Some(2), Some(desc::DescHandler::CLUSTER.id)),
+                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
+                    )
+                    // Endpoint 2: BooleanState (test sensor)
+                    .chain(
+                        EpClMatcher::new(Some(2), Some(BooleanStateHandler::CLUSTER.id)),
+                        Async(boolean_state_handler),
                     ),
             ),
         ),
