@@ -1,4 +1,5 @@
 mod dev_att;
+mod device_info;
 mod logging_udp;
 mod netif;
 mod stack;

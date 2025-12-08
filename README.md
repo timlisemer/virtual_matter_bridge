@@ -25,21 +25,27 @@ This project implements a general-purpose virtual Matter bridge that can:
 │ • HTTP APIs     │     │  │   Endpoint 0 (Root)    │  │     └───────────────────┘
 │ • MQTT Topics   │     │  └────────────────────────┘  │
 │ • Files         │     │  ┌────────────────────────┐  │
-│ • Commands      │     │  │ Endpoint 1 (Aggregator)│  │
+│ • Commands      │     │  │ Endpoint 1 (Doorbell)  │  │
+│ • Simulation    │     │  │ • OnOff (armed state)  │  │
 └─────────────────┘     │  └────────────────────────┘  │
                         │  ┌────────────────────────┐  │
-                        │  │ Endpoint 2+ (Devices)  │  │
-                        │  │ • Video Doorbell       │  │
-                        │  │ • On/Off Switch        │  │
-                        │  │ • Sensors (planned)    │  │
+                        │  │ Endpoint 2 (Contact)   │  │
+                        │  │ • BooleanState cluster │  │
+                        │  └────────────────────────┘  │
+                        │  ┌────────────────────────┐  │
+                        │  │ Endpoint 3 (Occupancy) │  │
+                        │  │ • OccupancySensing     │  │
                         │  └────────────────────────┘  │
                         └──────────────────────────────┘
 ```
 
-## Matter 1.5 Clusters Implemented
+## Matter Clusters Implemented
 
 | Cluster                     | ID       | Status         | Description                                      |
 | --------------------------- | -------- | -------------- | ------------------------------------------------ |
+| OnOff                       | `0x0006` | ✅ Implemented | On/Off control (doorbell armed/disarmed state)   |
+| BooleanState                | `0x0045` | ✅ Implemented | Binary sensor state (contact sensors)            |
+| OccupancySensing            | `0x0406` | ✅ Implemented | Occupancy/motion detection                       |
 | Camera AV Stream Management | `0x0551` | ✅ Implemented | Video/audio stream allocation, codec negotiation |
 | WebRTC Transport Provider   | `0x0553` | ✅ Implemented | WebRTC session management, SDP/ICE handling      |
 
@@ -61,17 +67,27 @@ This project implements a general-purpose virtual Matter bridge that can:
   - NOC (Node Operational Certificate) installation
   - Fabric creation and operational discovery (`_matter._tcp`)
   - Multi-admin commissioning (phone + Home Assistant)
-- [x] **Cluster Handlers (stub implementations)**
-  - Camera AV Stream Management (0x0551)
-  - WebRTC Transport Provider (0x0553)
+- [x] **Cluster Handlers**
+  - Camera AV Stream Management (0x0551) - stub
+  - WebRTC Transport Provider (0x0553) - stub
+  - OnOff (0x0006) - functional (doorbell armed state)
+  - BooleanState (0x0045) - functional (contact sensors)
+  - OccupancySensing (0x0406) - functional (occupancy sensors)
+- [x] **Endpoint Architecture**
+  - `src/matter/endpoints/` folder structure with sensors, controls, shared helpers
+  - `BinarySensorHelper` for read-only binary state with version tracking
+  - `SwitchHelper` for read-write on/off controls with version tracking
+  - `ClusterNotifier` for live Matter subscription updates
+  - Type aliases: `ContactSensor`, `OccupancySensor`, `Switch`
 
-### Current Issue
+### Current Status
 
-Home Assistant shows **"This device has no entities"** because:
+Home Assistant now shows entities for:
+- **OnOff switch** (doorbell armed/disarmed state)
+- **Contact sensor** (simulated, toggles every 30 seconds)
+- **Occupancy sensor** (simulated, toggles every 30 seconds)
 
-- Current clusters (Camera AV, WebRTC) are protocol-level, not user-facing
-- No standard clusters like OnOff that HA recognizes as entities
-- Cluster handlers return placeholder values
+Camera clusters (AV Stream, WebRTC) are protocol-level and don't appear as entities until Matter 1.5 camera support is available in controllers.
 
 ---
 
@@ -84,7 +100,17 @@ Home Assistant shows **"This device has no entities"** because:
 - [x] Add OnOff cluster to video doorbell endpoint (exposes armed/disarmed state)
 - [ ] ~~Fix device type registration (correct Matter 1.5 video doorbell ID)~~ - Skipped: Home Assistant does not support Matter 1.5 camera device types yet
 
-### Phase 2: Multi-Device Bridge Architecture
+### Phase 2: Endpoint Architecture (Completed)
+
+**Goal:** Create clean architecture for sensors and controls
+
+- [x] Create `src/matter/endpoints/` folder structure with sensors, controls, and shared helpers
+- [x] Implement `SwitchHelper` for on/off controls (mirrors `BinarySensorHelper` pattern)
+- [x] Move shared utilities (notifier, traits) to `endpoints_helpers/`
+- [x] Create `Switch` type alias for reusable on/off controls
+- [x] Implement `ContactSensor` and `OccupancySensor` using `BinarySensorHelper`
+
+### Phase 3: Multi-Device Bridge Architecture
 
 **Goal:** Refactor to support multiple device types
 
@@ -93,16 +119,17 @@ Home Assistant shows **"This device has no entities"** because:
 - [ ] Create endpoint manager (dynamic endpoint allocation)
 - [ ] Implement proper Matter bridge topology (`DEV_TYPE_AGGREGATOR` + `DEV_TYPE_BRIDGED_NODE`)
 
-### Phase 3: On/Off Switch Device Type
+### Phase 4: On/Off Switch Device Type
 
 **Goal:** Add support for simple On/Off switches
 
-- [ ] Create OnOffSwitch device type using rs-matter's `OnOffHandler`
+- [x] Create Switch control type using `SwitchHelper` (matches sensor pattern)
+- [ ] Create OnOff cluster handler for Switch controls
 - [ ] Create data source abstraction (trait for boolean data sources)
 - [ ] Implement data source backends: HTTP endpoint, MQTT, file, command execution
 - [ ] Add configuration for switch devices (source URL, polling interval, read-only mode)
 
-### Phase 4: Complete Video Doorbell Implementation (Deferred: Matter 1.5 camera/video doorbell support not yet in controllers/rs-matter)
+### Phase 5: Complete Video Doorbell Implementation (Deferred: Matter 1.5 camera/video doorbell support not yet in controllers/rs-matter)
 
 **Goal:** Make video doorbell fully functional with real streaming
 
@@ -111,15 +138,18 @@ Home Assistant shows **"This device has no entities"** because:
 - [ ] ~~Bridge RTSP to WebRTC (RTP packetization, timestamp sync)~~ (Deferred until Matter 1.5 camera/video doorbell support lands)
 - [ ] ~~Implement doorbell press events (Matter event notifications, external trigger API)~~ (Deferred until Matter 1.5 camera/video doorbell support lands)
 
-### Phase 5: Additional Device Types
+### Phase 6: Additional Device Types
 
 **Goal:** Expand supported device types
 
-- [ ] Sensor devices (temperature, humidity, contact, occupancy)
+- [x] Contact sensor (BooleanState cluster 0x0045)
+- [x] Occupancy sensor (OccupancySensing cluster 0x0406)
+- [ ] Temperature sensor
+- [ ] Humidity sensor
 - [ ] Dimmable light/switch (LevelControl cluster)
 - [ ] Thermostat (if needed)
 
-### Phase 6: Production Readiness
+### Phase 7: Production Readiness
 
 **Goal:** Make the bridge production-ready
 

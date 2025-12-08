@@ -6,6 +6,8 @@
 pub mod helpers;
 pub mod on_off_hooks;
 pub mod switch;
+pub mod switch_hooks;
 
-pub use on_off_hooks::DoorbellOnOffHooks;
+pub use on_off_hooks::DevicePowerSwitch;
 pub use switch::Switch;
+pub use switch_hooks::SwitchHooks;

@@ -65,3 +65,18 @@ pub const DEV_TYPE_OCCUPANCY_SENSOR: DeviceType = DeviceType {
     dtype: 0x0107,
     drev: 1,
 };
+
+/// Matter On/Off Plug-in Unit device type
+///
+/// Device Type ID: 0x010A (266 decimal)
+/// Device Type Revision: 2
+///
+/// Required clusters:
+/// - OnOff (0x0006)
+/// - Descriptor (standard)
+///
+/// Used for standalone on/off switches.
+pub const DEV_TYPE_ON_OFF_PLUG_IN_UNIT: DeviceType = DeviceType {
+    dtype: 0x010A,
+    drev: 2,
+};

@@ -1,48 +1,45 @@
-//! OnOff hooks implementation for device power switch.
+//! OnOff hooks implementation for addable switches.
 //!
-//! This module provides the `DevicePowerSwitch` struct that implements the `OnOffHooks` trait
-//! from rs-matter. The OnOff state represents whether the device is powered on or off.
+//! This module provides the `SwitchHooks` struct that implements the `OnOffHooks` trait
+//! from rs-matter. Uses `SwitchHelper` for state management, allowing switches to be
+//! added dynamically like sensors.
 //!
 //! Uses atomics for thread-safe access since the hooks are shared between the main application
 //! and the Matter stack thread.
 
+use super::helpers::SwitchHelper;
 use rs_matter::dm::Cluster;
 use rs_matter::dm::clusters::decl::on_off as on_off_cluster;
 use rs_matter::dm::clusters::on_off::{EffectVariantEnum, OnOffHooks, StartUpOnOffEnum};
 use rs_matter::error::Error;
 use rs_matter::tlv::Nullable;
 use rs_matter::with;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
-/// OnOff hooks for device power switch.
+/// OnOff hooks for addable switches.
 ///
-/// When `on_off` is `true`, the device is powered on.
-/// When `on_off` is `false`, the device is powered off.
-///
-/// Uses atomic types for thread-safe access between the application and Matter stack.
-pub struct DevicePowerSwitch {
-    /// Current power state (true = on, false = off)
-    on_off: AtomicBool,
+/// Wraps a `SwitchHelper` to implement the `OnOffHooks` trait from rs-matter.
+/// Can be used to add multiple switches to a Matter device.
+pub struct SwitchHooks {
+    /// The underlying switch state
+    switch: SwitchHelper,
     /// Startup behavior configuration (encoded as Option discriminant + value)
     /// 0 = None, 1 = Off, 2 = On, 3 = Toggle
     start_up_on_off: AtomicU8,
 }
 
-// SAFETY: All fields use atomic types, making this safe to share across threads
-unsafe impl Sync for DevicePowerSwitch {}
-
-impl DevicePowerSwitch {
-    /// Create a new DevicePowerSwitch with power on by default.
-    pub fn new() -> Self {
+impl SwitchHooks {
+    /// Create a new SwitchHooks with the given initial state.
+    pub fn new(initial: bool) -> Self {
         Self {
-            on_off: AtomicBool::new(true),     // On by default
+            switch: SwitchHelper::new(initial),
             start_up_on_off: AtomicU8::new(0), // None
         }
     }
 
-    /// Check if the device is currently powered on.
-    pub fn is_on(&self) -> bool {
-        self.on_off.load(Ordering::SeqCst)
+    /// Get the underlying switch helper for external state access.
+    pub fn switch(&self) -> &SwitchHelper {
+        &self.switch
     }
 
     /// Encode StartUpOnOffEnum to u8
@@ -67,15 +64,14 @@ impl DevicePowerSwitch {
     }
 }
 
-impl Default for DevicePowerSwitch {
+impl Default for SwitchHooks {
     fn default() -> Self {
-        Self::new()
+        Self::new(true) // On by default
     }
 }
 
-impl OnOffHooks for DevicePowerSwitch {
+impl OnOffHooks for SwitchHooks {
     /// Cluster definition with basic OnOff functionality.
-    /// We don't need the LIGHTING feature since this is just a power toggle.
     const CLUSTER: Cluster<'static> = on_off_cluster::FULL_CLUSTER
         .with_revision(6)
         .with_attrs(with!(required; on_off_cluster::AttributeId::OnOff))
@@ -86,15 +82,15 @@ impl OnOffHooks for DevicePowerSwitch {
         ));
 
     fn on_off(&self) -> bool {
-        self.on_off.load(Ordering::SeqCst)
+        self.switch.get()
     }
 
     fn set_on_off(&self, on: bool) {
         log::info!(
-            "[Matter] OnOff cluster: device power {}",
+            "[Matter] OnOff cluster: switch {}",
             if on { "on" } else { "off" }
         );
-        self.on_off.store(on, Ordering::SeqCst);
+        self.switch.set(on);
     }
 
     fn start_up_on_off(&self) -> Nullable<StartUpOnOffEnum> {
@@ -111,6 +107,6 @@ impl OnOffHooks for DevicePowerSwitch {
     }
 
     async fn handle_off_with_effect(&self, _effect: EffectVariantEnum) {
-        // No special effect handling for device power
+        // No special effect handling
     }
 }

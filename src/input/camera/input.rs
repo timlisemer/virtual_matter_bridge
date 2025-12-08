@@ -13,7 +13,7 @@ use crate::matter::clusters::camera_av_stream_mgmt::{
 use crate::matter::clusters::webrtc_transport_provider::{
     Features as WebRtcFeatures, IceServer, WebRtcTransportProviderCluster,
 };
-use crate::matter::controls::on_off_hooks::DoorbellOnOffHooks;
+use crate::matter::controls::on_off_hooks::DevicePowerSwitch;
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,8 +28,8 @@ pub struct CameraInput {
     /// Cluster instances use sync RwLock for Matter handler compatibility
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
     webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
-    /// OnOff hooks for armed/disarmed state (used by rs-matter's OnOffHandler)
-    on_off_hooks: Arc<DoorbellOnOffHooks>,
+    /// OnOff hooks for device power state (used by rs-matter's OnOffHandler)
+    on_off_hooks: Arc<DevicePowerSwitch>,
     /// Bridge uses async RwLock for async I/O operations
     bridge: Arc<AsyncRwLock<Option<RtspWebRtcBridge>>>,
     running: Arc<AtomicBool>,
@@ -77,7 +77,7 @@ impl CameraInput {
             config,
             camera_cluster: Arc::new(SyncRwLock::new(camera_cluster)),
             webrtc_cluster: Arc::new(SyncRwLock::new(webrtc_cluster)),
-            on_off_hooks: Arc::new(DoorbellOnOffHooks::new()),
+            on_off_hooks: Arc::new(DevicePowerSwitch::new()),
             bridge: Arc::new(AsyncRwLock::new(None)),
             running: Arc::new(AtomicBool::new(false)),
         }
@@ -244,13 +244,13 @@ impl CameraInput {
     }
 
     /// Get OnOff hooks for external access (Matter stack).
-    pub fn on_off_hooks(&self) -> Arc<DoorbellOnOffHooks> {
+    pub fn on_off_hooks(&self) -> Arc<DevicePowerSwitch> {
         self.on_off_hooks.clone()
     }
 
-    /// Check if the camera is armed (will notify on events).
-    pub fn is_armed(&self) -> bool {
-        self.on_off_hooks.is_armed()
+    /// Check if the device power is on.
+    pub fn is_powered_on(&self) -> bool {
+        self.on_off_hooks.is_on()
     }
 
     /// Check if the camera input is running.

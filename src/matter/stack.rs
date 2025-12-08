@@ -4,10 +4,13 @@ use super::clusters::{
     BooleanStateHandler, CameraAvStreamMgmtHandler, OccupancySensingHandler, TimeSyncHandler,
     WebRtcTransportProviderHandler,
 };
+use super::device_info::DEV_INFO;
 use super::device_types::{
-    DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_VIDEO_DOORBELL,
+    DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_ON_OFF_PLUG_IN_UNIT,
+    DEV_TYPE_VIDEO_DOORBELL,
 };
-use super::endpoints::controls::on_off_hooks::DoorbellOnOffHooks;
+use super::endpoints::controls::on_off_hooks::DevicePowerSwitch;
+use super::endpoints::controls::switch_hooks::SwitchHooks;
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
 use embassy_futures::select::{select, select4};
@@ -22,7 +25,7 @@ use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _};
 use rs_matter::dm::clusters::on_off::{self, NoLevelControl, OnOffHooks};
 use rs_matter::dm::devices;
-use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
+use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM};
 use rs_matter::dm::endpoints;
 use rs_matter::dm::subscriptions::DefaultSubscriptions;
 use rs_matter::dm::{
@@ -156,7 +159,7 @@ const NODE: Node<'static> = Node {
             device_types: devices!(DEV_TYPE_VIDEO_DOORBELL),
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
-                DoorbellOnOffHooks::CLUSTER,
+                DevicePowerSwitch::CLUSTER,
                 CameraAvStreamMgmtHandler::CLUSTER,
                 WebRtcTransportProviderHandler::CLUSTER
             ),
@@ -173,6 +176,12 @@ const NODE: Node<'static> = Node {
             device_types: devices!(DEV_TYPE_OCCUPANCY_SENSOR),
             clusters: clusters!(desc::DescHandler::CLUSTER, OccupancySensingHandler::CLUSTER),
         },
+        // Endpoint 4: On/Off Switch (addable switch)
+        Endpoint {
+            id: 4,
+            device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT),
+            clusters: clusters!(desc::DescHandler::CLUSTER, SwitchHooks::CLUSTER),
+        },
     ],
 };
 
@@ -185,14 +194,16 @@ fn get_netifs() -> &'static FilteredNetifs {
 }
 
 /// Build the data model handler with video doorbell clusters
+#[allow(clippy::too_many_arguments)]
 fn dm_handler<'a>(
     matter: &'a Matter<'a>,
     camera_handler: &'a CameraAvStreamMgmtHandler,
     webrtc_handler: &'a WebRtcTransportProviderHandler,
-    on_off_handler: &'a on_off::OnOffHandler<'a, &'a DoorbellOnOffHooks, NoLevelControl>,
+    on_off_handler: &'a on_off::OnOffHandler<'a, &'a DevicePowerSwitch, NoLevelControl>,
     time_sync_handler: &'a TimeSyncHandler,
     boolean_state_handler: &'a BooleanStateHandler,
     occupancy_sensing_handler: &'a OccupancySensingHandler,
+    switch_handler: &'a on_off::OnOffHandler<'a, &'a SwitchHooks, NoLevelControl>,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -215,9 +226,9 @@ fn dm_handler<'a>(
                         EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
                         Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
                     )
-                    // Endpoint 1: OnOff (armed/disarmed)
+                    // Endpoint 1: OnOff (device power)
                     .chain(
-                        EpClMatcher::new(Some(1), Some(DoorbellOnOffHooks::CLUSTER.id)),
+                        EpClMatcher::new(Some(1), Some(DevicePowerSwitch::CLUSTER.id)),
                         on_off::HandlerAsyncAdaptor(on_off_handler),
                     )
                     // Endpoint 1: Camera AV Stream Management
@@ -249,6 +260,16 @@ fn dm_handler<'a>(
                     .chain(
                         EpClMatcher::new(Some(3), Some(OccupancySensingHandler::CLUSTER.id)),
                         Async(occupancy_sensing_handler),
+                    )
+                    // Endpoint 4: Descriptor (Switch)
+                    .chain(
+                        EpClMatcher::new(Some(4), Some(desc::DescHandler::CLUSTER.id)),
+                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
+                    )
+                    // Endpoint 4: OnOff (switch)
+                    .chain(
+                        EpClMatcher::new(Some(4), Some(SwitchHooks::CLUSTER.id)),
+                        on_off::HandlerAsyncAdaptor(switch_handler),
                     ),
             ),
         ),
@@ -265,21 +286,20 @@ fn dm_handler<'a>(
 /// The handlers bridge the existing cluster business logic to rs-matter's data model.
 ///
 /// Note: Currently uses test device credentials for development.
-/// TODO: Create proper static device info from MatterConfig
 pub async fn run_matter_stack(
     _config: &MatterConfig,
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
     webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
-    on_off_hooks: Arc<DoorbellOnOffHooks>,
+    on_off_hooks: Arc<DevicePowerSwitch>,
     contact_sensor: Arc<ContactSensor>,
     occupancy_sensor: Arc<OccupancySensor>,
+    switch_hooks: Arc<SwitchHooks>,
 ) -> Result<(), Error> {
     info!("Initializing Matter stack...");
 
     // Initialize the Matter instance in static memory
-    // Using test device credentials for now (they have 'static lifetime)
     let matter = MATTER.uninit().init_with(Matter::init(
-        &TEST_DEV_DET,
+        &DEV_INFO,
         TEST_DEV_COMM,
         &TEST_DEV_ATT,
         rs_matter::utils::epoch::sys_epoch,
@@ -440,12 +460,18 @@ pub async fn run_matter_stack(
     let occupancy_sensing_handler =
         OccupancySensingHandler::new(Dataver::new_rand(matter.rand()), occupancy_sensor);
 
-    // Create OnOff handler for the doorbell's armed/disarmed state
-    // new_standalone calls init internally
+    // Create OnOff handler for device power (endpoint 1)
     let on_off_handler = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(matter.rand()),
         1, // endpoint ID
         on_off_hooks.as_ref(),
+    );
+
+    // Create OnOff handler for switch (endpoint 4)
+    let switch_handler = on_off::OnOffHandler::new_standalone(
+        Dataver::new_rand(matter.rand()),
+        4, // endpoint ID
+        switch_hooks.as_ref(),
     );
 
     // Create the data model with our video doorbell handlers
@@ -457,6 +483,7 @@ pub async fn run_matter_stack(
         &time_sync_handler,
         &boolean_state_handler,
         &occupancy_sensing_handler,
+        &switch_handler,
     );
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 

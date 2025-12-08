@@ -11,7 +11,7 @@ pub mod sensors;
 
 // Re-export key types for convenience (allow unused as these are public API)
 #[allow(unused_imports)]
-pub use controls::{DoorbellOnOffHooks, Switch};
+pub use controls::{DevicePowerSwitch, Switch, SwitchHooks};
 #[allow(unused_imports)]
 pub use endpoints_helpers::{ClusterNotifier, NotifiableSensor, Sensor};
 #[allow(unused_imports)]
