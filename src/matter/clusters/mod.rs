@@ -1,4 +1,4 @@
-//! Matter cluster handlers for the video doorbell device.
+//! Matter cluster handlers for the Matter bridge.
 //!
 //! This module provides handlers that bridge the existing cluster business logic
 //! to rs-matter's data model traits.

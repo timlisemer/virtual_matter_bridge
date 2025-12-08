@@ -10,10 +10,17 @@ This project implements a general-purpose virtual Matter bridge that can:
 - Process and transform it as needed
 - Export it as Matter devices to any Matter controller
 
-### Current Focus
+### Current Implementation
 
-- **Video Doorbell**: RTSP camera streams exposed as Matter 1.5 video doorbell devices — functionality deferred until Matter 1.5 camera/video doorbell support is available in controllers/rs-matter.
-- **On/Off Switches**: Boolean data sources exposed as Matter switches (planned)
+The bridge currently exposes:
+- **Power Switch** (Endpoint 1): Main device on/off control
+- **Door Sensor** (Endpoint 3): Contact sensor (bridged)
+- **Motion Sensor** (Endpoint 4): Occupancy sensor (bridged)
+- **Power Strip** (Endpoint 5): On/Off plug-in unit (bridged)
+- **Light** (Endpoint 7): On/Off light (bridged)
+
+Future device types (when controller support is available):
+- **Video Doorbell**: RTSP camera streams exposed as Matter 1.5 video doorbell devices
 
 ## Architecture
 
@@ -25,16 +32,28 @@ This project implements a general-purpose virtual Matter bridge that can:
 │ • HTTP APIs     │     │  │   Endpoint 0 (Root)    │  │     └───────────────────┘
 │ • MQTT Topics   │     │  └────────────────────────┘  │
 │ • Files         │     │  ┌────────────────────────┐  │
-│ • Commands      │     │  │ Endpoint 1 (Doorbell)  │  │
-│ • Simulation    │     │  │ • OnOff (armed state)  │  │
+│ • Commands      │     │  │ EP1 (Power Switch)     │  │
+│ • Simulation    │     │  │ • OnOff cluster        │  │
 └─────────────────┘     │  └────────────────────────┘  │
                         │  ┌────────────────────────┐  │
-                        │  │ Endpoint 2 (Contact)   │  │
+                        │  │ EP2 (Aggregator)       │  │
+                        │  │ • Bridge root          │  │
+                        │  └────────────────────────┘  │
+                        │  ┌────────────────────────┐  │
+                        │  │ EP3 (Door - bridged)   │  │
                         │  │ • BooleanState cluster │  │
                         │  └────────────────────────┘  │
                         │  ┌────────────────────────┐  │
-                        │  │ Endpoint 3 (Occupancy) │  │
+                        │  │ EP4 (Motion - bridged) │  │
                         │  │ • OccupancySensing     │  │
+                        │  └────────────────────────┘  │
+                        │  ┌────────────────────────┐  │
+                        │  │ EP5 (Power Strip)      │  │
+                        │  │ • OnOff cluster        │  │
+                        │  └────────────────────────┘  │
+                        │  ┌────────────────────────┐  │
+                        │  │ EP7 (Light - bridged)  │  │
+                        │  │ • OnOff cluster        │  │
                         │  └────────────────────────┘  │
                         └──────────────────────────────┘
 ```
@@ -43,11 +62,11 @@ This project implements a general-purpose virtual Matter bridge that can:
 
 | Cluster                     | ID       | Status         | Description                                      |
 | --------------------------- | -------- | -------------- | ------------------------------------------------ |
-| OnOff                       | `0x0006` | ✅ Implemented | On/Off control (doorbell armed/disarmed state)   |
+| OnOff                       | `0x0006` | ✅ Implemented | On/Off control for switches and lights           |
 | BooleanState                | `0x0045` | ✅ Implemented | Binary sensor state (contact sensors)            |
 | OccupancySensing            | `0x0406` | ✅ Implemented | Occupancy/motion detection                       |
-| Camera AV Stream Management | `0x0551` | ✅ Implemented | Video/audio stream allocation, codec negotiation |
-| WebRTC Transport Provider   | `0x0553` | ✅ Implemented | WebRTC session management, SDP/ICE handling      |
+| Camera AV Stream Management | `0x0551` | ✅ Stub        | Video/audio stream allocation (for future video doorbell sub-devices) |
+| WebRTC Transport Provider   | `0x0553` | ✅ Stub        | WebRTC session management (for future video doorbell sub-devices)     |
 
 ## Project Status
 
@@ -68,11 +87,11 @@ This project implements a general-purpose virtual Matter bridge that can:
   - Fabric creation and operational discovery (`_matter._tcp`)
   - Multi-admin commissioning (phone + Home Assistant)
 - [x] **Cluster Handlers**
-  - Camera AV Stream Management (0x0551) - stub
-  - WebRTC Transport Provider (0x0553) - stub
-  - OnOff (0x0006) - functional (doorbell armed state)
+  - OnOff (0x0006) - functional (switches and lights)
   - BooleanState (0x0045) - functional (contact sensors)
   - OccupancySensing (0x0406) - functional (occupancy sensors)
+  - Camera AV Stream Management (0x0551) - stub (for future video doorbell sub-devices)
+  - WebRTC Transport Provider (0x0553) - stub (for future video doorbell sub-devices)
 - [x] **Endpoint Architecture**
   - `src/matter/endpoints/` folder structure with sensors, controls, shared helpers
   - `BinarySensorHelper` for read-only binary state with version tracking
@@ -83,22 +102,25 @@ This project implements a general-purpose virtual Matter bridge that can:
 ### Current Status
 
 Home Assistant now shows entities for:
-- **OnOff switch** (doorbell armed/disarmed state)
-- **Contact sensor** (simulated, toggles every 30 seconds)
-- **Occupancy sensor** (simulated, toggles every 30 seconds)
+- **Power Switch** (main device on/off control)
+- **Door sensor** (contact sensor, bridged)
+- **Motion sensor** (occupancy sensor, bridged)
+- **Power Strip** (on/off plug-in unit, bridged)
+- **Light** (on/off light, bridged)
 
-Camera clusters (AV Stream, WebRTC) are protocol-level and don't appear as entities until Matter 1.5 camera support is available in controllers.
+Camera clusters (AV Stream, WebRTC) are stub implementations for future video doorbell sub-devices.
 
 ---
 
 ## Development Roadmap
 
-### Phase 1: Fix Current Video Doorbell (Make Entities Appear)
+### Phase 1: Bridge Architecture Foundation (Completed)
 
-**Goal:** Make the existing video doorbell show entities in Home Assistant
+**Goal:** Establish bridge architecture with multiple device types
 
-- [x] Add OnOff cluster to video doorbell endpoint (exposes armed/disarmed state)
-- [ ] ~~Fix device type registration (correct Matter 1.5 video doorbell ID)~~ - Skipped: Home Assistant does not support Matter 1.5 camera device types yet
+- [x] Create bridge endpoint structure with Aggregator (EP2) and bridged devices
+- [x] Add OnOff cluster for switches and lights
+- [x] Implement Contact Sensor and Occupancy Sensor as bridged devices
 
 ### Phase 2: Endpoint Architecture (Completed)
 
@@ -129,9 +151,9 @@ Camera clusters (AV Stream, WebRTC) are protocol-level and don't appear as entit
 - [ ] Implement data source backends: HTTP endpoint, MQTT, file, command execution
 - [ ] Add configuration for switch devices (source URL, polling interval, read-only mode)
 
-### Phase 5: Complete Video Doorbell Implementation (Deferred: Matter 1.5 camera/video doorbell support not yet in controllers/rs-matter)
+### Phase 5: Video Doorbell Sub-Device (Deferred: Matter 1.5 camera/video doorbell support not yet in controllers/rs-matter)
 
-**Goal:** Make video doorbell fully functional with real streaming
+**Goal:** Add video doorbell as a bridged sub-device type
 
 - [ ] ~~Implement actual RTSP client (`retina` crate for H.264/AAC)~~ (Deferred until Matter 1.5 camera/video doorbell support lands)
 - [ ] ~~Implement WebRTC peer connections (`webrtc` crate)~~ (Deferred until Matter 1.5 camera/video doorbell support lands)
@@ -168,7 +190,7 @@ Configuration is loaded from environment variables with sensible defaults:
 | `RTSP_URL`             | `rtsp://username:password@10.0.0.38:554/h264Preview_01_main` | Camera RTSP stream URL                                      |
 | `RTSP_USERNAME`        | -                                                            | RTSP authentication username                                |
 | `RTSP_PASSWORD`        | -                                                            | RTSP authentication password                                |
-| `DEVICE_NAME`          | `Virtual Doorbell`                                           | Matter device name                                          |
+| `DEVICE_NAME`          | `Virtual Matter Bridge`                                      | Matter device name                                          |
 | `MATTER_DISCRIMINATOR` | `3840`                                                       | Matter pairing discriminator                                |
 | `MATTER_PASSCODE`      | `20202021`                                                   | Matter pairing passcode                                     |
 
@@ -496,57 +518,37 @@ The following features are currently stub implementations or use placeholder val
 
 ### Matter Device Model
 
-- **Device Type**: Uses `DEV_TYPE_ON_OFF_LIGHT` as placeholder (not video doorbell device type) — deferred until Matter 1.5 camera/video doorbell support is available.
-- **Device Type ID**: `0x0012` is a placeholder value — deferred until the official Matter 1.5 spec value is usable by controllers/rs-matter.
-- **Clusters**: Not connected to rs-matter data model - no actual attribute/command handlers
+- **Test Credentials**: Uses test device credentials from rs-matter (not production DAC)
+- **Fabric Persistence**: Credentials stored in file, but commissioning state may need reset after major changes
 
-### RTSP Streaming
+### Video Doorbell Sub-Device (Future Feature)
 
-- **RTSP Client**: Stub that returns fake 1920x1080@30fps stream info — deferred until Matter 1.5 camera/video doorbell support lands.
-- **Frame Generation**: Produces placeholder frames (zeros) instead of actual video data — deferred until Matter 1.5 camera/video doorbell support lands.
+The following are stub implementations preserved for future video doorbell sub-device support:
 
-### WebRTC
+- **RTSP Client**: Stub that returns fake 1920x1080@30fps stream info
+- **Frame Generation**: Produces placeholder frames (zeros) instead of actual video data
+- **WebRTC Bridge**: Frame forwarding is a no-op (counts frames but doesn't transmit)
+- **SDP Generation**: Uses placeholder values for ICE credentials and DTLS fingerprints
+- **Peer Connections**: Not implemented
 
-- **WebRTC Bridge**: Frame forwarding is a no-op (counts frames but doesn't transmit) — deferred until Matter 1.5 camera/video doorbell support lands.
-- **SDP Generation**: Uses placeholder values for ICE credentials and DTLS fingerprints — deferred until Matter 1.5 camera/video doorbell support lands.
-- **Peer Connections**: Not implemented — deferred until Matter 1.5 camera/video doorbell support lands.
-
-### Testing/Debug Code
-
-- **Doorbell Simulation**: Automatically triggers doorbell press every 30 seconds for testing
-- **Fabric Persistence**: Credentials stored in memory only (lost on restart)
+These stubs will be completed when Matter 1.5 camera/video doorbell support lands in controllers and rs-matter.
 
 ## Open TODOs and Placeholders (code-level)
 
 ### Matter Stack
 
 - **Test credentials** (`src/matter/stack.rs`): Uses test device credentials; TODO to build proper static device info from `MatterConfig`.
-- **Dataver placeholder** (`src/main.rs`): Cluster handlers use `Dataver::new(0)` placeholder randomness; switch to real rs-matter datavers.
-- ~~**Device type ID** (`src/device/video_doorbell.rs`): Device type ID `0x0012` is a placeholder; replace with official Matter 1.5 video doorbell ID.~~ (Deferred: blocked until Matter 1.5 video doorbell/camera device types are supported by controllers/rs-matter)
 - **Persistence path** (`src/matter/stack.rs:117`): Hardcoded to `.config/virtual-matter-bridge`; should respect `XDG_CONFIG_HOME` or be configurable.
 - **Network change detection** (`src/matter/netif.rs:242-246`): `wait_changed()` just waits forever; no actual network change detection implemented.
 
-### RTSP Streaming
+### Video Doorbell Sub-Device (Future Feature)
 
-- **RTSP client** (`src/rtsp/client.rs`): Connection/streaming are mocked; implement retina-based RTSP connect/stream (RTP/RTCP, depacketize H.264/AAC, invoke callbacks with real frames).
-- **Stream info hardcoded** (`src/rtsp/client.rs:96-102`): Returns fake 1920x1080@30fps regardless of actual camera capabilities.
+The following TODOs are for future video doorbell sub-device support:
 
-### WebRTC
-
-- **WebRTC bridge** (`src/rtsp/webrtc_bridge.rs`): TODO to set up WebRTC peer connection, media tracks, and actually forward video/audio frames instead of counting bytes.
-- **SDP placeholders** (`src/clusters/webrtc_transport_provider.rs`): ICE ufrag/pwd and DTLS fingerprint are placeholder strings; replace with real credentials/certs from WebRTC stack.
-- **Unused session_id** (`src/clusters/webrtc_transport_provider.rs:246-250`): `_session_id` parameter not used in SDP generation; should generate session-specific SDP.
-
-### Camera Cluster
-
-- **Video parameters hardcoded** (`src/clusters/camera_av_stream_mgmt.rs`): Resolutions, bitrates, sample rates hardcoded; should match actual camera capabilities — deferred until Matter 1.5 camera/video doorbell support lands.
-- **Snapshot commands** (`src/matter/clusters/camera_av_stream_mgmt.rs:997-1004`): `SnapshotStreamAllocate`/`Deallocate` return `InvalidAction` error; not implemented — deferred until Matter 1.5 camera/video doorbell support lands.
-- **Silent no-op commands**: `SetStreamPriorities`, `SetViewport` accept but do nothing — deferred until Matter 1.5 camera/video doorbell support lands.
-
-### Doorbell
-
-- **Doorbell event notification** (`src/main.rs:78`, `src/device/video_doorbell.rs:154`): Sets atomic flag but doesn't send Matter event notification to controllers — deferred until Matter 1.5 camera/video doorbell support lands.
-- **Empty DoorbellConfig** (`src/config.rs:41-44`): Struct has no fields; either add doorbell-specific config or remove.
+- **RTSP client** (`src/input/camera/`): Connection/streaming are mocked; implement retina-based RTSP connect/stream.
+- **WebRTC bridge** (`src/input/camera/webrtc_bridge.rs`): Set up WebRTC peer connection and actually forward video/audio frames.
+- **SDP placeholders** (`src/matter/clusters/webrtc_transport_provider.rs`): ICE ufrag/pwd and DTLS fingerprint are placeholder strings.
+- **Camera cluster** (`src/matter/clusters/camera_av_stream_mgmt.rs`): Video parameters hardcoded; snapshot commands return errors.
 
 ### Error Handling
 

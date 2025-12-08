@@ -2,7 +2,7 @@
 name = "virtual-matter-bridge"
 version = "0.1.0"
 edition = "2024"
-description = "A virtual Matter bridge for exposing RTSP cameras as Matter video doorbells"
+description = "A virtual Matter bridge for exposing various devices to Matter controllers"
 authors = ["Tim Lisemer"]
 license = "MIT"
 

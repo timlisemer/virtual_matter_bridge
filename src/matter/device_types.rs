@@ -1,7 +1,7 @@
-//! Device type definitions for Matter video doorbell.
+//! Device type definitions for Matter bridge.
 //!
 //! This module defines the device types used in this bridge,
-//! following the Matter 1.5 specification for camera devices.
+//! following the Matter specification for various device types.
 
 use rs_matter::dm::DeviceType;
 

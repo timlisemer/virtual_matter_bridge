@@ -54,7 +54,7 @@ impl Default for Config {
             matter: MatterConfig {
                 vendor_id: 0xFFF1,
                 product_id: 0x8001,
-                device_name: "Virtual Doorbell".to_string(),
+                device_name: "Virtual Matter Bridge".to_string(),
                 discriminator: 3840,
                 passcode: 20202021,
             },

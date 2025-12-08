@@ -147,7 +147,7 @@ const ROOT_CLUSTERS: &[Cluster<'static>] = clusters!(eth; TimeSyncHandler::CLUST
 ///
 /// Architecture:
 /// - Endpoint 0: Root node (standard)
-/// - Endpoint 1: Video Doorbell with Device Power (main device, NOT bridged)
+/// - Endpoint 1: Power Switch (main device, NOT bridged)
 /// - Endpoint 2: Aggregator (bridge root - enumerates bridged devices)
 /// - Endpoints 3+: Bridged devices (each with BridgedDeviceBasicInformation)
 const NODE: Node<'static> = Node {
@@ -159,7 +159,7 @@ const NODE: Node<'static> = Node {
             device_types: devices!(devices::DEV_TYPE_ROOT_NODE),
             clusters: ROOT_CLUSTERS,
         },
-        // Endpoint 1: Video Doorbell with Device Power (main device, not bridged)
+        // Endpoint 1: Power Switch (main device, not bridged)
         Endpoint {
             id: 1,
             device_types: devices!(DEV_TYPE_VIDEO_DOORBELL),
@@ -196,23 +196,14 @@ const NODE: Node<'static> = Node {
                 OccupancySensingHandler::CLUSTER
             ),
         },
-        // Endpoint 5: On/Off Switch 1 (bridged) - "Switch 1"
+        // Endpoint 5: Power Strip (bridged) - "Power Strip" with 2 switches
         Endpoint {
             id: 5,
             device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_BRIDGED_NODE),
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
                 BridgedHandler::CLUSTER,
-                Switch::CLUSTER
-            ),
-        },
-        // Endpoint 6: On/Off Switch 2 (bridged) - "Switch 2"
-        Endpoint {
-            id: 6,
-            device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_BRIDGED_NODE),
-            clusters: clusters!(
-                desc::DescHandler::CLUSTER,
-                BridgedHandler::CLUSTER,
+                Switch::CLUSTER,
                 Switch::CLUSTER
             ),
         },
@@ -253,7 +244,6 @@ fn dm_handler<'a>(
     bridged_ep3: &'a BridgedHandler,
     bridged_ep4: &'a BridgedHandler,
     bridged_ep5: &'a BridgedHandler,
-    bridged_ep6: &'a BridgedHandler,
     bridged_ep7: &'a BridgedHandler,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
@@ -272,7 +262,7 @@ fn dm_handler<'a>(
                         EpClMatcher::new(Some(0), Some(TimeSyncHandler::CLUSTER.id)),
                         Async(time_sync_handler),
                     )
-                    // Endpoint 1: Descriptor (Video Doorbell - main device)
+                    // Endpoint 1: Descriptor (Power Switch - main device)
                     .chain(
                         EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
                         Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
@@ -330,7 +320,7 @@ fn dm_handler<'a>(
                         EpClMatcher::new(Some(4), Some(OccupancySensingHandler::CLUSTER.id)),
                         Async(occupancy_sensing_handler),
                     )
-                    // Endpoint 5: Descriptor (Switch 1)
+                    // Endpoint 5: Descriptor (Power Strip)
                     .chain(
                         EpClMatcher::new(Some(5), Some(desc::DescHandler::CLUSTER.id)),
                         Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
@@ -345,19 +335,9 @@ fn dm_handler<'a>(
                         EpClMatcher::new(Some(5), Some(Switch::CLUSTER.id)),
                         on_off::HandlerAsyncAdaptor(switch1_handler),
                     )
-                    // Endpoint 6: Descriptor (Switch 2)
+                    // Endpoint 5: OnOff (switch 2)
                     .chain(
-                        EpClMatcher::new(Some(6), Some(desc::DescHandler::CLUSTER.id)),
-                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
-                    )
-                    // Endpoint 6: BridgedDeviceBasicInformation
-                    .chain(
-                        EpClMatcher::new(Some(6), Some(BridgedHandler::CLUSTER.id)),
-                        Async(bridged_ep6.clone().adapt()),
-                    )
-                    // Endpoint 6: OnOff (switch 2)
-                    .chain(
-                        EpClMatcher::new(Some(6), Some(Switch::CLUSTER.id)),
+                        EpClMatcher::new(Some(5), Some(Switch::CLUSTER.id)),
                         on_off::HandlerAsyncAdaptor(switch2_handler),
                     )
                     // Endpoint 7: Descriptor (Light)
@@ -380,7 +360,7 @@ fn dm_handler<'a>(
     )
 }
 
-/// Run the Matter stack with video doorbell cluster handlers
+/// Run the Matter stack with bridge cluster handlers
 ///
 /// This function initializes and runs the Matter protocol stack, enabling:
 /// - Device discovery via mDNS
@@ -581,10 +561,10 @@ pub async fn run_matter_stack(
         switch1.as_ref(),
     );
 
-    // Create OnOff handler for switch 2 (endpoint 6)
+    // Create OnOff handler for switch 2 (endpoint 5 - same as switch 1)
     let switch2_handler = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(matter.rand()),
-        6, // endpoint ID
+        5, // endpoint ID - same endpoint as switch 1
         switch2.as_ref(),
     );
 
@@ -596,11 +576,10 @@ pub async fn run_matter_stack(
     );
 
     // Create BridgedHandler for endpoint names (via BridgedDeviceBasicInformation.NodeLabel)
-    // Note: EP1 (Video Doorbell) and EP2 (Aggregator) are not bridged
+    // Note: EP1 (Power Switch) and EP2 (Aggregator) are not bridged
     let bridged_ep3 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Door");
     let bridged_ep4 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Motion");
-    let bridged_ep5 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Switch 1");
-    let bridged_ep6 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Switch 2");
+    let bridged_ep5 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Power Strip");
     let bridged_ep7 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Light");
 
     // Create the data model with our bridge handlers
@@ -618,7 +597,6 @@ pub async fn run_matter_stack(
         &bridged_ep3,
         &bridged_ep4,
         &bridged_ep5,
-        &bridged_ep6,
         &bridged_ep7,
     );
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
