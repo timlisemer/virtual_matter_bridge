@@ -1,4 +1,4 @@
-//! Generic switch state for Matter OnOff cluster.
+//! Generic binary switch state for Matter OnOff cluster.
 //!
 //! Provides thread-safe shared state for on/off controls that can be
 //! read and written by Matter clusters and updated from external sources.
@@ -10,23 +10,21 @@ use crate::matter::endpoints::endpoints_helpers::{ClusterNotifier, NotifiableSen
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-/// Thread-safe switch state.
+/// Thread-safe binary switch state.
 ///
 /// Used by Matter clusters to expose on/off control values.
 /// Can be updated from any thread (e.g., Matter commands, HTTP handlers).
 ///
 /// Implements the [`Sensor`] trait for change detection - the version
 /// is incremented each time the value changes via `set()` or `toggle()`.
-pub struct SwitchHelper {
+pub struct BinarySwitchHelper {
     state: AtomicBool,
     version: AtomicU32,
     notifier: RwLock<Option<ClusterNotifier>>,
 }
 
-impl SwitchHelper {
-    /// Create a new switch with the given initial state.
-    ///
-    /// Default is typically `true` (on) for device power controls.
+impl BinarySwitchHelper {
+    /// Create a new binary switch with the given initial state.
     pub fn new(initial: bool) -> Self {
         Self {
             state: AtomicBool::new(initial),
@@ -68,13 +66,13 @@ impl SwitchHelper {
     }
 }
 
-impl NotifiableSensor for SwitchHelper {
+impl NotifiableSensor for BinarySwitchHelper {
     fn set_notifier(&self, notifier: ClusterNotifier) {
         *self.notifier.write() = Some(notifier);
     }
 }
 
-impl Sensor for SwitchHelper {
+impl Sensor for BinarySwitchHelper {
     fn version(&self) -> u32 {
         self.version.load(Ordering::SeqCst)
     }
@@ -86,18 +84,18 @@ mod tests {
 
     #[test]
     fn test_initial_state() {
-        let switch = SwitchHelper::new(true);
+        let switch = BinarySwitchHelper::new(true);
         assert!(switch.get());
         assert_eq!(switch.version(), 0);
 
-        let switch = SwitchHelper::new(false);
+        let switch = BinarySwitchHelper::new(false);
         assert!(!switch.get());
         assert_eq!(switch.version(), 0);
     }
 
     #[test]
     fn test_set_increments_version() {
-        let switch = SwitchHelper::new(true);
+        let switch = BinarySwitchHelper::new(true);
         assert_eq!(switch.version(), 0);
 
         switch.set(false);
@@ -115,7 +113,7 @@ mod tests {
 
     #[test]
     fn test_toggle_increments_version() {
-        let switch = SwitchHelper::new(true);
+        let switch = BinarySwitchHelper::new(true);
         assert_eq!(switch.version(), 0);
 
         let new_state = switch.toggle();

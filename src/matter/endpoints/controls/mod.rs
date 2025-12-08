@@ -4,10 +4,8 @@
 //! updated from Matter commands and other sources.
 
 pub mod helpers;
-pub mod on_off_hooks;
+pub mod light_switch;
 pub mod switch;
-pub mod switch_hooks;
 
-pub use on_off_hooks::DevicePowerSwitch;
+pub use light_switch::LightSwitch;
 pub use switch::Switch;
-pub use switch_hooks::SwitchHooks;

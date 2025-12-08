@@ -9,8 +9,7 @@ use super::device_types::{
     DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_ON_OFF_PLUG_IN_UNIT,
     DEV_TYPE_VIDEO_DOORBELL,
 };
-use super::endpoints::controls::on_off_hooks::DevicePowerSwitch;
-use super::endpoints::controls::switch_hooks::SwitchHooks;
+use super::endpoints::controls::Switch;
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
 use embassy_futures::select::{select, select4};
@@ -159,7 +158,7 @@ const NODE: Node<'static> = Node {
             device_types: devices!(DEV_TYPE_VIDEO_DOORBELL),
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
-                DevicePowerSwitch::CLUSTER,
+                Switch::CLUSTER,
                 CameraAvStreamMgmtHandler::CLUSTER,
                 WebRtcTransportProviderHandler::CLUSTER
             ),
@@ -180,7 +179,7 @@ const NODE: Node<'static> = Node {
         Endpoint {
             id: 4,
             device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT),
-            clusters: clusters!(desc::DescHandler::CLUSTER, SwitchHooks::CLUSTER),
+            clusters: clusters!(desc::DescHandler::CLUSTER, Switch::CLUSTER),
         },
     ],
 };
@@ -199,11 +198,11 @@ fn dm_handler<'a>(
     matter: &'a Matter<'a>,
     camera_handler: &'a CameraAvStreamMgmtHandler,
     webrtc_handler: &'a WebRtcTransportProviderHandler,
-    on_off_handler: &'a on_off::OnOffHandler<'a, &'a DevicePowerSwitch, NoLevelControl>,
+    device_power_handler: &'a on_off::OnOffHandler<'a, &'a Switch, NoLevelControl>,
     time_sync_handler: &'a TimeSyncHandler,
     boolean_state_handler: &'a BooleanStateHandler,
     occupancy_sensing_handler: &'a OccupancySensingHandler,
-    switch_handler: &'a on_off::OnOffHandler<'a, &'a SwitchHooks, NoLevelControl>,
+    switch_handler: &'a on_off::OnOffHandler<'a, &'a Switch, NoLevelControl>,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -228,8 +227,8 @@ fn dm_handler<'a>(
                     )
                     // Endpoint 1: OnOff (device power)
                     .chain(
-                        EpClMatcher::new(Some(1), Some(DevicePowerSwitch::CLUSTER.id)),
-                        on_off::HandlerAsyncAdaptor(on_off_handler),
+                        EpClMatcher::new(Some(1), Some(Switch::CLUSTER.id)),
+                        on_off::HandlerAsyncAdaptor(device_power_handler),
                     )
                     // Endpoint 1: Camera AV Stream Management
                     .chain(
@@ -268,7 +267,7 @@ fn dm_handler<'a>(
                     )
                     // Endpoint 4: OnOff (switch)
                     .chain(
-                        EpClMatcher::new(Some(4), Some(SwitchHooks::CLUSTER.id)),
+                        EpClMatcher::new(Some(4), Some(Switch::CLUSTER.id)),
                         on_off::HandlerAsyncAdaptor(switch_handler),
                     ),
             ),
@@ -290,10 +289,10 @@ pub async fn run_matter_stack(
     _config: &MatterConfig,
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
     webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
-    on_off_hooks: Arc<DevicePowerSwitch>,
+    device_power: Arc<Switch>,
     contact_sensor: Arc<ContactSensor>,
     occupancy_sensor: Arc<OccupancySensor>,
-    switch_hooks: Arc<SwitchHooks>,
+    switch: Arc<Switch>,
 ) -> Result<(), Error> {
     info!("Initializing Matter stack...");
 
@@ -461,17 +460,17 @@ pub async fn run_matter_stack(
         OccupancySensingHandler::new(Dataver::new_rand(matter.rand()), occupancy_sensor);
 
     // Create OnOff handler for device power (endpoint 1)
-    let on_off_handler = on_off::OnOffHandler::new_standalone(
+    let device_power_handler = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(matter.rand()),
         1, // endpoint ID
-        on_off_hooks.as_ref(),
+        device_power.as_ref(),
     );
 
     // Create OnOff handler for switch (endpoint 4)
     let switch_handler = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(matter.rand()),
         4, // endpoint ID
-        switch_hooks.as_ref(),
+        switch.as_ref(),
     );
 
     // Create the data model with our video doorbell handlers
@@ -479,7 +478,7 @@ pub async fn run_matter_stack(
         matter,
         &camera_handler,
         &webrtc_handler,
-        &on_off_handler,
+        &device_power_handler,
         &time_sync_handler,
         &boolean_state_handler,
         &occupancy_sensing_handler,

@@ -10,7 +10,7 @@ mod matter;
 use crate::config::Config;
 use crate::input::camera::CameraInput;
 use crate::input::simulation::run_sensor_simulation;
-use crate::matter::controls::SwitchHooks;
+use crate::matter::controls::Switch;
 use crate::matter::sensors::{ContactSensor, OccupancySensor};
 use log::info;
 use parking_lot::RwLock as SyncRwLock;
@@ -48,12 +48,12 @@ async fn main() {
     let occupancy_sensor = Arc::new(OccupancySensor::new(false)); // Occupancy Sensor (endpoint 3)
 
     // Create switch for Matter endpoint 4
-    let switch_hooks = Arc::new(SwitchHooks::new(true)); // Switch (endpoint 4)
+    let switch = Arc::new(Switch::new(true)); // Switch (endpoint 4)
 
     // Create Matter handlers from camera clusters
     let camera_cluster = camera.read().camera_cluster();
     let webrtc_cluster = camera.read().webrtc_cluster();
-    let on_off_hooks = camera.read().on_off_hooks();
+    let device_power = camera.read().device_power();
 
     // Initialize the camera input
     let camera_for_init = camera.clone();
@@ -82,7 +82,7 @@ async fn main() {
     // Matter uses blocking I/O internally with embassy, so we run it on a dedicated thread
     let contact_sensor_for_matter = contact_sensor.clone();
     let occupancy_sensor_for_matter = occupancy_sensor.clone();
-    let switch_hooks_for_matter = switch_hooks.clone();
+    let switch_for_matter = switch.clone();
     let _matter_handle = std::thread::Builder::new()
         .name("matter-stack".into())
         .stack_size(550 * 1024) // 550KB stack for Matter operations (matches rs-matter examples)
@@ -91,10 +91,10 @@ async fn main() {
                 &matter_config,
                 camera_cluster,
                 webrtc_cluster,
-                on_off_hooks,
+                device_power,
                 contact_sensor_for_matter,
                 occupancy_sensor_for_matter,
-                switch_hooks_for_matter,
+                switch_for_matter,
             )) {
                 log::error!("Matter stack error: {:?}", e);
             }

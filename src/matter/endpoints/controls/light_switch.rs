@@ -1,13 +1,9 @@
-//! OnOff hooks implementation for addable switches.
+//! Light switch for Matter OnOff Light device type.
 //!
-//! This module provides the `SwitchHooks` struct that implements the `OnOffHooks` trait
-//! from rs-matter. Uses `SwitchHelper` for state management, allowing switches to be
-//! added dynamically like sensors.
-//!
-//! Uses atomics for thread-safe access since the hooks are shared between the main application
-//! and the Matter stack thread.
+//! Implements the `OnOffHooks` trait from rs-matter using `BinarySwitchHelper`
+//! for state management. Used for Matter On/Off Light endpoints.
 
-use super::helpers::SwitchHelper;
+use super::helpers::BinarySwitchHelper;
 use rs_matter::dm::Cluster;
 use rs_matter::dm::clusters::decl::on_off as on_off_cluster;
 use rs_matter::dm::clusters::on_off::{EffectVariantEnum, OnOffHooks, StartUpOnOffEnum};
@@ -16,30 +12,46 @@ use rs_matter::tlv::Nullable;
 use rs_matter::with;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-/// OnOff hooks for addable switches.
+/// Light switch implementing Matter's OnOffHooks trait.
 ///
-/// Wraps a `SwitchHelper` to implement the `OnOffHooks` trait from rs-matter.
-/// Can be used to add multiple switches to a Matter device.
-pub struct SwitchHooks {
+/// Uses `BinarySwitchHelper` for thread-safe state management with
+/// support for live Matter subscription updates. Uses the On/Off Light
+/// device type (0x0100) which appears as a light in controllers.
+pub struct LightSwitch {
     /// The underlying switch state
-    switch: SwitchHelper,
+    helper: BinarySwitchHelper,
     /// Startup behavior configuration (encoded as Option discriminant + value)
     /// 0 = None, 1 = Off, 2 = On, 3 = Toggle
     start_up_on_off: AtomicU8,
 }
 
-impl SwitchHooks {
-    /// Create a new SwitchHooks with the given initial state.
+impl LightSwitch {
+    /// Create a new light switch with the given initial state.
     pub fn new(initial: bool) -> Self {
         Self {
-            switch: SwitchHelper::new(initial),
+            helper: BinarySwitchHelper::new(initial),
             start_up_on_off: AtomicU8::new(0), // None
         }
     }
 
-    /// Get the underlying switch helper for external state access.
-    pub fn switch(&self) -> &SwitchHelper {
-        &self.switch
+    /// Get the underlying helper for external state access.
+    pub fn helper(&self) -> &BinarySwitchHelper {
+        &self.helper
+    }
+
+    /// Get the current light state.
+    pub fn get(&self) -> bool {
+        self.helper.get()
+    }
+
+    /// Set the light state.
+    pub fn set(&self, value: bool) {
+        self.helper.set(value);
+    }
+
+    /// Toggle the light state and return the new value.
+    pub fn toggle(&self) -> bool {
+        self.helper.toggle()
     }
 
     /// Encode StartUpOnOffEnum to u8
@@ -64,13 +76,13 @@ impl SwitchHooks {
     }
 }
 
-impl Default for SwitchHooks {
+impl Default for LightSwitch {
     fn default() -> Self {
-        Self::new(true) // On by default
+        Self::new(false) // Off by default for lights
     }
 }
 
-impl OnOffHooks for SwitchHooks {
+impl OnOffHooks for LightSwitch {
     /// Cluster definition with basic OnOff functionality.
     const CLUSTER: Cluster<'static> = on_off_cluster::FULL_CLUSTER
         .with_revision(6)
@@ -82,15 +94,15 @@ impl OnOffHooks for SwitchHooks {
         ));
 
     fn on_off(&self) -> bool {
-        self.switch.get()
+        self.helper.get()
     }
 
     fn set_on_off(&self, on: bool) {
         log::info!(
-            "[Matter] OnOff cluster: switch {}",
+            "[Matter] OnOff cluster: light {}",
             if on { "on" } else { "off" }
         );
-        self.switch.set(on);
+        self.helper.set(on);
     }
 
     fn start_up_on_off(&self) -> Nullable<StartUpOnOffEnum> {

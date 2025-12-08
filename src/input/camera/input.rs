@@ -13,7 +13,7 @@ use crate::matter::clusters::camera_av_stream_mgmt::{
 use crate::matter::clusters::webrtc_transport_provider::{
     Features as WebRtcFeatures, IceServer, WebRtcTransportProviderCluster,
 };
-use crate::matter::controls::on_off_hooks::DevicePowerSwitch;
+use crate::matter::controls::Switch;
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,8 +28,8 @@ pub struct CameraInput {
     /// Cluster instances use sync RwLock for Matter handler compatibility
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
     webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
-    /// OnOff hooks for device power state (used by rs-matter's OnOffHandler)
-    on_off_hooks: Arc<DevicePowerSwitch>,
+    /// Device power switch (used by rs-matter's OnOffHandler)
+    device_power: Arc<Switch>,
     /// Bridge uses async RwLock for async I/O operations
     bridge: Arc<AsyncRwLock<Option<RtspWebRtcBridge>>>,
     running: Arc<AtomicBool>,
@@ -77,7 +77,7 @@ impl CameraInput {
             config,
             camera_cluster: Arc::new(SyncRwLock::new(camera_cluster)),
             webrtc_cluster: Arc::new(SyncRwLock::new(webrtc_cluster)),
-            on_off_hooks: Arc::new(DevicePowerSwitch::new()),
+            device_power: Arc::new(Switch::new(true)),
             bridge: Arc::new(AsyncRwLock::new(None)),
             running: Arc::new(AtomicBool::new(false)),
         }
@@ -243,14 +243,14 @@ impl CameraInput {
         self.webrtc_cluster.clone()
     }
 
-    /// Get OnOff hooks for external access (Matter stack).
-    pub fn on_off_hooks(&self) -> Arc<DevicePowerSwitch> {
-        self.on_off_hooks.clone()
+    /// Get device power switch for external access (Matter stack).
+    pub fn device_power(&self) -> Arc<Switch> {
+        self.device_power.clone()
     }
 
     /// Check if the device power is on.
     pub fn is_powered_on(&self) -> bool {
-        self.on_off_hooks.is_on()
+        self.device_power.get()
     }
 
     /// Check if the camera input is running.

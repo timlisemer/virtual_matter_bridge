@@ -80,3 +80,18 @@ pub const DEV_TYPE_ON_OFF_PLUG_IN_UNIT: DeviceType = DeviceType {
     dtype: 0x010A,
     drev: 2,
 };
+
+/// Matter On/Off Light device type
+///
+/// Device Type ID: 0x0100 (256 decimal)
+/// Device Type Revision: 2
+///
+/// Required clusters:
+/// - OnOff (0x0006)
+/// - Descriptor (standard)
+///
+/// Used for simple on/off lights.
+pub const DEV_TYPE_ON_OFF_LIGHT: DeviceType = DeviceType {
+    dtype: 0x0100,
+    drev: 2,
+};

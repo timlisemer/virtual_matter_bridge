@@ -1,5 +1,5 @@
 //! Control-specific helpers.
 
-pub mod switch_helper;
+pub mod binary_switch_helper;
 
-pub use switch_helper::SwitchHelper;
+pub use binary_switch_helper::BinarySwitchHelper;
