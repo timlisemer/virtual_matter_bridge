@@ -4,16 +4,16 @@
 //! and exposes it via Matter camera clusters (CameraAvStreamManagement
 //! and WebRTCTransportProvider).
 
-use crate::clusters::camera_av_stream_mgmt::{
+use super::webrtc_bridge::{BridgeConfig, RtspWebRtcBridge};
+use crate::config::Config;
+use crate::error::{BridgeError, Result};
+use crate::matter::clusters::camera_av_stream_mgmt_cluster::{
     CameraAvStreamMgmtCluster, Features as CameraFeatures, StreamUsage, VideoCodec, VideoResolution,
 };
-use crate::clusters::webrtc_transport_provider::{
+use crate::matter::clusters::webrtc_transport_provider_cluster::{
     Features as WebRtcFeatures, IceServer, WebRtcTransportProviderCluster,
 };
-use crate::config::Config;
-use crate::device::on_off_hooks::DoorbellOnOffHooks;
-use crate::error::{BridgeError, Result};
-use crate::rtsp::webrtc_bridge::{BridgeConfig, RtspWebRtcBridge};
+use crate::matter::controls::on_off_hooks::DoorbellOnOffHooks;
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

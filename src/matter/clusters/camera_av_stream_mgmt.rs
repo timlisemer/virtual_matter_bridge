@@ -16,7 +16,7 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::{TLVTag, TLVWrite};
 use rs_matter::{attribute_enum, attributes, command_enum, commands, with};
 
-use crate::clusters::camera_av_stream_mgmt::{
+use super::camera_av_stream_mgmt_cluster::{
     AudioCodec, AudioStream, CameraAvStreamMgmtCluster, StreamUsage, VideoCodec, VideoResolution,
     VideoStream,
 };
@@ -790,9 +790,9 @@ impl CameraAvStreamMgmtHandler {
             CameraAttribute::NightVision => {
                 let val = data.u8()?;
                 attrs.night_vision = match val {
-                    0 => crate::clusters::camera_av_stream_mgmt::TriStateAuto::Off,
-                    1 => crate::clusters::camera_av_stream_mgmt::TriStateAuto::On,
-                    _ => crate::clusters::camera_av_stream_mgmt::TriStateAuto::Auto,
+                    0 => super::camera_av_stream_mgmt_cluster::TriStateAuto::Off,
+                    1 => super::camera_av_stream_mgmt_cluster::TriStateAuto::On,
+                    _ => super::camera_av_stream_mgmt_cluster::TriStateAuto::Auto,
                 };
                 self.dataver.changed();
                 Ok(())

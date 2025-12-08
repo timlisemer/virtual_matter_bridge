@@ -1,7 +1,9 @@
-use crate::clusters::camera_av_stream_mgmt::{AudioCodec, VideoCodec, VideoResolution};
-use crate::clusters::webrtc_transport_provider::{IceServer, WebRtcSessionState};
+use super::rtsp_client::{AudioFrame, RtspClient, VideoFrame};
 use crate::error::{BridgeError, Result};
-use crate::rtsp::client::{AudioFrame, RtspClient, VideoFrame};
+use crate::matter::clusters::camera_av_stream_mgmt_cluster::{
+    AudioCodec, VideoCodec, VideoResolution,
+};
+use crate::matter::clusters::webrtc_transport_provider_cluster::{IceServer, WebRtcSessionState};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -1,21 +1,23 @@
 //! Matter cluster handlers for the video doorbell device.
 //!
 //! This module provides handlers that bridge the existing cluster business logic
-//! in `src/clusters/` to rs-matter's data model traits.
+//! to rs-matter's data model traits.
 //!
 //! Note: We implement ClusterHandler traits manually rather than using the import! macro
 //! because the provisional camera clusters have path resolution issues when used from
 //! outside the rs-matter crate.
 
-use crate::sensors::Sensor;
+use super::sensors::Sensor;
 use rs_matter::dm::Dataver;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub mod boolean_state;
 pub mod camera_av_stream_mgmt;
+pub mod camera_av_stream_mgmt_cluster;
 pub mod occupancy_sensing;
 pub mod time_sync;
 pub mod webrtc_transport_provider;
+pub mod webrtc_transport_provider_cluster;
 
 // Re-export for convenience
 pub use boolean_state::BooleanStateHandler;

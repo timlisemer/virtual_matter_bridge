@@ -2,7 +2,7 @@
 //!
 //! Exposes as Matter Occupancy Sensor device type (0x0107).
 
-use super::binary_sensor::BinarySensor;
+use super::helpers::binary_sensor::BinarySensor;
 
 /// Occupancy sensor (motion/presence detection).
 ///

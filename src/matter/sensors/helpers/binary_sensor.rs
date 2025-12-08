@@ -6,7 +6,8 @@
 //! Supports live Matter subscription updates - when the value changes,
 //! the notification is pushed instantly to Home Assistant.
 
-use super::{ClusterNotifier, NotifiableSensor, Sensor};
+use super::super::{NotifiableSensor, Sensor};
+use super::notifier::ClusterNotifier;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 

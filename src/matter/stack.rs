@@ -1,15 +1,15 @@
+use super::clusters::camera_av_stream_mgmt_cluster::CameraAvStreamMgmtCluster;
+use super::clusters::webrtc_transport_provider_cluster::WebRtcTransportProviderCluster;
 use super::clusters::{
     BooleanStateHandler, CameraAvStreamMgmtHandler, OccupancySensingHandler, TimeSyncHandler,
     WebRtcTransportProviderHandler,
 };
+use super::controls::on_off_hooks::DoorbellOnOffHooks;
 use super::device_types::{
     DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_VIDEO_DOORBELL,
 };
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
-use crate::clusters::camera_av_stream_mgmt::CameraAvStreamMgmtCluster;
-use crate::clusters::webrtc_transport_provider::WebRtcTransportProviderCluster;
-use crate::device::on_off_hooks::DoorbellOnOffHooks;
 use embassy_futures::select::{select, select4};
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::signal::Signal;
@@ -52,8 +52,8 @@ use std::pin::pin;
 use std::sync::{Arc, OnceLock};
 
 use super::clusters::{boolean_state, occupancy_sensing};
+use super::sensors::{ClusterNotifier, ContactSensor, NotifiableSensor, OccupancySensor};
 use crate::config::MatterConfig;
-use crate::sensors::{ClusterNotifier, ContactSensor, NotifiableSensor, OccupancySensor};
 
 /// Static cells for Matter resources (required for 'static lifetime)
 static MATTER: StaticCell<Matter> = StaticCell::new();

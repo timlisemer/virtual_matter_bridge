@@ -7,13 +7,12 @@
 //! for change detection. Sensors that support live updates also implement
 //! [`NotifiableSensor`] to push changes instantly to Matter subscribers.
 
-mod binary_sensor;
 pub mod contact_sensor;
-pub mod notifier;
+pub mod helpers;
 pub mod occupancy_sensor;
 
 pub use contact_sensor::ContactSensor;
-pub use notifier::ClusterNotifier;
+pub use helpers::notifier::ClusterNotifier;
 pub use occupancy_sensor::OccupancySensor;
 
 /// Trait for sensors with change detection.

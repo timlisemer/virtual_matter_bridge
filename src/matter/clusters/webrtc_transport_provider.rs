@@ -16,7 +16,7 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::{TLVTag, TLVWrite};
 use rs_matter::{attribute_enum, attributes, command_enum, commands, with};
 
-use crate::clusters::webrtc_transport_provider::{
+use super::webrtc_transport_provider_cluster::{
     IceServer, IceTransportPolicy, WebRtcSession, WebRtcTransportProviderCluster,
 };
 

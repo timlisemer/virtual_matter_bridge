@@ -2,7 +2,7 @@
 //!
 //! Exposes as Matter Contact Sensor device type (0x0015).
 
-use super::binary_sensor::BinarySensor;
+use super::helpers::binary_sensor::BinarySensor;
 
 /// Contact sensor (door/window open/close).
 ///

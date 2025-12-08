@@ -2,18 +2,14 @@
 // that will be used when Matter stack integration is complete
 #![allow(dead_code)]
 
-mod clusters;
 mod config;
-mod device;
 mod error;
-mod inputs;
+mod input;
 mod matter;
-mod rtsp;
-mod sensors;
 
 use crate::config::Config;
-use crate::inputs::CameraInput;
-use crate::sensors::{ContactSensor, OccupancySensor};
+use crate::input::camera::CameraInput;
+use crate::matter::sensors::{ContactSensor, OccupancySensor};
 use log::info;
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
