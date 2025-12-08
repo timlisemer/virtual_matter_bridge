@@ -3,7 +3,10 @@
 //! The BooleanState cluster (0x0045) represents a simple binary sensor.
 //! Reads state from a shared BooleanSensor instance that can be updated
 //! from external sources (HTTP, simulation, etc.).
+//!
+//! Uses version tracking to detect changes and notify subscribers automatically.
 
+use super::sync_dataver_with_sensor;
 use crate::sensors::BooleanSensor;
 use rs_matter::dm::{
     Access, Attribute, Cluster, Dataver, Handler, NonBlockingHandler, ReadContext, ReadReply,
@@ -13,6 +16,7 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::TLVWrite;
 use rs_matter::{attribute_enum, attributes, with};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use strum::FromRepr;
 
 /// Matter Cluster ID for BooleanState
@@ -50,9 +54,13 @@ pub const CLUSTER: Cluster<'static> = Cluster {
 ///
 /// Reads state from a shared `BooleanSensor` that can be updated from
 /// external sources (HTTP endpoints, simulation, etc.).
+///
+/// Automatically detects sensor value changes and notifies subscribers
+/// by tracking the sensor's version number.
 pub struct BooleanStateHandler {
     dataver: Dataver,
     sensor: Arc<BooleanSensor>,
+    last_sensor_version: AtomicU32,
 }
 
 impl BooleanStateHandler {
@@ -61,10 +69,17 @@ impl BooleanStateHandler {
 
     /// Create a new handler with a sensor reference.
     pub fn new(dataver: Dataver, sensor: Arc<BooleanSensor>) -> Self {
-        Self { dataver, sensor }
+        Self {
+            dataver,
+            sensor,
+            last_sensor_version: AtomicU32::new(0),
+        }
     }
 
     fn read_impl(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
+        // Check if sensor changed and bump dataver to notify subscribers
+        sync_dataver_with_sensor(&*self.sensor, &self.last_sensor_version, &self.dataver);
+
         let attr = ctx.attr();
 
         let Some(mut writer) = reply.with_dataver(self.dataver.get())? else {
