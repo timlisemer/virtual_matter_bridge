@@ -95,3 +95,32 @@ pub const DEV_TYPE_ON_OFF_LIGHT: DeviceType = DeviceType {
     dtype: 0x0100,
     drev: 2,
 };
+
+/// Matter Aggregator device type (for bridge root)
+///
+/// Device Type ID: 0x000E (14 decimal)
+/// Device Type Revision: 1
+///
+/// Required clusters:
+/// - Descriptor (standard)
+///
+/// Used as the bridge aggregator endpoint that enumerates bridged devices.
+pub const DEV_TYPE_AGGREGATOR: DeviceType = DeviceType {
+    dtype: 0x000E,
+    drev: 1,
+};
+
+/// Matter Bridged Node device type
+///
+/// Device Type ID: 0x0013 (19 decimal)
+/// Device Type Revision: 1
+///
+/// Required clusters:
+/// - BridgedDeviceBasicInformation (0x0039)
+/// - Descriptor (standard)
+///
+/// Added to bridged device endpoints alongside their functional device type.
+pub const DEV_TYPE_BRIDGED_NODE: DeviceType = DeviceType {
+    dtype: 0x0013,
+    drev: 1,
+};

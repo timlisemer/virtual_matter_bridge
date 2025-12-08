@@ -1,6 +1,8 @@
 // Allow dead code during development - these modules contain scaffolding
 // that will be used when Matter stack integration is complete
 #![allow(dead_code)]
+// Allow unexpected_cfgs from rs_matter::import! macro (uses cfg(feature = "defmt"))
+#![allow(unexpected_cfgs)]
 
 mod config;
 mod error;

@@ -6,8 +6,8 @@ use super::clusters::{
 };
 use super::device_info::DEV_INFO;
 use super::device_types::{
-    DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_ON_OFF_LIGHT,
-    DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_VIDEO_DOORBELL,
+    DEV_TYPE_AGGREGATOR, DEV_TYPE_BRIDGED_NODE, DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR,
+    DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_VIDEO_DOORBELL,
 };
 use super::endpoints::controls::{LightSwitch, Switch};
 use super::logging_udp::LoggingUdpSocket;
@@ -29,13 +29,14 @@ use rs_matter::dm::endpoints;
 use rs_matter::dm::subscriptions::DefaultSubscriptions;
 use rs_matter::dm::{
     Async, AsyncHandler, AsyncMetadata, Cluster, DataModel, Dataver, EmptyHandler, Endpoint,
-    EpClMatcher, Node,
+    EpClMatcher, Node, ReadContext,
 };
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::pairing::qr::QrTextType;
 use rs_matter::persist::{NO_NETWORKS, Psm};
 use rs_matter::respond::DefaultResponder;
+use rs_matter::tlv::{TLVBuilderParent, Utf8StrBuilder};
 use rs_matter::transport::network::mdns::builtin::{BuiltinMdnsResponder, Host};
 use rs_matter::transport::network::mdns::{
     MDNS_IPV4_BROADCAST_ADDR, MDNS_IPV6_BROADCAST_ADDR, MDNS_SOCKET_DEFAULT_BIND_ADDR,
@@ -43,6 +44,7 @@ use rs_matter::transport::network::mdns::{
 use rs_matter::utils::init::InitMaybeUninit;
 use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::storage::pooled::PooledBuffers;
+use rs_matter::with;
 use rs_matter::{MATTER_PORT, Matter, clusters, devices};
 use socket2::{Domain, Protocol, Socket, Type};
 use static_cell::StaticCell;
@@ -56,6 +58,11 @@ use std::sync::{Arc, OnceLock};
 use super::clusters::{boolean_state, occupancy_sensing};
 use super::endpoints::{ClusterNotifier, ContactSensor, NotifiableSensor, OccupancySensor};
 use crate::config::MatterConfig;
+
+// Import BridgedDeviceBasicInformation cluster from Matter spec
+// This generates the `bridged_device_basic_information` module with cluster handlers
+rs_matter::import!(BridgedDeviceBasicInformation);
+use bridged_device_basic_information::ClusterHandler as BridgedClusterHandler;
 
 /// Static cells for Matter resources (required for 'static lifetime)
 static MATTER: StaticCell<Matter> = StaticCell::new();
@@ -140,52 +147,140 @@ fn get_persist_path() -> PathBuf {
         .join(PERSIST_FILE)
 }
 
+// ============================================================================
+// BridgedDeviceBasicInformation Cluster (0x0039) - Endpoint naming for bridges
+// ============================================================================
+
+/// Handler for BridgedDeviceBasicInformation cluster.
+///
+/// Provides endpoint names via the NodeLabel attribute. Controllers like Home Assistant
+/// read this to name bridged device endpoints.
+#[derive(Clone, Debug)]
+pub struct BridgedHandler {
+    dataver: Dataver,
+    /// The display name for this endpoint
+    name: &'static str,
+}
+
+impl BridgedHandler {
+    /// Create a new handler with the given endpoint name
+    pub const fn new(dataver: Dataver, name: &'static str) -> Self {
+        Self { dataver, name }
+    }
+
+    /// Adapt this handler for use in the data model chain
+    pub const fn adapt(self) -> bridged_device_basic_information::HandlerAdaptor<Self> {
+        bridged_device_basic_information::HandlerAdaptor(self)
+    }
+}
+
+impl BridgedClusterHandler for BridgedHandler {
+    /// Cluster with required attributes + node_label for naming
+    const CLUSTER: Cluster<'static> = bridged_device_basic_information::FULL_CLUSTER
+        .with_features(0)
+        .with_attrs(with!(required; bridged_device_basic_information::AttributeId::NodeLabel))
+        .with_cmds(with!());
+
+    fn dataver(&self) -> u32 {
+        self.dataver.get()
+    }
+
+    fn dataver_changed(&self) {
+        self.dataver.changed();
+    }
+
+    /// Mandatory attribute - report device as reachable
+    fn reachable(&self, _ctx: impl ReadContext) -> Result<bool, Error> {
+        Ok(true)
+    }
+
+    /// Return the endpoint name for display in controllers
+    fn node_label<P: TLVBuilderParent>(
+        &self,
+        _ctx: impl ReadContext,
+        out: Utf8StrBuilder<P>,
+    ) -> Result<P, Error> {
+        out.set(self.name)
+    }
+}
+
+// ============================================================================
+
 /// Root endpoint cluster list with Time Synchronization added
 const ROOT_CLUSTERS: &[Cluster<'static>] = clusters!(eth; TimeSyncHandler::CLUSTER);
 
-/// Node definition for our Matter Video Doorbell device
+/// Node definition for our Matter Bridge device
+///
+/// Bridge architecture:
+/// - Endpoint 0: Root node (standard)
+/// - Endpoint 1: Aggregator (enumerates bridged devices)
+/// - Endpoints 2+: Bridged devices (each with BridgedDeviceBasicInformation)
 const NODE: Node<'static> = Node {
     id: 0,
     endpoints: &[
+        // Endpoint 0: Root node
         Endpoint {
             id: endpoints::ROOT_ENDPOINT_ID,
             device_types: devices!(devices::DEV_TYPE_ROOT_NODE),
             clusters: ROOT_CLUSTERS,
         },
-        // Endpoint 1: Video Doorbell with camera and WebRTC clusters
+        // Endpoint 1: Aggregator (bridge root)
         Endpoint {
             id: 1,
-            device_types: devices!(DEV_TYPE_VIDEO_DOORBELL),
+            device_types: devices!(DEV_TYPE_AGGREGATOR),
+            clusters: clusters!(desc::DescHandler::CLUSTER),
+        },
+        // Endpoint 2: Video Doorbell (bridged) - "Device Power"
+        Endpoint {
+            id: 2,
+            device_types: devices!(DEV_TYPE_VIDEO_DOORBELL, DEV_TYPE_BRIDGED_NODE),
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
+                BridgedHandler::CLUSTER,
                 Switch::CLUSTER,
                 CameraAvStreamMgmtHandler::CLUSTER,
                 WebRtcTransportProviderHandler::CLUSTER
             ),
         },
-        // Endpoint 2: Contact Sensor (test binary sensor)
-        Endpoint {
-            id: 2,
-            device_types: devices!(DEV_TYPE_CONTACT_SENSOR),
-            clusters: clusters!(desc::DescHandler::CLUSTER, BooleanStateHandler::CLUSTER),
-        },
-        // Endpoint 3: Occupancy Sensor (motion/presence sensor)
+        // Endpoint 3: Contact Sensor (bridged) - "Door"
         Endpoint {
             id: 3,
-            device_types: devices!(DEV_TYPE_OCCUPANCY_SENSOR),
-            clusters: clusters!(desc::DescHandler::CLUSTER, OccupancySensingHandler::CLUSTER),
+            device_types: devices!(DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_BRIDGED_NODE),
+            clusters: clusters!(
+                desc::DescHandler::CLUSTER,
+                BridgedHandler::CLUSTER,
+                BooleanStateHandler::CLUSTER
+            ),
         },
-        // Endpoint 4: On/Off Switch (addable switch)
+        // Endpoint 4: Occupancy Sensor (bridged) - "Motion"
         Endpoint {
             id: 4,
-            device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT),
-            clusters: clusters!(desc::DescHandler::CLUSTER, Switch::CLUSTER),
+            device_types: devices!(DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_BRIDGED_NODE),
+            clusters: clusters!(
+                desc::DescHandler::CLUSTER,
+                BridgedHandler::CLUSTER,
+                OccupancySensingHandler::CLUSTER
+            ),
         },
-        // Endpoint 5: On/Off Light (addable light)
+        // Endpoint 5: On/Off Switch (bridged) - "Switch"
         Endpoint {
             id: 5,
-            device_types: devices!(DEV_TYPE_ON_OFF_LIGHT),
-            clusters: clusters!(desc::DescHandler::CLUSTER, LightSwitch::CLUSTER),
+            device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_BRIDGED_NODE),
+            clusters: clusters!(
+                desc::DescHandler::CLUSTER,
+                BridgedHandler::CLUSTER,
+                Switch::CLUSTER
+            ),
+        },
+        // Endpoint 6: On/Off Light (bridged) - "Light"
+        Endpoint {
+            id: 6,
+            device_types: devices!(DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_BRIDGED_NODE),
+            clusters: clusters!(
+                desc::DescHandler::CLUSTER,
+                BridgedHandler::CLUSTER,
+                LightSwitch::CLUSTER
+            ),
         },
     ],
 };
@@ -198,7 +293,7 @@ fn get_netifs() -> &'static FilteredNetifs {
     NETIFS.get_or_init(FilteredNetifs::auto_detect)
 }
 
-/// Build the data model handler with video doorbell clusters
+/// Build the data model handler for the Matter bridge
 #[allow(clippy::too_many_arguments)]
 fn dm_handler<'a>(
     matter: &'a Matter<'a>,
@@ -210,6 +305,11 @@ fn dm_handler<'a>(
     occupancy_sensing_handler: &'a OccupancySensingHandler,
     switch_handler: &'a on_off::OnOffHandler<'a, &'a Switch, NoLevelControl>,
     light_handler: &'a on_off::OnOffHandler<'a, &'a LightSwitch, NoLevelControl>,
+    bridged_ep2: &'a BridgedHandler,
+    bridged_ep3: &'a BridgedHandler,
+    bridged_ep4: &'a BridgedHandler,
+    bridged_ep5: &'a BridgedHandler,
+    bridged_ep6: &'a BridgedHandler,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -227,64 +327,97 @@ fn dm_handler<'a>(
                         EpClMatcher::new(Some(0), Some(TimeSyncHandler::CLUSTER.id)),
                         Async(time_sync_handler),
                     )
-                    // Endpoint 1: Descriptor
+                    // Endpoint 1: Aggregator Descriptor (uses new_aggregator for bridge)
                     .chain(
                         EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
-                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
+                        Async(
+                            desc::DescHandler::new_aggregator(Dataver::new_rand(matter.rand()))
+                                .adapt(),
+                        ),
                     )
-                    // Endpoint 1: OnOff (device power)
-                    .chain(
-                        EpClMatcher::new(Some(1), Some(Switch::CLUSTER.id)),
-                        on_off::HandlerAsyncAdaptor(device_power_handler),
-                    )
-                    // Endpoint 1: Camera AV Stream Management
-                    .chain(
-                        EpClMatcher::new(Some(1), Some(CameraAvStreamMgmtHandler::CLUSTER.id)),
-                        Async(camera_handler),
-                    )
-                    // Endpoint 1: WebRTC Transport Provider
-                    .chain(
-                        EpClMatcher::new(Some(1), Some(WebRtcTransportProviderHandler::CLUSTER.id)),
-                        Async(webrtc_handler),
-                    )
-                    // Endpoint 2: Descriptor (Contact Sensor)
+                    // Endpoint 2: Descriptor (Video Doorbell)
                     .chain(
                         EpClMatcher::new(Some(2), Some(desc::DescHandler::CLUSTER.id)),
                         Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
                     )
-                    // Endpoint 2: BooleanState (test sensor)
+                    // Endpoint 2: BridgedDeviceBasicInformation
                     .chain(
-                        EpClMatcher::new(Some(2), Some(BooleanStateHandler::CLUSTER.id)),
-                        Async(boolean_state_handler),
+                        EpClMatcher::new(Some(2), Some(BridgedHandler::CLUSTER.id)),
+                        Async(bridged_ep2.clone().adapt()),
                     )
-                    // Endpoint 3: Descriptor (Occupancy Sensor)
+                    // Endpoint 2: OnOff (device power)
+                    .chain(
+                        EpClMatcher::new(Some(2), Some(Switch::CLUSTER.id)),
+                        on_off::HandlerAsyncAdaptor(device_power_handler),
+                    )
+                    // Endpoint 2: Camera AV Stream Management
+                    .chain(
+                        EpClMatcher::new(Some(2), Some(CameraAvStreamMgmtHandler::CLUSTER.id)),
+                        Async(camera_handler),
+                    )
+                    // Endpoint 2: WebRTC Transport Provider
+                    .chain(
+                        EpClMatcher::new(Some(2), Some(WebRtcTransportProviderHandler::CLUSTER.id)),
+                        Async(webrtc_handler),
+                    )
+                    // Endpoint 3: Descriptor (Contact Sensor)
                     .chain(
                         EpClMatcher::new(Some(3), Some(desc::DescHandler::CLUSTER.id)),
                         Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
                     )
-                    // Endpoint 3: OccupancySensing
+                    // Endpoint 3: BridgedDeviceBasicInformation
                     .chain(
-                        EpClMatcher::new(Some(3), Some(OccupancySensingHandler::CLUSTER.id)),
-                        Async(occupancy_sensing_handler),
+                        EpClMatcher::new(Some(3), Some(BridgedHandler::CLUSTER.id)),
+                        Async(bridged_ep3.clone().adapt()),
                     )
-                    // Endpoint 4: Descriptor (Switch)
+                    // Endpoint 3: BooleanState (contact sensor)
+                    .chain(
+                        EpClMatcher::new(Some(3), Some(BooleanStateHandler::CLUSTER.id)),
+                        Async(boolean_state_handler),
+                    )
+                    // Endpoint 4: Descriptor (Occupancy Sensor)
                     .chain(
                         EpClMatcher::new(Some(4), Some(desc::DescHandler::CLUSTER.id)),
                         Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
                     )
-                    // Endpoint 4: OnOff (switch)
+                    // Endpoint 4: BridgedDeviceBasicInformation
                     .chain(
-                        EpClMatcher::new(Some(4), Some(Switch::CLUSTER.id)),
-                        on_off::HandlerAsyncAdaptor(switch_handler),
+                        EpClMatcher::new(Some(4), Some(BridgedHandler::CLUSTER.id)),
+                        Async(bridged_ep4.clone().adapt()),
                     )
-                    // Endpoint 5: Descriptor (Light)
+                    // Endpoint 4: OccupancySensing
+                    .chain(
+                        EpClMatcher::new(Some(4), Some(OccupancySensingHandler::CLUSTER.id)),
+                        Async(occupancy_sensing_handler),
+                    )
+                    // Endpoint 5: Descriptor (Switch)
                     .chain(
                         EpClMatcher::new(Some(5), Some(desc::DescHandler::CLUSTER.id)),
                         Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
                     )
-                    // Endpoint 5: OnOff (light)
+                    // Endpoint 5: BridgedDeviceBasicInformation
                     .chain(
-                        EpClMatcher::new(Some(5), Some(LightSwitch::CLUSTER.id)),
+                        EpClMatcher::new(Some(5), Some(BridgedHandler::CLUSTER.id)),
+                        Async(bridged_ep5.clone().adapt()),
+                    )
+                    // Endpoint 5: OnOff (switch)
+                    .chain(
+                        EpClMatcher::new(Some(5), Some(Switch::CLUSTER.id)),
+                        on_off::HandlerAsyncAdaptor(switch_handler),
+                    )
+                    // Endpoint 6: Descriptor (Light)
+                    .chain(
+                        EpClMatcher::new(Some(6), Some(desc::DescHandler::CLUSTER.id)),
+                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
+                    )
+                    // Endpoint 6: BridgedDeviceBasicInformation
+                    .chain(
+                        EpClMatcher::new(Some(6), Some(BridgedHandler::CLUSTER.id)),
+                        Async(bridged_ep6.clone().adapt()),
+                    )
+                    // Endpoint 6: OnOff (light)
+                    .chain(
+                        EpClMatcher::new(Some(6), Some(LightSwitch::CLUSTER.id)),
                         on_off::HandlerAsyncAdaptor(light_handler),
                     ),
             ),
@@ -455,14 +588,14 @@ pub async fn run_matter_stack(
     // which wakes the forwarding task to call subscriptions.notify_cluster_changed()
     contact_sensor.set_notifier(ClusterNotifier::new(
         sensor_notify_ref,
-        2, // endpoint_id for Contact Sensor
+        3, // endpoint_id for Contact Sensor (was 2, now 3 due to Aggregator at 1)
         boolean_state::CLUSTER_ID,
     ));
 
     // Wire up the occupancy sensor for live updates
     occupancy_sensor.set_notifier(ClusterNotifier::new(
         sensor_notify_ref,
-        3, // endpoint_id for Occupancy Sensor
+        4, // endpoint_id for Occupancy Sensor (was 3, now 4)
         occupancy_sensing::CLUSTER_ID,
     ));
 
@@ -478,28 +611,35 @@ pub async fn run_matter_stack(
     let occupancy_sensing_handler =
         OccupancySensingHandler::new(Dataver::new_rand(matter.rand()), occupancy_sensor);
 
-    // Create OnOff handler for device power (endpoint 1)
+    // Create OnOff handler for device power (endpoint 2 - was 1)
     let device_power_handler = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(matter.rand()),
-        1, // endpoint ID
+        2, // endpoint ID
         device_power.as_ref(),
     );
 
-    // Create OnOff handler for switch (endpoint 4)
+    // Create OnOff handler for switch (endpoint 5 - was 4)
     let switch_handler = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(matter.rand()),
-        4, // endpoint ID
+        5, // endpoint ID
         switch.as_ref(),
     );
 
-    // Create OnOff handler for light (endpoint 5)
+    // Create OnOff handler for light (endpoint 6 - was 5)
     let light_handler = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(matter.rand()),
-        5, // endpoint ID
+        6, // endpoint ID
         light.as_ref(),
     );
 
-    // Create the data model with our video doorbell handlers
+    // Create BridgedHandler for endpoint names (via BridgedDeviceBasicInformation.NodeLabel)
+    let bridged_ep2 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Device Power");
+    let bridged_ep3 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Door");
+    let bridged_ep4 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Motion");
+    let bridged_ep5 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Switch");
+    let bridged_ep6 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Light");
+
+    // Create the data model with our bridge handlers
     let handler = dm_handler(
         matter,
         &camera_handler,
@@ -510,6 +650,11 @@ pub async fn run_matter_stack(
         &occupancy_sensing_handler,
         &switch_handler,
         &light_handler,
+        &bridged_ep2,
+        &bridged_ep3,
+        &bridged_ep4,
+        &bridged_ep5,
+        &bridged_ep6,
     );
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 
@@ -625,10 +770,10 @@ pub async fn run_matter_stack(
     let mut sensor_forward = pin!(async {
         loop {
             sensor_notify_ref.wait().await;
-            // Notify subscriptions for Contact Sensor (endpoint 2)
-            subscriptions.notify_cluster_changed(2, boolean_state::CLUSTER_ID);
-            // Notify subscriptions for Occupancy Sensor (endpoint 3)
-            subscriptions.notify_cluster_changed(3, occupancy_sensing::CLUSTER_ID);
+            // Notify subscriptions for Contact Sensor (endpoint 3 - was 2)
+            subscriptions.notify_cluster_changed(3, boolean_state::CLUSTER_ID);
+            // Notify subscriptions for Occupancy Sensor (endpoint 4 - was 3)
+            subscriptions.notify_cluster_changed(4, occupancy_sensing::CLUSTER_ID);
         }
     });
 
