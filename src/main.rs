@@ -61,7 +61,7 @@ async fn main() {
     // Create Matter handlers from camera clusters
     let camera_cluster = camera.read().camera_cluster();
     let webrtc_cluster = camera.read().webrtc_cluster();
-    let device_power = camera.read().device_power();
+    let master_onoff = camera.read().device_power();
 
     // Initialize the camera input
     let camera_for_init = camera.clone();
@@ -101,7 +101,7 @@ async fn main() {
                 &matter_config,
                 camera_cluster,
                 webrtc_cluster,
-                device_power,
+                master_onoff,
                 contact_sensor_for_matter,
                 occupancy_sensor_for_matter,
                 switch1_for_matter,

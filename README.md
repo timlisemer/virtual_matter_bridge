@@ -13,7 +13,7 @@ This project implements a general-purpose virtual Matter bridge that can:
 ### Current Implementation
 
 The bridge currently exposes:
-- **Power Switch** (Endpoint 1): Main device on/off control
+- **Virtual Matter Bridge** (Endpoint 1): Root device with master on/off (WIP)
 - **Door Sensor** (Endpoint 3): Contact sensor (bridged)
 - **Motion Sensor** (Endpoint 4): Occupancy sensor (bridged)
 - **Power Strip** (Endpoint 5): On/Off plug-in unit (bridged)
@@ -32,8 +32,8 @@ Future device types (when controller support is available):
 │ • HTTP APIs     │     │  │   Endpoint 0 (Root)    │  │     └───────────────────┘
 │ • MQTT Topics   │     │  └────────────────────────┘  │
 │ • Files         │     │  ┌────────────────────────┐  │
-│ • Commands      │     │  │ EP1 (Power Switch)     │  │
-│ • Simulation    │     │  │ • OnOff cluster        │  │
+│ • Commands      │     │  │ EP1 (Virtual Bridge)   │  │
+│ • Simulation    │     │  │ • Master on/off (WIP)  │  │
 └─────────────────┘     │  └────────────────────────┘  │
                         │  ┌────────────────────────┐  │
                         │  │ EP2 (Aggregator)       │  │
@@ -102,7 +102,7 @@ Future device types (when controller support is available):
 ### Current Status
 
 Home Assistant now shows entities for:
-- **Power Switch** (main device on/off control)
+- **Virtual Matter Bridge** (root device with master on/off)
 - **Door sensor** (contact sensor, bridged)
 - **Motion sensor** (occupancy sensor, bridged)
 - **Power Strip** (on/off plug-in unit, bridged)
