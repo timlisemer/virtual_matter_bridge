@@ -20,9 +20,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::signal::Signal;
 use log::{error, info, warn};
 use parking_lot::RwLock;
-use rs_matter::Matter;
 use rs_matter::error::Error;
 use serde::{Deserialize, Serialize};
 
@@ -160,7 +161,7 @@ impl SubscriptionStore {
 /// It uses Matter's persist notification to detect when CASE sessions are established.
 pub async fn run_subscription_resumption(
     store: Arc<SubscriptionStore>,
-    matter: &Matter<'_>,
+    persist_notify: &'static Signal<NoopRawMutex, ()>,
 ) -> Result<(), Error> {
     let subs = store.get_all();
     if subs.is_empty() {
@@ -171,31 +172,26 @@ pub async fn run_subscription_resumption(
     }
 
     let num_subs = subs.len();
+    let waiting = subs
+        .iter()
+        .map(|s| format!("fabric={}, peer_node={:016x}", s.fabric_idx, s.peer_node_id))
+        .collect::<Vec<_>>()
+        .join("; ");
     info!(
-        "Session recovery: {} controller(s) need to reconnect",
-        num_subs
+        "Session recovery: waiting for {} controller(s) to reconnect via CASE (expected 1-3 minutes). Waiting for [{}]",
+        num_subs, waiting
     );
-    info!("  Controllers will timeout on old sessions and re-establish via CASE");
-    info!("  Expected recovery time: 1-3 minutes");
-
-    for sub in &subs {
-        info!(
-            "  Waiting for: fabric={}, peer_node={:016x}",
-            sub.fabric_idx, sub.peer_node_id
-        );
-    }
 
     // Wait for the first persist notification, which indicates a CASE session was established
     // (rs-matter calls notify_persist() after successful CASE handshake)
-    matter.wait_persist().await;
+    persist_notify.wait().await;
 
     info!("Session recovery: Controller reconnected! Device is now available.");
     info!("  New CASE session established, subscriptions will be re-created by controller");
 
-    // Continue waiting for any additional persist events (more controllers reconnecting)
-    // This loop never returns - it just logs reconnection events
+    // We only need to announce the first successful reconnection. Suppress further noise.
+    // Stay alive quietly; no further logs.
     loop {
-        matter.wait_persist().await;
-        info!("Session recovery: Additional session activity detected");
+        persist_notify.wait().await;
     }
 }

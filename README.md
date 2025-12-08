@@ -12,7 +12,7 @@ This project implements a general-purpose virtual Matter bridge that can:
 
 ### Current Focus
 
-- **Video Doorbell**: RTSP camera streams exposed as Matter 1.5 video doorbell devices
+- **Video Doorbell**: RTSP camera streams exposed as Matter 1.5 video doorbell devices — functionality deferred until Matter 1.5 camera/video doorbell support is available in controllers/rs-matter.
 - **On/Off Switches**: Boolean data sources exposed as Matter switches (planned)
 
 ## Architecture
@@ -102,14 +102,14 @@ Home Assistant shows **"This device has no entities"** because:
 - [ ] Implement data source backends: HTTP endpoint, MQTT, file, command execution
 - [ ] Add configuration for switch devices (source URL, polling interval, read-only mode)
 
-### Phase 4: Complete Video Doorbell Implementation
+### Phase 4: Complete Video Doorbell Implementation (Deferred: Matter 1.5 camera/video doorbell support not yet in controllers/rs-matter)
 
 **Goal:** Make video doorbell fully functional with real streaming
 
-- [ ] Implement actual RTSP client (`retina` crate for H.264/AAC)
-- [ ] Implement WebRTC peer connections (`webrtc` crate)
-- [ ] Bridge RTSP to WebRTC (RTP packetization, timestamp sync)
-- [ ] Implement doorbell press events (Matter event notifications, external trigger API)
+- [ ] ~~Implement actual RTSP client (`retina` crate for H.264/AAC)~~ (Deferred until Matter 1.5 camera/video doorbell support lands)
+- [ ] ~~Implement WebRTC peer connections (`webrtc` crate)~~ (Deferred until Matter 1.5 camera/video doorbell support lands)
+- [ ] ~~Bridge RTSP to WebRTC (RTP packetization, timestamp sync)~~ (Deferred until Matter 1.5 camera/video doorbell support lands)
+- [ ] ~~Implement doorbell press events (Matter event notifications, external trigger API)~~ (Deferred until Matter 1.5 camera/video doorbell support lands)
 
 ### Phase 5: Additional Device Types
 
@@ -247,23 +247,29 @@ When commissioning starts, you should see PASE packets from the phone to your PC
 
 ### Known Issues
 
-**MRP Retransmission Error on Stale Subscriptions:**
+None currently.
+
+### Previous Issues (Resolved)
+
+#### MRP Retransmission Error on Stale Subscriptions (RESOLVED)
 
 After device restart, an error may appear in logs:
+
 ```
 ERROR rs_matter::transport::mrp] Packet SID:XXXX,CTR:XXXXI|R,EID:1,PROTO:1,OP:5: Too many retransmissions. Giving up
 WARN  rs_matter::dm] Got status response InvalidSubscription, aborting interaction
 ```
 
-This occurs because the device attempts to send subscription updates to controllers using stale session information from before the restart. The error is harmless - the subscription system correctly detects the invalid state and aborts. Controllers will re-establish subscriptions after CASE session recovery completes.
+This occurs because the device attempts to send subscription updates to controllers using stale session information from before the restart. The error is harmless - the subscription system correctly detects the invalid state and aborts. Controllers re-establish subscriptions after CASE session recovery completes.
 
-### Session Recovery After Device Restart
+#### Session Recovery After Device Restart (RESOLVED)
 
 This section documents the investigation into Matter session recovery behavior after device restart.
 
 #### Problem Statement
 
 After restarting the Matter device, Home Assistant (and other controllers) temporarily cannot communicate with the device. The device logs show:
+
 ```
 >>RCV UDP [...] [SID:4,CTR:8a285e3][(encoded)]
       => No valid session found, dropping
@@ -307,18 +313,19 @@ With exponential backoff and jitter, MRP exhausts all retries in approximately *
 
 Testing confirmed that session recovery **works correctly** - it just requires patience:
 
-| Event | Timestamp | Notes |
-|-------|-----------|-------|
-| Device restart | 22:46:30 | Matter stack initializes |
+| Event                          | Timestamp           | Notes                                       |
+| ------------------------------ | ------------------- | ------------------------------------------- |
+| Device restart                 | 22:46:30            | Matter stack initializes                    |
 | Controller retries old session | 22:46:30 - 22:47:17 | "No valid session found, dropping" messages |
-| MRP gives up | ~22:48:57 | "Too many retransmissions. Giving up" |
-| InvalidSubscription response | 22:48:57 | Stale subscription correctly aborted |
-| **CASE re-established** | ~22:49:09 | New session created |
-| **Device available in HA** | 22:49:09 | OnOff commands work |
+| MRP gives up                   | ~22:48:57           | "Too many retransmissions. Giving up"       |
+| InvalidSubscription response   | 22:48:57            | Stale subscription correctly aborted        |
+| **CASE re-established**        | ~22:49:09           | New session created                         |
+| **Device available in HA**     | 22:49:09            | OnOff commands work                         |
 
 **Timeline: ~2.5 minutes from restart to full recovery**
 
 The recovery time includes:
+
 - MRP retry exhaustion (~30 seconds per stale session)
 - Controller's internal cooldown before CASE retry
 - CASE handshake completion
@@ -459,20 +466,20 @@ The following features are currently stub implementations or use placeholder val
 
 ### Matter Device Model
 
-- **Device Type**: Uses `DEV_TYPE_ON_OFF_LIGHT` as placeholder (not video doorbell device type)
-- **Device Type ID**: `0x0012` is a placeholder value (needs actual Matter 1.5 spec value)
+- **Device Type**: Uses `DEV_TYPE_ON_OFF_LIGHT` as placeholder (not video doorbell device type) — deferred until Matter 1.5 camera/video doorbell support is available.
+- **Device Type ID**: `0x0012` is a placeholder value — deferred until the official Matter 1.5 spec value is usable by controllers/rs-matter.
 - **Clusters**: Not connected to rs-matter data model - no actual attribute/command handlers
 
 ### RTSP Streaming
 
-- **RTSP Client**: Stub that returns fake 1920x1080@30fps stream info
-- **Frame Generation**: Produces placeholder frames (zeros) instead of actual video data
+- **RTSP Client**: Stub that returns fake 1920x1080@30fps stream info — deferred until Matter 1.5 camera/video doorbell support lands.
+- **Frame Generation**: Produces placeholder frames (zeros) instead of actual video data — deferred until Matter 1.5 camera/video doorbell support lands.
 
 ### WebRTC
 
-- **WebRTC Bridge**: Frame forwarding is a no-op (counts frames but doesn't transmit)
-- **SDP Generation**: Uses placeholder values for ICE credentials and DTLS fingerprints
-- **Peer Connections**: Not implemented
+- **WebRTC Bridge**: Frame forwarding is a no-op (counts frames but doesn't transmit) — deferred until Matter 1.5 camera/video doorbell support lands.
+- **SDP Generation**: Uses placeholder values for ICE credentials and DTLS fingerprints — deferred until Matter 1.5 camera/video doorbell support lands.
+- **Peer Connections**: Not implemented — deferred until Matter 1.5 camera/video doorbell support lands.
 
 ### Testing/Debug Code
 
@@ -485,7 +492,7 @@ The following features are currently stub implementations or use placeholder val
 
 - **Test credentials** (`src/matter/stack.rs`): Uses test device credentials; TODO to build proper static device info from `MatterConfig`.
 - **Dataver placeholder** (`src/main.rs`): Cluster handlers use `Dataver::new(0)` placeholder randomness; switch to real rs-matter datavers.
-- **Device type ID** (`src/device/video_doorbell.rs`): Device type ID `0x0012` is a placeholder; replace with official Matter 1.5 video doorbell ID.
+- ~~**Device type ID** (`src/device/video_doorbell.rs`): Device type ID `0x0012` is a placeholder; replace with official Matter 1.5 video doorbell ID.~~ (Deferred: blocked until Matter 1.5 video doorbell/camera device types are supported by controllers/rs-matter)
 - **Persistence path** (`src/matter/stack.rs:117`): Hardcoded to `.config/virtual-matter-bridge`; should respect `XDG_CONFIG_HOME` or be configurable.
 - **Network change detection** (`src/matter/netif.rs:242-246`): `wait_changed()` just waits forever; no actual network change detection implemented.
 
@@ -502,13 +509,13 @@ The following features are currently stub implementations or use placeholder val
 
 ### Camera Cluster
 
-- **Video parameters hardcoded** (`src/clusters/camera_av_stream_mgmt.rs`): Resolutions, bitrates, sample rates hardcoded; should match actual camera capabilities.
-- **Snapshot commands** (`src/matter/clusters/camera_av_stream_mgmt.rs:997-1004`): `SnapshotStreamAllocate`/`Deallocate` return `InvalidAction` error; not implemented.
-- **Silent no-op commands**: `SetStreamPriorities`, `SetViewport` accept but do nothing.
+- **Video parameters hardcoded** (`src/clusters/camera_av_stream_mgmt.rs`): Resolutions, bitrates, sample rates hardcoded; should match actual camera capabilities — deferred until Matter 1.5 camera/video doorbell support lands.
+- **Snapshot commands** (`src/matter/clusters/camera_av_stream_mgmt.rs:997-1004`): `SnapshotStreamAllocate`/`Deallocate` return `InvalidAction` error; not implemented — deferred until Matter 1.5 camera/video doorbell support lands.
+- **Silent no-op commands**: `SetStreamPriorities`, `SetViewport` accept but do nothing — deferred until Matter 1.5 camera/video doorbell support lands.
 
 ### Doorbell
 
-- **Doorbell event notification** (`src/main.rs:78`, `src/device/video_doorbell.rs:154`): Sets atomic flag but doesn't send Matter event notification to controllers.
+- **Doorbell event notification** (`src/main.rs:78`, `src/device/video_doorbell.rs:154`): Sets atomic flag but doesn't send Matter event notification to controllers — deferred until Matter 1.5 camera/video doorbell support lands.
 - **Empty DoorbellConfig** (`src/config.rs:41-44`): Struct has no fields; either add doorbell-specific config or remove.
 
 ### Error Handling

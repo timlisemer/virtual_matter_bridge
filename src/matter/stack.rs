@@ -8,6 +8,7 @@ use crate::clusters::webrtc_transport_provider::WebRtcTransportProviderCluster;
 use crate::device::on_off_hooks::DoorbellOnOffHooks;
 use embassy_futures::select::{select, select4};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::signal::Signal;
 use log::{error, info};
 use nix::ifaddrs::getifaddrs;
 use nix::net::if_::if_nametoindex;
@@ -52,6 +53,7 @@ static MATTER: StaticCell<Matter> = StaticCell::new();
 static BUFFERS: StaticCell<PooledBuffers<10, NoopRawMutex, IMBuffer>> = StaticCell::new();
 static SUBSCRIPTIONS: StaticCell<DefaultSubscriptions> = StaticCell::new();
 static PSM: StaticCell<Psm<4096>> = StaticCell::new();
+static PERSIST_NOTIFY: StaticCell<Signal<NoopRawMutex, ()>> = StaticCell::new();
 
 /// Static hostname storage for mDNS (needs 'static lifetime for Host struct)
 static HOSTNAME: OnceLock<String> = OnceLock::new();
@@ -238,6 +240,8 @@ pub async fn run_matter_stack(
         rs_matter::utils::rand::sys_rand,
         MATTER_PORT,
     ));
+    // Use shared reference going forward (avoid moving the &mut)
+    let matter: &'static Matter = &*matter;
 
     // Initialize transport buffers
     matter.initialize_transport_buffers()?;
@@ -321,6 +325,11 @@ pub async fn run_matter_stack(
         );
         // Continue anyway - will start fresh
     }
+
+    // Shared notification so multiple tasks can observe persistence events
+    let persist_notify = PERSIST_NOTIFY.uninit().init_with(Signal::new());
+    // Reborrow as shared reference to allow multiple tasks to use it
+    let persist_notify_ref: &'static Signal<NoopRawMutex, ()> = persist_notify;
 
     // Initialize subscription store for persistence
     let subscription_store = SUBSCRIPTION_STORE
@@ -475,12 +484,25 @@ pub async fn run_matter_stack(
     // Run data model background job (handles subscriptions)
     let mut dm_job = pin!(dm.run());
 
-    // Persistence task - uses Psm to automatically save state when it changes
-    let mut persist = pin!(psm.run(&persist_path, matter, NO_NETWORKS));
+    // Persistence task - fan out persist notifications to both storage and recovery logging
+    let persist_path_clone = persist_path.clone();
+    let matter_ref = matter;
+    let mut persist = pin!(async move {
+        loop {
+            matter_ref.wait_persist().await;
+            persist_notify_ref.signal(());
+            if let Err(e) = psm.store(&persist_path_clone, matter_ref, NO_NETWORKS) {
+                error!("Failed to store persisted state: {:?}", e);
+            }
+        }
+    });
 
     // Subscription resumption task - monitors for controller reconnection after restart
     // Logs recovery status and detects when CASE sessions are re-established
-    let mut sub_resume = pin!(run_subscription_resumption(subscription_store, matter));
+    let mut sub_resume = pin!(run_subscription_resumption(
+        subscription_store,
+        persist_notify_ref
+    ));
 
     // Run all components concurrently in the same async executor
     // mDNS is included here to avoid RefCell borrow conflicts with Matter's internal state
