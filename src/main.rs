@@ -13,18 +13,91 @@ mod matter;
 
 use crate::config::Config;
 use crate::input::camera::CameraInput;
-use crate::input::simulation::run_sensor_simulation;
-use crate::matter::controls::{LightSwitch, Switch};
-use crate::matter::sensors::{ContactSensor, OccupancySensor};
+use crate::matter::endpoints::EndpointHandler;
+use crate::matter::{EndpointConfig, VirtualDevice, VirtualDeviceType};
 use log::info;
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::signal;
+
+/// Type alias for the state pusher callback.
+type StatePusher = Arc<dyn Fn(bool) + Send + Sync>;
 
 fn init_logger() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
+}
+
+/// Example handler for simulated sensors/switches.
+///
+/// This is a simple implementation that can be used for testing.
+/// Replace with your actual hardware or API integration.
+pub struct SimulatedHandler {
+    state: AtomicBool,
+    pusher: SyncRwLock<Option<StatePusher>>,
+}
+
+impl SimulatedHandler {
+    pub fn new(initial: bool) -> Self {
+        Self {
+            state: AtomicBool::new(initial),
+            pusher: SyncRwLock::new(None),
+        }
+    }
+
+    /// Update the state and push to Matter.
+    /// Call this from your simulation or hardware integration.
+    pub fn set_state(&self, value: bool) {
+        let old = self.state.swap(value, Ordering::SeqCst);
+        if old != value
+            && let Some(pusher) = self.pusher.read().as_ref()
+        {
+            pusher(value);
+        }
+    }
+
+    /// Toggle the state and push to Matter.
+    pub fn toggle(&self) -> bool {
+        let old = self.state.fetch_xor(true, Ordering::SeqCst);
+        let new = !old;
+        if let Some(pusher) = self.pusher.read().as_ref() {
+            pusher(new);
+        }
+        new
+    }
+}
+
+impl EndpointHandler for SimulatedHandler {
+    fn on_command(&self, value: bool) {
+        log::info!("[SimulatedHandler] Received command: {}", value);
+        self.state.store(value, Ordering::SeqCst);
+    }
+
+    fn get_state(&self) -> bool {
+        self.state.load(Ordering::SeqCst)
+    }
+
+    fn set_state_pusher(&self, pusher: Arc<dyn Fn(bool) + Send + Sync>) {
+        *self.pusher.write() = Some(pusher);
+    }
+}
+
+/// Run sensor simulation task (toggles sensors periodically for testing)
+async fn run_sensor_simulation(
+    door_handler: Arc<SimulatedHandler>,
+    motion_handler: Arc<SimulatedHandler>,
+) {
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        let new_state = door_handler.toggle();
+        info!("[Simulation] Door sensor toggled to: {}", new_state);
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        let new_state = motion_handler.toggle();
+        info!("[Simulation] Motion sensor toggled to: {}", new_state);
+    }
 }
 
 #[tokio::main]
@@ -47,16 +120,31 @@ async fn main() {
     // Create the camera input (handles RTSP/WebRTC)
     let camera = Arc::new(SyncRwLock::new(CameraInput::new(config)));
 
-    // Create sensors for Matter endpoints
-    let contact_sensor = Arc::new(ContactSensor::new(true)); // Contact Sensor (endpoint 3)
-    let occupancy_sensor = Arc::new(OccupancySensor::new(false)); // Occupancy Sensor (endpoint 4)
+    // Create handlers for our virtual devices
+    let door_handler = Arc::new(SimulatedHandler::new(true));
+    let motion_handler = Arc::new(SimulatedHandler::new(false));
+    let outlet1_handler = Arc::new(SimulatedHandler::new(true));
+    let outlet2_handler = Arc::new(SimulatedHandler::new(false));
+    let light_handler = Arc::new(SimulatedHandler::new(false));
 
-    // Create switches for Matter endpoints 5 and 6
-    let switch1 = Arc::new(Switch::new(true)); // Switch 1 (endpoint 5)
-    let switch2 = Arc::new(Switch::new(false)); // Switch 2 (endpoint 6)
-
-    // Create light for Matter endpoint 7
-    let light = Arc::new(LightSwitch::new(false)); // Light (endpoint 7)
+    // Define our virtual devices using the new API
+    let virtual_devices = vec![
+        // Door sensor (parent) with contact sensor endpoint (child)
+        VirtualDevice::new(VirtualDeviceType::ContactSensor, "Door").with_endpoint(
+            EndpointConfig::contact_sensor("Door Sensor", door_handler.clone()),
+        ),
+        // Motion sensor (parent) with occupancy sensor endpoint (child)
+        VirtualDevice::new(VirtualDeviceType::OccupancySensor, "Motion").with_endpoint(
+            EndpointConfig::occupancy_sensor("Occupancy", motion_handler.clone()),
+        ),
+        // Power strip (parent) with two switch endpoints (children)
+        VirtualDevice::new(VirtualDeviceType::OnOffPlugInUnit, "Power Strip")
+            .with_endpoint(EndpointConfig::switch("Outlet 1", outlet1_handler.clone()))
+            .with_endpoint(EndpointConfig::switch("Outlet 2", outlet2_handler.clone())),
+        // Light (parent) with light switch endpoint (child)
+        VirtualDevice::new(VirtualDeviceType::OnOffLight, "Light")
+            .with_endpoint(EndpointConfig::light_switch("Light", light_handler.clone())),
+    ];
 
     // Create Matter handlers from camera clusters
     let camera_cluster = camera.read().camera_cluster();
@@ -79,20 +167,18 @@ async fn main() {
 
     info!("Virtual Matter Bridge is running");
     info!("  - Camera input ready");
+    info!("  - {} virtual devices configured", virtual_devices.len());
     info!("  - Press Ctrl+C to exit");
 
     // Spawn a task to simulate sensor state changes for testing
-    // TODO: Replace this simulation with HTTP server endpoint
-    // POST /sensors/{name} { "state": true/false }
-    let sensor_task = run_sensor_simulation(contact_sensor.clone(), occupancy_sensor.clone());
+    let door_for_sim = door_handler.clone();
+    let motion_for_sim = motion_handler.clone();
+    let sensor_task = tokio::spawn(async move {
+        run_sensor_simulation(door_for_sim, motion_for_sim).await;
+    });
 
     // Start Matter stack in a separate thread
     // Matter uses blocking I/O internally with embassy, so we run it on a dedicated thread
-    let contact_sensor_for_matter = contact_sensor.clone();
-    let occupancy_sensor_for_matter = occupancy_sensor.clone();
-    let switch1_for_matter = switch1.clone();
-    let switch2_for_matter = switch2.clone();
-    let light_for_matter = light.clone();
     let _matter_handle = std::thread::Builder::new()
         .name("matter-stack".into())
         .stack_size(550 * 1024) // 550KB stack for Matter operations (matches rs-matter examples)
@@ -102,11 +188,7 @@ async fn main() {
                 camera_cluster,
                 webrtc_cluster,
                 master_onoff,
-                contact_sensor_for_matter,
-                occupancy_sensor_for_matter,
-                switch1_for_matter,
-                switch2_for_matter,
-                light_for_matter,
+                virtual_devices,
             )) {
                 log::error!("Matter stack error: {:?}", e);
             }

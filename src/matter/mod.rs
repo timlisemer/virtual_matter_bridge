@@ -7,9 +7,15 @@ mod stack;
 pub mod clusters;
 pub mod device_types;
 pub mod endpoints;
+pub mod handler_bridge;
+pub mod virtual_device;
 
 pub use stack::run_matter_stack;
 
 // Re-export from endpoints for convenience
 pub use endpoints::controls;
 pub use endpoints::sensors;
+
+// Re-export virtual device types
+pub use device_types::VirtualDeviceType;
+pub use virtual_device::{EndpointConfig, VirtualDevice};
