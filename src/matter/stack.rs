@@ -4,7 +4,8 @@ use super::clusters::{
     BooleanStateHandler, BridgedHandler, CameraAvStreamMgmtHandler, OccupancySensingHandler,
     TimeSyncHandler, WebRtcTransportProviderHandler,
 };
-use super::device_info::DEV_INFO;
+// DEV_INFO temporarily replaced with TEST_DEV_DET for label debugging (Iteration 2)
+// use super::device_info::DEV_INFO;
 use super::device_types::{
     DEV_TYPE_AGGREGATOR, DEV_TYPE_BRIDGED_NODE, DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR,
     DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_VIDEO_DOORBELL,
@@ -24,7 +25,7 @@ use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _, PartsMatcher};
 use rs_matter::dm::clusters::on_off::{self, NoLevelControl, OnOffHooks};
 use rs_matter::dm::devices;
-use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM};
+use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter::dm::endpoints;
 use rs_matter::dm::subscriptions::DefaultSubscriptions;
 use rs_matter::dm::{
@@ -216,9 +217,10 @@ const NODE: Node<'static> = Node {
             clusters: clusters!(desc::DescHandler::CLUSTER, BridgedHandler::CLUSTER),
         },
         // Endpoint 6: Outlet 1 (child of Power Strip)
+        // Note: No DEV_TYPE_BRIDGED_NODE - children are discovered via parent's PartsList
         Endpoint {
             id: 6,
-            device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_BRIDGED_NODE),
+            device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT),
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
                 BridgedHandler::CLUSTER,
@@ -226,9 +228,10 @@ const NODE: Node<'static> = Node {
             ),
         },
         // Endpoint 7: Outlet 2 (child of Power Strip)
+        // Note: No DEV_TYPE_BRIDGED_NODE - children are discovered via parent's PartsList
         Endpoint {
             id: 7,
-            device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_BRIDGED_NODE),
+            device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT),
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
                 BridgedHandler::CLUSTER,
@@ -442,8 +445,9 @@ pub async fn run_matter_stack(
     info!("Initializing Matter stack...");
 
     // Initialize the Matter instance in static memory
+    // Using TEST_DEV_DET temporarily for label debugging (Iteration 2)
     let matter = MATTER.uninit().init_with(Matter::init(
-        &DEV_INFO,
+        &TEST_DEV_DET,
         TEST_DEV_COMM,
         &TEST_DEV_ATT,
         rs_matter::utils::epoch::sys_epoch,
