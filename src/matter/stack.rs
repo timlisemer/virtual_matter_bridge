@@ -4,8 +4,7 @@ use super::clusters::{
     BooleanStateHandler, BridgedHandler, CameraAvStreamMgmtHandler, OccupancySensingHandler,
     TimeSyncHandler, WebRtcTransportProviderHandler,
 };
-// DEV_INFO temporarily replaced with TEST_DEV_DET for label debugging (Iteration 2)
-// use super::device_info::DEV_INFO;
+use super::device_info::DEV_INFO;
 use super::device_types::{
     DEV_TYPE_AGGREGATOR, DEV_TYPE_BRIDGED_NODE, DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR,
     DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_VIDEO_DOORBELL,
@@ -25,7 +24,7 @@ use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _, PartsMatcher};
 use rs_matter::dm::clusters::on_off::{self, NoLevelControl, OnOffHooks};
 use rs_matter::dm::devices;
-use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
+use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM};
 use rs_matter::dm::endpoints;
 use rs_matter::dm::subscriptions::DefaultSubscriptions;
 use rs_matter::dm::{
@@ -70,16 +69,60 @@ static SENSOR_NOTIFY: StaticCell<Signal<CriticalSectionRawMutex, ()>> = StaticCe
 /// Static hostname storage for mDNS (needs 'static lifetime for Host struct)
 static HOSTNAME: OnceLock<String> = OnceLock::new();
 
-/// PartsMatcher for Power Strip composed device (endpoint 5).
-/// Returns child endpoints [6, 7] as parts when queried from endpoint 5.
+/// PartsMatcher for Door composed device (endpoint 3).
+/// Returns child endpoint [4] as parts when queried from endpoint 3.
+#[derive(Debug)]
+struct DoorPartsMatcher;
+
+impl PartsMatcher for DoorPartsMatcher {
+    fn matches(&self, our_endpoint: u16, endpoint: u16) -> bool {
+        our_endpoint == 3 && endpoint == 4
+    }
+}
+
+/// PartsMatcher for Motion composed device (endpoint 5).
+/// Returns child endpoint [6] as parts when queried from endpoint 5.
+#[derive(Debug)]
+struct MotionPartsMatcher;
+
+impl PartsMatcher for MotionPartsMatcher {
+    fn matches(&self, our_endpoint: u16, endpoint: u16) -> bool {
+        our_endpoint == 5 && endpoint == 6
+    }
+}
+
+/// PartsMatcher for Power Strip composed device (endpoint 7).
+/// Returns child endpoints [8, 9] as parts when queried from endpoint 7.
 #[derive(Debug)]
 struct PowerStripPartsMatcher;
 
 impl PartsMatcher for PowerStripPartsMatcher {
     fn matches(&self, our_endpoint: u16, endpoint: u16) -> bool {
-        // Only return parts when queried from endpoint 5 (Power Strip parent)
-        // Child endpoints are 6 (Outlet 1) and 7 (Outlet 2)
-        our_endpoint == 5 && (endpoint == 6 || endpoint == 7)
+        our_endpoint == 7 && (endpoint == 8 || endpoint == 9)
+    }
+}
+
+/// PartsMatcher for Light composed device (endpoint 10).
+/// Returns child endpoint [11] as parts when queried from endpoint 10.
+#[derive(Debug)]
+struct LightPartsMatcher;
+
+impl PartsMatcher for LightPartsMatcher {
+    fn matches(&self, our_endpoint: u16, endpoint: u16) -> bool {
+        our_endpoint == 10 && endpoint == 11
+    }
+}
+
+/// PartsMatcher for Aggregator (endpoint 2).
+/// Returns only bridged parent endpoints [3, 5, 7, 10].
+#[derive(Debug)]
+struct BridgeAggregatorPartsMatcher;
+
+impl PartsMatcher for BridgeAggregatorPartsMatcher {
+    fn matches(&self, our_endpoint: u16, endpoint: u16) -> bool {
+        // Only return parts when queried from Aggregator (EP2)
+        // Parent endpoints are: 3 (Door), 5 (Motion), 7 (Power Strip), 10 (Light)
+        our_endpoint == 2 && matches!(endpoint, 3 | 5 | 7 | 10)
     }
 }
 
@@ -161,9 +204,17 @@ const ROOT_CLUSTERS: &[Cluster<'static>] = clusters!(eth; TimeSyncHandler::CLUST
 ///
 /// Architecture:
 /// - Endpoint 0: Root node (standard)
-/// - Endpoint 1: Virtual Matter Bridge (root device, NOT bridged)
-/// - Endpoint 2: Aggregator (bridge root - enumerates bridged devices)
-/// - Endpoints 3+: Bridged devices (each with BridgedDeviceBasicInformation)
+/// - Endpoint 1: Video Doorbell (NOT bridged - has OnOff, Camera, WebRTC directly)
+/// - Endpoint 2: Aggregator (bridge root - enumerates bridged parent endpoints)
+/// - Endpoint 3: Door parent (bridged) - NO sensor cluster
+/// - Endpoint 4: Door child - has BooleanState cluster
+/// - Endpoint 5: Motion parent (bridged) - NO sensor cluster
+/// - Endpoint 6: Motion child - has OccupancySensing cluster
+/// - Endpoint 7: Power Strip parent (bridged) - NO OnOff cluster
+/// - Endpoint 8: Outlet 1 child - has OnOff cluster
+/// - Endpoint 9: Outlet 2 child - has OnOff cluster
+/// - Endpoint 10: Light parent (bridged) - NO OnOff cluster
+/// - Endpoint 11: Light child - has OnOff cluster
 const NODE: Node<'static> = Node {
     id: 0,
     endpoints: &[
@@ -173,7 +224,7 @@ const NODE: Node<'static> = Node {
             device_types: devices!(devices::DEV_TYPE_ROOT_NODE),
             clusters: ROOT_CLUSTERS,
         },
-        // Endpoint 1: Virtual Matter Bridge (root device, not bridged)
+        // Endpoint 1: Video Doorbell (NOT bridged - direct endpoint with all clusters)
         Endpoint {
             id: 1,
             device_types: devices!(DEV_TYPE_VIDEO_DOORBELL),
@@ -184,15 +235,21 @@ const NODE: Node<'static> = Node {
                 WebRtcTransportProviderHandler::CLUSTER
             ),
         },
-        // Endpoint 2: Aggregator (bridge root)
+        // Endpoint 2: Aggregator (bridge root - lists only bridged parent endpoints)
         Endpoint {
             id: 2,
             device_types: devices!(DEV_TYPE_AGGREGATOR),
             clusters: clusters!(desc::DescHandler::CLUSTER),
         },
-        // Endpoint 3: Contact Sensor (bridged) - "Door"
+        // Endpoint 3: Door parent (bridged, composed device)
         Endpoint {
             id: 3,
+            device_types: devices!(DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_BRIDGED_NODE),
+            clusters: clusters!(desc::DescHandler::CLUSTER, BridgedHandler::CLUSTER),
+        },
+        // Endpoint 4: Door child (has BooleanState cluster)
+        Endpoint {
+            id: 4,
             device_types: devices!(DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_BRIDGED_NODE),
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
@@ -200,9 +257,15 @@ const NODE: Node<'static> = Node {
                 BooleanStateHandler::CLUSTER
             ),
         },
-        // Endpoint 4: Occupancy Sensor (bridged) - "Motion"
+        // Endpoint 5: Motion parent (bridged, composed device)
         Endpoint {
-            id: 4,
+            id: 5,
+            device_types: devices!(DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_BRIDGED_NODE),
+            clusters: clusters!(desc::DescHandler::CLUSTER, BridgedHandler::CLUSTER),
+        },
+        // Endpoint 6: Motion child (has OccupancySensing cluster)
+        Endpoint {
+            id: 6,
             device_types: devices!(DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_BRIDGED_NODE),
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
@@ -210,37 +273,41 @@ const NODE: Node<'static> = Node {
                 OccupancySensingHandler::CLUSTER
             ),
         },
-        // Endpoint 5: Power Strip parent (composed device, no OnOff - children have it)
+        // Endpoint 7: Power Strip parent (bridged, composed device)
         Endpoint {
-            id: 5,
+            id: 7,
             device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_BRIDGED_NODE),
             clusters: clusters!(desc::DescHandler::CLUSTER, BridgedHandler::CLUSTER),
         },
-        // Endpoint 6: Outlet 1 (child of Power Strip)
-        // Note: No DEV_TYPE_BRIDGED_NODE - children are discovered via parent's PartsList
-        Endpoint {
-            id: 6,
-            device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT),
-            clusters: clusters!(
-                desc::DescHandler::CLUSTER,
-                BridgedHandler::CLUSTER,
-                Switch::CLUSTER
-            ),
-        },
-        // Endpoint 7: Outlet 2 (child of Power Strip)
-        // Note: No DEV_TYPE_BRIDGED_NODE - children are discovered via parent's PartsList
-        Endpoint {
-            id: 7,
-            device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT),
-            clusters: clusters!(
-                desc::DescHandler::CLUSTER,
-                BridgedHandler::CLUSTER,
-                Switch::CLUSTER
-            ),
-        },
-        // Endpoint 8: On/Off Light (bridged) - "Light"
+        // Endpoint 8: Outlet 1 child (has OnOff cluster)
         Endpoint {
             id: 8,
+            device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_BRIDGED_NODE),
+            clusters: clusters!(
+                desc::DescHandler::CLUSTER,
+                BridgedHandler::CLUSTER,
+                Switch::CLUSTER
+            ),
+        },
+        // Endpoint 9: Outlet 2 child (has OnOff cluster)
+        Endpoint {
+            id: 9,
+            device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_BRIDGED_NODE),
+            clusters: clusters!(
+                desc::DescHandler::CLUSTER,
+                BridgedHandler::CLUSTER,
+                Switch::CLUSTER
+            ),
+        },
+        // Endpoint 10: Light parent (bridged, composed device)
+        Endpoint {
+            id: 10,
+            device_types: devices!(DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_BRIDGED_NODE),
+            clusters: clusters!(desc::DescHandler::CLUSTER, BridgedHandler::CLUSTER),
+        },
+        // Endpoint 11: Light child (has OnOff cluster)
+        Endpoint {
+            id: 11,
             device_types: devices!(DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_BRIDGED_NODE),
             clusters: clusters!(
                 desc::DescHandler::CLUSTER,
@@ -272,13 +339,23 @@ fn dm_handler<'a>(
     switch1_handler: &'a on_off::OnOffHandler<'a, &'a Switch, NoLevelControl>,
     switch2_handler: &'a on_off::OnOffHandler<'a, &'a Switch, NoLevelControl>,
     light_handler: &'a on_off::OnOffHandler<'a, &'a LightSwitch, NoLevelControl>,
+    // PartsMatchers for composed devices (bridged only)
+    door_matcher: &'a DoorPartsMatcher,
+    motion_matcher: &'a MotionPartsMatcher,
     power_strip_matcher: &'a PowerStripPartsMatcher,
-    label_door: &'a BridgedHandler,
-    label_motion: &'a BridgedHandler,
-    label_power_strip: &'a BridgedHandler,
+    light_matcher: &'a LightPartsMatcher,
+    aggregator_matcher: &'a BridgeAggregatorPartsMatcher,
+    // Labels for bridged parent endpoints
+    label_door_parent: &'a BridgedHandler,
+    label_motion_parent: &'a BridgedHandler,
+    label_power_strip_parent: &'a BridgedHandler,
+    label_light_parent: &'a BridgedHandler,
+    // Labels for bridged child endpoints
+    label_door_child: &'a BridgedHandler,
+    label_motion_child: &'a BridgedHandler,
     label_outlet_1: &'a BridgedHandler,
     label_outlet_2: &'a BridgedHandler,
-    label_light: &'a BridgedHandler,
+    label_light_child: &'a BridgedHandler,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -291,72 +368,98 @@ fn dm_handler<'a>(
                 matter.rand(),
                 // Chain handlers for all endpoints
                 EmptyHandler
-                    // Endpoint 0: Time Synchronization (read-only stub)
+                    // === Endpoint 0: Root ===
                     .chain(
                         EpClMatcher::new(Some(0), Some(TimeSyncHandler::CLUSTER.id)),
                         Async(time_sync_handler),
                     )
-                    // Endpoint 1: Descriptor (Virtual Matter Bridge - root device)
+                    // === Endpoint 1: Video Doorbell (NOT bridged - direct endpoint) ===
                     .chain(
                         EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
                         Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
                     )
-                    // Endpoint 1: OnOff (master on/off for all sub-devices)
                     .chain(
                         EpClMatcher::new(Some(1), Some(Switch::CLUSTER.id)),
                         on_off::HandlerAsyncAdaptor(master_onoff_handler),
                     )
-                    // Endpoint 1: Camera AV Stream Management
                     .chain(
                         EpClMatcher::new(Some(1), Some(CameraAvStreamMgmtHandler::CLUSTER.id)),
                         Async(camera_handler),
                     )
-                    // Endpoint 1: WebRTC Transport Provider
                     .chain(
                         EpClMatcher::new(Some(1), Some(WebRtcTransportProviderHandler::CLUSTER.id)),
                         Async(webrtc_handler),
                     )
-                    // Endpoint 2: Aggregator Descriptor (uses new_aggregator for bridge)
+                    // === Endpoint 2: Aggregator (lists bridged parent endpoints) ===
                     .chain(
                         EpClMatcher::new(Some(2), Some(desc::DescHandler::CLUSTER.id)),
                         Async(
-                            desc::DescHandler::new_aggregator(Dataver::new_rand(matter.rand()))
-                                .adapt(),
+                            desc::DescHandler::new_matching(
+                                Dataver::new_rand(matter.rand()),
+                                aggregator_matcher,
+                            )
+                            .adapt(),
                         ),
                     )
-                    // Endpoint 3: Descriptor (Contact Sensor)
+                    // === Endpoint 3: Door parent (bridged, composed device) ===
                     .chain(
                         EpClMatcher::new(Some(3), Some(desc::DescHandler::CLUSTER.id)),
-                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
+                        Async(
+                            desc::DescHandler::new_matching(
+                                Dataver::new_rand(matter.rand()),
+                                door_matcher,
+                            )
+                            .adapt(),
+                        ),
                     )
-                    // Endpoint 3: BridgedDeviceBasicInformation
                     .chain(
                         EpClMatcher::new(Some(3), Some(BridgedHandler::CLUSTER.id)),
-                        Async(label_door),
+                        Async(label_door_parent),
                     )
-                    // Endpoint 3: BooleanState (contact sensor)
-                    .chain(
-                        EpClMatcher::new(Some(3), Some(BooleanStateHandler::CLUSTER.id)),
-                        Async(boolean_state_handler),
-                    )
-                    // Endpoint 4: Descriptor (Occupancy Sensor)
+                    // === Endpoint 4: Door child (has BooleanState) ===
                     .chain(
                         EpClMatcher::new(Some(4), Some(desc::DescHandler::CLUSTER.id)),
                         Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
                     )
-                    // Endpoint 4: BridgedDeviceBasicInformation
                     .chain(
                         EpClMatcher::new(Some(4), Some(BridgedHandler::CLUSTER.id)),
-                        Async(label_motion),
+                        Async(label_door_child),
                     )
-                    // Endpoint 4: OccupancySensing
                     .chain(
-                        EpClMatcher::new(Some(4), Some(OccupancySensingHandler::CLUSTER.id)),
-                        Async(occupancy_sensing_handler),
+                        EpClMatcher::new(Some(4), Some(BooleanStateHandler::CLUSTER.id)),
+                        Async(boolean_state_handler),
                     )
-                    // Endpoint 5: Descriptor (Power Strip parent - composed device with PartsList=[6,7])
+                    // === Endpoint 5: Motion parent (bridged, composed device) ===
                     .chain(
                         EpClMatcher::new(Some(5), Some(desc::DescHandler::CLUSTER.id)),
+                        Async(
+                            desc::DescHandler::new_matching(
+                                Dataver::new_rand(matter.rand()),
+                                motion_matcher,
+                            )
+                            .adapt(),
+                        ),
+                    )
+                    .chain(
+                        EpClMatcher::new(Some(5), Some(BridgedHandler::CLUSTER.id)),
+                        Async(label_motion_parent),
+                    )
+                    // === Endpoint 6: Motion child (has OccupancySensing) ===
+                    .chain(
+                        EpClMatcher::new(Some(6), Some(desc::DescHandler::CLUSTER.id)),
+                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
+                    )
+                    .chain(
+                        EpClMatcher::new(Some(6), Some(BridgedHandler::CLUSTER.id)),
+                        Async(label_motion_child),
+                    )
+                    .chain(
+                        EpClMatcher::new(Some(6), Some(OccupancySensingHandler::CLUSTER.id)),
+                        Async(occupancy_sensing_handler),
+                    )
+                    // === Endpoint 7: Power Strip parent (bridged, composed device) ===
+                    .chain(
+                        EpClMatcher::new(Some(7), Some(desc::DescHandler::CLUSTER.id)),
                         Async(
                             desc::DescHandler::new_matching(
                                 Dataver::new_rand(matter.rand()),
@@ -365,54 +468,62 @@ fn dm_handler<'a>(
                             .adapt(),
                         ),
                     )
-                    // Endpoint 5: BridgedDeviceBasicInformation
-                    .chain(
-                        EpClMatcher::new(Some(5), Some(BridgedHandler::CLUSTER.id)),
-                        Async(label_power_strip),
-                    )
-                    // Endpoint 6: Descriptor (Outlet 1)
-                    .chain(
-                        EpClMatcher::new(Some(6), Some(desc::DescHandler::CLUSTER.id)),
-                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
-                    )
-                    // Endpoint 6: BridgedDeviceBasicInformation
-                    .chain(
-                        EpClMatcher::new(Some(6), Some(BridgedHandler::CLUSTER.id)),
-                        Async(label_outlet_1),
-                    )
-                    // Endpoint 6: OnOff (switch 1)
-                    .chain(
-                        EpClMatcher::new(Some(6), Some(Switch::CLUSTER.id)),
-                        on_off::HandlerAsyncAdaptor(switch1_handler),
-                    )
-                    // Endpoint 7: Descriptor (Outlet 2)
-                    .chain(
-                        EpClMatcher::new(Some(7), Some(desc::DescHandler::CLUSTER.id)),
-                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
-                    )
-                    // Endpoint 7: BridgedDeviceBasicInformation
                     .chain(
                         EpClMatcher::new(Some(7), Some(BridgedHandler::CLUSTER.id)),
-                        Async(label_outlet_2),
+                        Async(label_power_strip_parent),
                     )
-                    // Endpoint 7: OnOff (switch 2)
-                    .chain(
-                        EpClMatcher::new(Some(7), Some(Switch::CLUSTER.id)),
-                        on_off::HandlerAsyncAdaptor(switch2_handler),
-                    )
-                    // Endpoint 8: Descriptor (Light)
+                    // === Endpoint 8: Outlet 1 child (has OnOff) ===
                     .chain(
                         EpClMatcher::new(Some(8), Some(desc::DescHandler::CLUSTER.id)),
                         Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
                     )
-                    // Endpoint 8: BridgedDeviceBasicInformation
                     .chain(
                         EpClMatcher::new(Some(8), Some(BridgedHandler::CLUSTER.id)),
-                        Async(label_light),
+                        Async(label_outlet_1),
                     )
-                    // Endpoint 8: OnOff (light)
                     .chain(
-                        EpClMatcher::new(Some(8), Some(LightSwitch::CLUSTER.id)),
+                        EpClMatcher::new(Some(8), Some(Switch::CLUSTER.id)),
+                        on_off::HandlerAsyncAdaptor(switch1_handler),
+                    )
+                    // === Endpoint 9: Outlet 2 child (has OnOff) ===
+                    .chain(
+                        EpClMatcher::new(Some(9), Some(desc::DescHandler::CLUSTER.id)),
+                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
+                    )
+                    .chain(
+                        EpClMatcher::new(Some(9), Some(BridgedHandler::CLUSTER.id)),
+                        Async(label_outlet_2),
+                    )
+                    .chain(
+                        EpClMatcher::new(Some(9), Some(Switch::CLUSTER.id)),
+                        on_off::HandlerAsyncAdaptor(switch2_handler),
+                    )
+                    // === Endpoint 10: Light parent (bridged, composed device) ===
+                    .chain(
+                        EpClMatcher::new(Some(10), Some(desc::DescHandler::CLUSTER.id)),
+                        Async(
+                            desc::DescHandler::new_matching(
+                                Dataver::new_rand(matter.rand()),
+                                light_matcher,
+                            )
+                            .adapt(),
+                        ),
+                    )
+                    .chain(
+                        EpClMatcher::new(Some(10), Some(BridgedHandler::CLUSTER.id)),
+                        Async(label_light_parent),
+                    )
+                    // === Endpoint 11: Light child (has OnOff) ===
+                    .chain(
+                        EpClMatcher::new(Some(11), Some(desc::DescHandler::CLUSTER.id)),
+                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
+                    )
+                    .chain(
+                        EpClMatcher::new(Some(11), Some(BridgedHandler::CLUSTER.id)),
+                        Async(label_light_child),
+                    )
+                    .chain(
+                        EpClMatcher::new(Some(11), Some(LightSwitch::CLUSTER.id)),
                         on_off::HandlerAsyncAdaptor(light_handler),
                     ),
             ),
@@ -445,9 +556,8 @@ pub async fn run_matter_stack(
     info!("Initializing Matter stack...");
 
     // Initialize the Matter instance in static memory
-    // Using TEST_DEV_DET temporarily for label debugging (Iteration 2)
     let matter = MATTER.uninit().init_with(Matter::init(
-        &TEST_DEV_DET,
+        &DEV_INFO,
         TEST_DEV_COMM,
         &TEST_DEV_ATT,
         rs_matter::utils::epoch::sys_epoch,
@@ -585,14 +695,14 @@ pub async fn run_matter_stack(
     // which wakes the forwarding task to call subscriptions.notify_cluster_changed()
     contact_sensor.set_notifier(ClusterNotifier::new(
         sensor_notify_ref,
-        3, // endpoint_id for Contact Sensor (was 2, now 3 due to Aggregator at 1)
+        4, // endpoint_id for Door child (EP4) - has BooleanState cluster
         boolean_state::CLUSTER_ID,
     ));
 
     // Wire up the occupancy sensor for live updates
     occupancy_sensor.set_notifier(ClusterNotifier::new(
         sensor_notify_ref,
-        4, // endpoint_id for Occupancy Sensor (was 3, now 4)
+        6, // endpoint_id for Motion child (EP6) - has OccupancySensing cluster
         occupancy_sensing::CLUSTER_ID,
     ));
 
@@ -608,45 +718,55 @@ pub async fn run_matter_stack(
     let occupancy_sensing_handler =
         OccupancySensingHandler::new(Dataver::new_rand(matter.rand()), occupancy_sensor);
 
-    // Create OnOff handler for master on/off (endpoint 1 - controls all sub-devices)
+    // Create OnOff handler for master on/off (endpoint 1 - Video Doorbell, NOT bridged)
     let master_onoff_handler = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(matter.rand()),
         1, // endpoint ID
         master_onoff.as_ref(),
     );
 
-    // Create OnOff handler for switch 1 (endpoint 6 - Outlet 1)
+    // Create OnOff handler for switch 1 (endpoint 8 - Outlet 1 child)
     let switch1_handler = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(matter.rand()),
-        6, // endpoint ID
+        8, // endpoint ID (child of EP7)
         switch1.as_ref(),
     );
 
-    // Create OnOff handler for switch 2 (endpoint 7 - Outlet 2)
+    // Create OnOff handler for switch 2 (endpoint 9 - Outlet 2 child)
     let switch2_handler = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(matter.rand()),
-        7, // endpoint ID
+        9, // endpoint ID (child of EP7)
         switch2.as_ref(),
     );
 
-    // Create OnOff handler for light (endpoint 8)
+    // Create OnOff handler for light (endpoint 11 - Light child)
     let light_handler = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(matter.rand()),
-        8, // endpoint ID
+        11, // endpoint ID (child of EP10)
         light.as_ref(),
     );
 
-    // Create PartsMatcher for Power Strip composed device
+    // Create PartsMatchers for bridged composed devices (parent-child relationships)
+    let door_matcher = DoorPartsMatcher;
+    let motion_matcher = MotionPartsMatcher;
     let power_strip_matcher = PowerStripPartsMatcher;
+    let light_matcher = LightPartsMatcher;
+    let aggregator_matcher = BridgeAggregatorPartsMatcher;
 
     // Create BridgedHandler for endpoint names (via BridgedDeviceBasicInformation.NodeLabel)
-    // Note: EP1 (Virtual Matter Bridge) and EP2 (Aggregator) are not bridged
-    let label_door = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Door");
-    let label_motion = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Motion");
-    let label_power_strip = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Power Strip");
+    // Parent endpoints (BRIDGED_NODE, no functional clusters)
+    let label_door_parent = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Door");
+    let label_motion_parent = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Motion");
+    let label_power_strip_parent =
+        BridgedHandler::new(Dataver::new_rand(matter.rand()), "Power Strip");
+    let label_light_parent = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Light");
+
+    // Child endpoints (have functional clusters like OnOff, BooleanState, OccupancySensing)
+    let label_door_child = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Door");
+    let label_motion_child = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Occupancy");
     let label_outlet_1 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Outlet 1");
     let label_outlet_2 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Outlet 2");
-    let label_light = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Light");
+    let label_light_child = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Light");
 
     // Create the data model with our bridge handlers
     let handler = dm_handler(
@@ -660,13 +780,23 @@ pub async fn run_matter_stack(
         &switch1_handler,
         &switch2_handler,
         &light_handler,
+        // PartsMatchers for bridged composed devices
+        &door_matcher,
+        &motion_matcher,
         &power_strip_matcher,
-        &label_door,
-        &label_motion,
-        &label_power_strip,
+        &light_matcher,
+        &aggregator_matcher,
+        // Labels for bridged parent endpoints
+        &label_door_parent,
+        &label_motion_parent,
+        &label_power_strip_parent,
+        &label_light_parent,
+        // Labels for bridged child endpoints
+        &label_door_child,
+        &label_motion_child,
         &label_outlet_1,
         &label_outlet_2,
-        &label_light,
+        &label_light_child,
     );
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 
@@ -782,10 +912,10 @@ pub async fn run_matter_stack(
     let mut sensor_forward = pin!(async {
         loop {
             sensor_notify_ref.wait().await;
-            // Notify subscriptions for Contact Sensor (endpoint 3 - was 2)
-            subscriptions.notify_cluster_changed(3, boolean_state::CLUSTER_ID);
-            // Notify subscriptions for Occupancy Sensor (endpoint 4 - was 3)
-            subscriptions.notify_cluster_changed(4, occupancy_sensing::CLUSTER_ID);
+            // Notify subscriptions for Door child (EP4) - has BooleanState cluster
+            subscriptions.notify_cluster_changed(4, boolean_state::CLUSTER_ID);
+            // Notify subscriptions for Motion child (EP6) - has OccupancySensing cluster
+            subscriptions.notify_cluster_changed(6, occupancy_sensing::CLUSTER_ID);
         }
     });
 

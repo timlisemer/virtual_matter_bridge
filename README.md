@@ -473,6 +473,67 @@ Key observations from comparing working version vs current version:
    - Test adding `BridgedDeviceBasicInformation` cluster to EP1 with custom NodeLabel
    - Compare how non-bridged vs bridged endpoints are handled by Google Home
 
+**Root Cause Discovery - Iteration 4 (2024-12-09)**
+
+After detailed analysis comparing working version screenshots with current behavior, the root cause was identified:
+
+1. **Google Home Parent-Child UI Structure**:
+   Google Home displays ALL bridged devices with a parent-child structure:
+   ```
+   Root Device ("ACME Test")
+   ├── Controls: "Switch (1)" ← Master switch (broken label)
+   └── Connected devices:
+       ├── Door (parent) → child: "Door" sensor ✓
+       ├── Motion (parent) → child: "Occupancy" sensor ✓
+       ├── Light (parent) → child: "(8)" control ← BROKEN
+       └── Power Strip (parent) → children: "Switch (6)", "Switch (7)" ← BROKEN
+   ```
+
+2. **Key Insight - Label Sources**:
+   - **Parent names**: Come from `BridgedDeviceBasicInformation.NodeLabel` ✓ (works correctly)
+   - **Child sensor names**: Come from device type (e.g., "Door" for contact sensor, "Occupancy" for occupancy sensor) ✓ (works)
+   - **Child control names**: Fall back to "Switch (N)" or "(N)" when functional cluster is on wrong endpoint ✗ (broken)
+
+3. **Code Structure Inconsistency**:
+   - **Power Strip**: Correctly uses parent (EP5, no OnOff) + children (EP6, EP7, with OnOff)
+   - **Door, Motion, Light**: Incorrectly have functional clusters directly on the parent endpoint
+
+   The correct Matter bridge pattern for composed devices is:
+   - **Parent endpoint**: `DEV_TYPE_BRIDGED_NODE` + `BridgedDeviceBasicInformation` + Descriptor (NO functional cluster)
+   - **Child endpoint(s)**: `BridgedDeviceBasicInformation` + functional cluster
+
+4. **Current (Broken) Code Structure**:
+   ```
+   EP0: Root
+   EP1: Video Doorbell - Switch cluster ON PARENT (wrong, also not a proper bridged device)
+   EP2: Aggregator
+   EP3: Door - BooleanState ON PARENT (wrong)
+   EP4: Motion - OccupancySensing ON PARENT (wrong)
+   EP5: Power Strip parent - no OnOff (correct!)
+   EP6: Outlet 1 child - Switch cluster (correct!)
+   EP7: Outlet 2 child - Switch cluster (correct!)
+   EP8: Light - LightSwitch ON PARENT (wrong)
+   ```
+
+5. **Target (Correct) Structure**:
+   ```
+   EP0: Root
+   EP1: Master Switch parent - BRIDGED_NODE + BridgedHandler("Master On Off") - NO OnOff
+   EP2: Master Switch child - BridgedHandler("Master On Off") + Switch
+   EP3: Aggregator
+   EP4: Door parent - BRIDGED_NODE + BridgedHandler("Door") - NO sensor
+   EP5: Door child - BridgedHandler("Door") + BooleanState
+   EP6: Motion parent - BRIDGED_NODE + BridgedHandler("Motion") - NO sensor
+   EP7: Motion child - BridgedHandler("Occupancy") + OccupancySensing
+   EP8: Power Strip parent - BRIDGED_NODE + BridgedHandler("Power Strip") - NO OnOff
+   EP9: Outlet 1 child - BridgedHandler("Outlet 1") + Switch
+   EP10: Outlet 2 child - BridgedHandler("Outlet 2") + Switch
+   EP11: Light parent - BRIDGED_NODE + BridgedHandler("Light") - NO OnOff
+   EP12: Light child - BridgedHandler("Light") + LightSwitch
+   ```
+
+**Status**: Refactoring in progress to implement correct parent-child structure for all devices.
+
 ### Previous Issues (Resolved)
 
 #### MRP Retransmission Error on Stale Subscriptions (RESOLVED)
