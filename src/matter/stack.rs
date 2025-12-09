@@ -1,8 +1,8 @@
 use super::clusters::camera_av_stream_mgmt::CameraAvStreamMgmtCluster;
 use super::clusters::webrtc_transport_provider::WebRtcTransportProviderCluster;
 use super::clusters::{
-    BooleanStateHandler, BridgedClusterHandler as _, BridgedHandler, CameraAvStreamMgmtHandler,
-    OccupancySensingHandler, TimeSyncHandler, WebRtcTransportProviderHandler,
+    BooleanStateHandler, BridgedHandler, CameraAvStreamMgmtHandler, OccupancySensingHandler,
+    TimeSyncHandler, WebRtcTransportProviderHandler,
 };
 use super::device_info::DEV_INFO;
 use super::device_types::{
@@ -270,12 +270,12 @@ fn dm_handler<'a>(
     switch2_handler: &'a on_off::OnOffHandler<'a, &'a Switch, NoLevelControl>,
     light_handler: &'a on_off::OnOffHandler<'a, &'a LightSwitch, NoLevelControl>,
     power_strip_matcher: &'a PowerStripPartsMatcher,
-    bridged_ep3: &'a BridgedHandler,
-    bridged_ep4: &'a BridgedHandler,
-    bridged_ep5: &'a BridgedHandler,
-    bridged_ep6: &'a BridgedHandler,
-    bridged_ep7: &'a BridgedHandler,
-    bridged_ep8: &'a BridgedHandler,
+    label_door: &'a BridgedHandler,
+    label_motion: &'a BridgedHandler,
+    label_power_strip: &'a BridgedHandler,
+    label_outlet_1: &'a BridgedHandler,
+    label_outlet_2: &'a BridgedHandler,
+    label_light: &'a BridgedHandler,
 ) -> impl AsyncMetadata + AsyncHandler + 'a {
     (
         NODE,
@@ -329,7 +329,7 @@ fn dm_handler<'a>(
                     // Endpoint 3: BridgedDeviceBasicInformation
                     .chain(
                         EpClMatcher::new(Some(3), Some(BridgedHandler::CLUSTER.id)),
-                        Async(bridged_ep3.clone().adapt()),
+                        Async(label_door),
                     )
                     // Endpoint 3: BooleanState (contact sensor)
                     .chain(
@@ -344,7 +344,7 @@ fn dm_handler<'a>(
                     // Endpoint 4: BridgedDeviceBasicInformation
                     .chain(
                         EpClMatcher::new(Some(4), Some(BridgedHandler::CLUSTER.id)),
-                        Async(bridged_ep4.clone().adapt()),
+                        Async(label_motion),
                     )
                     // Endpoint 4: OccupancySensing
                     .chain(
@@ -365,7 +365,7 @@ fn dm_handler<'a>(
                     // Endpoint 5: BridgedDeviceBasicInformation
                     .chain(
                         EpClMatcher::new(Some(5), Some(BridgedHandler::CLUSTER.id)),
-                        Async(bridged_ep5.clone().adapt()),
+                        Async(label_power_strip),
                     )
                     // Endpoint 6: Descriptor (Outlet 1)
                     .chain(
@@ -375,7 +375,7 @@ fn dm_handler<'a>(
                     // Endpoint 6: BridgedDeviceBasicInformation
                     .chain(
                         EpClMatcher::new(Some(6), Some(BridgedHandler::CLUSTER.id)),
-                        Async(bridged_ep6.clone().adapt()),
+                        Async(label_outlet_1),
                     )
                     // Endpoint 6: OnOff (switch 1)
                     .chain(
@@ -390,7 +390,7 @@ fn dm_handler<'a>(
                     // Endpoint 7: BridgedDeviceBasicInformation
                     .chain(
                         EpClMatcher::new(Some(7), Some(BridgedHandler::CLUSTER.id)),
-                        Async(bridged_ep7.clone().adapt()),
+                        Async(label_outlet_2),
                     )
                     // Endpoint 7: OnOff (switch 2)
                     .chain(
@@ -405,7 +405,7 @@ fn dm_handler<'a>(
                     // Endpoint 8: BridgedDeviceBasicInformation
                     .chain(
                         EpClMatcher::new(Some(8), Some(BridgedHandler::CLUSTER.id)),
-                        Async(bridged_ep8.clone().adapt()),
+                        Async(label_light),
                     )
                     // Endpoint 8: OnOff (light)
                     .chain(
@@ -637,12 +637,12 @@ pub async fn run_matter_stack(
 
     // Create BridgedHandler for endpoint names (via BridgedDeviceBasicInformation.NodeLabel)
     // Note: EP1 (Virtual Matter Bridge) and EP2 (Aggregator) are not bridged
-    let bridged_ep3 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Door");
-    let bridged_ep4 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Motion");
-    let bridged_ep5 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Power Strip");
-    let bridged_ep6 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Outlet 1");
-    let bridged_ep7 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Outlet 2");
-    let bridged_ep8 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Light");
+    let label_door = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Door");
+    let label_motion = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Motion");
+    let label_power_strip = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Power Strip");
+    let label_outlet_1 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Outlet 1");
+    let label_outlet_2 = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Outlet 2");
+    let label_light = BridgedHandler::new(Dataver::new_rand(matter.rand()), "Light");
 
     // Create the data model with our bridge handlers
     let handler = dm_handler(
@@ -657,12 +657,12 @@ pub async fn run_matter_stack(
         &switch2_handler,
         &light_handler,
         &power_strip_matcher,
-        &bridged_ep3,
-        &bridged_ep4,
-        &bridged_ep5,
-        &bridged_ep6,
-        &bridged_ep7,
-        &bridged_ep8,
+        &label_door,
+        &label_motion,
+        &label_power_strip,
+        &label_outlet_1,
+        &label_outlet_2,
+        &label_light,
     );
     let dm = DataModel::new(matter, buffers, subscriptions, handler);
 

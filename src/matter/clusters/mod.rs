@@ -20,7 +20,7 @@ pub mod webrtc_transport_provider;
 
 // Re-export for convenience
 pub use boolean_state::BooleanStateHandler;
-pub use bridged_device_basic_info::{BridgedClusterHandler, BridgedHandler};
+pub use bridged_device_basic_info::BridgedHandler;
 pub use camera_av_stream_mgmt::CameraAvStreamMgmtHandler;
 pub use occupancy_sensing::OccupancySensingHandler;
 pub use time_sync::TimeSyncHandler;
