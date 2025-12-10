@@ -10,6 +10,8 @@ use rs_matter::dm::{
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::TLVWrite;
 use rs_matter::{attribute_enum, attributes, with};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use strum::FromRepr;
 
 /// Matter Cluster ID for BridgedDeviceBasicInformation
@@ -63,15 +65,30 @@ pub struct BridgedHandler {
     dataver: Dataver,
     /// The display name for this endpoint
     name: &'static str,
+    /// Dynamic reachable state (shared with parent DeviceSwitch)
+    reachable: Arc<AtomicBool>,
 }
 
 impl BridgedHandler {
     /// Cluster definition for use in the data model
     pub const CLUSTER: Cluster<'static> = CLUSTER;
 
-    /// Create a new handler with the given endpoint name
-    pub const fn new(dataver: Dataver, name: &'static str) -> Self {
-        Self { dataver, name }
+    /// Create a new handler with the given endpoint name and reachable state.
+    pub fn new(dataver: Dataver, name: &'static str, reachable: Arc<AtomicBool>) -> Self {
+        Self {
+            dataver,
+            name,
+            reachable,
+        }
+    }
+
+    /// Create a new handler that is always reachable (for parent endpoints).
+    pub fn new_always_reachable(dataver: Dataver, name: &'static str) -> Self {
+        Self {
+            dataver,
+            name,
+            reachable: Arc::new(AtomicBool::new(true)),
+        }
     }
 
     fn read_impl(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
@@ -95,7 +112,7 @@ impl BridgedHandler {
                     tw.utf8(tag, self.name)?;
                 }
                 BridgedDeviceBasicInfoAttribute::Reachable => {
-                    tw.bool(tag, true)?;
+                    tw.bool(tag, self.reachable.load(Ordering::SeqCst))?;
                 }
             }
         }

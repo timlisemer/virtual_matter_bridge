@@ -149,7 +149,7 @@ async fn main() {
     // Create Matter handlers from camera clusters
     let camera_cluster = camera.read().camera_cluster();
     let webrtc_cluster = camera.read().webrtc_cluster();
-    let master_onoff = camera.read().device_power();
+    let virtual_bridge_onoff = camera.read().device_power();
 
     // Initialize the camera input
     let camera_for_init = camera.clone();
@@ -187,7 +187,7 @@ async fn main() {
                 &matter_config,
                 camera_cluster,
                 webrtc_cluster,
-                master_onoff,
+                virtual_bridge_onoff,
                 virtual_devices,
             )) {
                 log::error!("Matter stack error: {:?}", e);

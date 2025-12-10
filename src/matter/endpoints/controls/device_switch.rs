@@ -1,10 +1,11 @@
-//! On/Off switch for Matter OnOff cluster.
+//! Device-level OnOff switch for parent Matter endpoints.
 //!
 //! Implements the `OnOffHooks` trait from rs-matter using `BinarySwitchHelper`
-//! for state management. Can be used for any on/off switch endpoint.
+//! for state management. When turned OFF, cascades to all child endpoints
+//! (turns off their switches and marks them unreachable).
 
-use super::device_switch::DeviceSwitch;
 use super::helpers::BinarySwitchHelper;
+use crate::matter::handler_bridge::SwitchBridge;
 use parking_lot::RwLock;
 use rs_matter::dm::Cluster;
 use rs_matter::dm::clusters::decl::on_off as on_off_cluster;
@@ -13,32 +14,37 @@ use rs_matter::error::Error;
 use rs_matter::tlv::Nullable;
 use rs_matter::with;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-/// On/Off switch implementing Matter's OnOffHooks trait.
+/// Device-level OnOff switch for parent endpoints.
 ///
-/// Uses `BinarySwitchHelper` for thread-safe state management with
-/// support for live Matter subscription updates.
+/// When this switch is turned OFF:
+/// 1. All child OnOff switches are turned OFF
+/// 2. All children are marked as `Reachable=false` in BridgedDeviceBasicInfo
 ///
-/// When used as a master switch, can cascade OFF commands to all
-/// registered device switches (parent endpoints).
-pub struct Switch {
+/// When turned ON:
+/// 1. All children are marked as `Reachable=true`
+/// 2. Children can now be individually controlled
+pub struct DeviceSwitch {
     /// The underlying switch state
     helper: BinarySwitchHelper,
     /// Startup behavior configuration (encoded as Option discriminant + value)
     /// 0 = None, 1 = Off, 2 = On, 3 = Toggle
     start_up_on_off: AtomicU8,
-    /// Device switches to cascade to when this switch turns OFF
-    cascade_targets: RwLock<Vec<Arc<DeviceSwitch>>>,
+    /// Child switch bridges to cascade ON/OFF commands to
+    child_switches: RwLock<Vec<Arc<SwitchBridge>>>,
+    /// Child reachable flags to update when this device is turned on/off
+    child_reachable: RwLock<Vec<Arc<AtomicBool>>>,
 }
 
-impl Switch {
-    /// Create a new switch with the given initial state.
+impl DeviceSwitch {
+    /// Create a new device switch with the given initial state.
     pub fn new(initial: bool) -> Self {
         Self {
             helper: BinarySwitchHelper::new(initial),
             start_up_on_off: AtomicU8::new(0), // None
-            cascade_targets: RwLock::new(Vec::new()),
+            child_switches: RwLock::new(Vec::new()),
+            child_reachable: RwLock::new(Vec::new()),
         }
     }
 
@@ -47,31 +53,48 @@ impl Switch {
         &self.helper
     }
 
-    /// Get the current switch state.
+    /// Get the current device state.
     pub fn get(&self) -> bool {
         self.helper.get()
     }
 
-    /// Set the switch state.
-    pub fn set(&self, value: bool) {
-        self.helper.set(value);
+    /// Add a child switch that will be controlled when this device turns on/off.
+    pub fn add_child_switch(&self, switch: Arc<SwitchBridge>) {
+        self.child_switches.write().push(switch);
     }
 
-    /// Toggle the switch state and return the new value.
-    pub fn toggle(&self) -> bool {
-        self.helper.toggle()
+    /// Add a child reachable flag that will be updated when this device turns on/off.
+    pub fn add_child_reachable(&self, reachable: Arc<AtomicBool>) {
+        self.child_reachable.write().push(reachable);
     }
 
-    /// Add a device switch that should be cascaded when this switch turns OFF.
-    /// Used to implement virtual_bridge_onoff → parent DeviceSwitch cascade.
-    pub fn add_cascade_target(&self, target: Arc<DeviceSwitch>) {
-        self.cascade_targets.write().push(target);
+    /// Set the device state with cascade to children.
+    fn set_with_cascade(&self, on: bool) {
+        let old = self.helper.get();
+        self.helper.set(on);
+
+        if on != old {
+            if !on {
+                // Turning OFF: cascade OFF to all children and mark unreachable
+                for switch in self.child_switches.read().iter() {
+                    switch.set(false);
+                }
+                for reachable in self.child_reachable.read().iter() {
+                    reachable.store(false, Ordering::SeqCst);
+                }
+            } else {
+                // Turning ON: mark all children reachable (but don't change their state)
+                for reachable in self.child_reachable.read().iter() {
+                    reachable.store(true, Ordering::SeqCst);
+                }
+            }
+        }
     }
 
-    /// Cascade OFF command to all registered device switches.
-    fn cascade_off(&self) {
-        for target in self.cascade_targets.read().iter() {
-            target.set_from_master(false);
+    /// Called by virtual_bridge_onoff when it turns OFF - forces this device OFF.
+    pub fn set_from_master(&self, on: bool) {
+        if !on {
+            self.set_with_cascade(false);
         }
     }
 
@@ -97,13 +120,13 @@ impl Switch {
     }
 }
 
-impl Default for Switch {
+impl Default for DeviceSwitch {
     fn default() -> Self {
         Self::new(true) // On by default
     }
 }
 
-impl OnOffHooks for Switch {
+impl OnOffHooks for DeviceSwitch {
     /// Cluster definition with basic OnOff functionality.
     const CLUSTER: Cluster<'static> = on_off_cluster::FULL_CLUSTER
         .with_revision(6)
@@ -120,15 +143,10 @@ impl OnOffHooks for Switch {
 
     fn set_on_off(&self, on: bool) {
         log::info!(
-            "[Matter] OnOff cluster: switch {}",
+            "[Matter] DeviceSwitch: device {}",
             if on { "on" } else { "off" }
         );
-        self.helper.set(on);
-
-        // Cascade OFF to all registered device switches (virtual_bridge_onoff behavior)
-        if !on {
-            self.cascade_off();
-        }
+        self.set_with_cascade(on);
     }
 
     fn start_up_on_off(&self) -> Nullable<StartUpOnOffEnum> {

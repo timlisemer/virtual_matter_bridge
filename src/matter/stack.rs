@@ -9,7 +9,7 @@ use super::device_types::{
     DEV_TYPE_AGGREGATOR, DEV_TYPE_BRIDGED_NODE, DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR,
     DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_VIDEO_DOORBELL,
 };
-use super::endpoints::controls::{LightSwitch, Switch};
+use super::endpoints::controls::{DeviceSwitch, LightSwitch, Switch};
 use super::handler_bridge::{SensorBridge, SwitchBridge};
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
@@ -55,6 +55,7 @@ use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::pin::pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use super::clusters::{boolean_state, occupancy_sensing};
@@ -144,10 +145,15 @@ enum DynamicHandlerEntry {
         dataver: Dataver,
         bridge: Arc<SensorBridge>,
     },
-    /// OnOff cluster handler using SwitchBridge
+    /// OnOff cluster handler using SwitchBridge (for child endpoints)
     OnOff {
         dataver: Dataver,
         bridge: Arc<SwitchBridge>,
+    },
+    /// OnOff cluster handler using DeviceSwitch (for parent endpoints)
+    DeviceOnOff {
+        dataver: Dataver,
+        switch: Arc<DeviceSwitch>,
     },
     /// Descriptor handler for parent endpoints with PartsMatcher
     DescWithParts {
@@ -190,6 +196,13 @@ impl DynamicHandler {
         self.handlers.insert(
             (ep, Switch::CLUSTER.id),
             DynamicHandlerEntry::OnOff { dataver, bridge },
+        );
+    }
+
+    pub fn add_device_onoff(&mut self, ep: u16, dataver: Dataver, switch: Arc<DeviceSwitch>) {
+        self.handlers.insert(
+            (ep, DeviceSwitch::CLUSTER.id),
+            DynamicHandlerEntry::DeviceOnOff { dataver, switch },
         );
     }
 
@@ -245,6 +258,9 @@ impl Handler for DynamicHandler {
                 DynamicHandlerEntry::OnOff { dataver, bridge } => {
                     read_onoff(dataver, bridge, ctx, reply)
                 }
+                DynamicHandlerEntry::DeviceOnOff { dataver, switch } => {
+                    read_device_onoff(dataver, switch, ctx, reply)
+                }
                 DynamicHandlerEntry::DescWithParts {
                     dataver,
                     parts_matcher,
@@ -270,6 +286,9 @@ impl Handler for DynamicHandler {
         if let Some(entry) = self.handlers.get(&(ep, cl)) {
             match entry {
                 DynamicHandlerEntry::OnOff { dataver, bridge } => write_onoff(dataver, bridge, ctx),
+                DynamicHandlerEntry::DeviceOnOff { dataver, switch } => {
+                    write_device_onoff(dataver, switch, ctx)
+                }
                 _ => Err(rs_matter::error::ErrorCode::UnsupportedAccess.into()),
             }
         } else {
@@ -403,6 +422,58 @@ fn write_onoff(
             let data = ctx.data();
             let value = data.bool()?;
             bridge.set(value);
+            Ok(())
+        }
+        _ => Err(rs_matter::error::ErrorCode::UnsupportedAccess.into()),
+    }
+}
+
+/// Read handler for DeviceSwitch OnOff cluster (parent endpoints).
+fn read_device_onoff(
+    dataver: &Dataver,
+    switch: &DeviceSwitch,
+    ctx: impl ReadContext,
+    reply: impl ReadReply,
+) -> Result<(), Error> {
+    use rs_matter::tlv::TLVWrite;
+
+    let attr = ctx.attr();
+
+    let Some(mut writer) = reply.with_dataver(dataver.get())? else {
+        return Ok(());
+    };
+
+    if attr.is_system() {
+        return DeviceSwitch::CLUSTER.read(attr, writer);
+    }
+
+    let tag = writer.tag();
+    {
+        let mut tw = writer.writer();
+        match attr.attr_id {
+            0x00 => tw.bool(tag, switch.get())?, // OnOff
+            _ => return Err(rs_matter::error::ErrorCode::AttributeNotFound.into()),
+        }
+    }
+    writer.complete()
+}
+
+/// Write handler for DeviceSwitch OnOff cluster (parent endpoints).
+fn write_device_onoff(
+    _dataver: &Dataver,
+    switch: &DeviceSwitch,
+    ctx: impl WriteContext,
+) -> Result<(), Error> {
+    use rs_matter::dm::clusters::on_off::OnOffHooks;
+
+    let attr = ctx.attr();
+
+    match attr.attr_id {
+        0x00 => {
+            // OnOff attribute - use OnOffHooks::set_on_off for cascade behavior
+            let data = ctx.data();
+            let value = data.bool()?;
+            switch.set_on_off(value);
             Ok(())
         }
         _ => Err(rs_matter::error::ErrorCode::UnsupportedAccess.into()),
@@ -564,11 +635,15 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
         let parent_device_types: &'static [DeviceType] =
             leak_slice(&[device.device_type.device_type(), DEV_TYPE_BRIDGED_NODE]);
 
-        // Parent endpoint (bridged node, no functional cluster)
+        // Parent endpoint (bridged node with OnOff cluster for device-level control)
         endpoints_vec.push(Endpoint {
             id: parent_id,
             device_types: parent_device_types,
-            clusters: clusters!(desc::DescHandler::CLUSTER, BridgedHandler::CLUSTER),
+            clusters: clusters!(
+                desc::DescHandler::CLUSTER,
+                BridgedHandler::CLUSTER,
+                DeviceSwitch::CLUSTER
+            ),
         });
 
         // Add child endpoints
@@ -658,7 +733,7 @@ pub async fn run_matter_stack(
     // Hardcoded doorbell components (kept for now)
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
     webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
-    master_onoff: Arc<Switch>,
+    virtual_bridge_onoff: Arc<Switch>,
     // Dynamic virtual devices
     virtual_devices: Vec<VirtualDevice>,
 ) -> Result<(), Error> {
@@ -803,9 +878,16 @@ pub async fn run_matter_stack(
     // Collect cluster change notifications for sensor forwarding
     let mut notification_endpoints: Vec<(u16, u32)> = Vec::new();
 
+    // Collect parent DeviceSwitches for virtual_bridge_onoff cascade
+    let mut parent_device_switches: Vec<Arc<DeviceSwitch>> = Vec::new();
+
     for (device_idx, device) in virtual_devices.iter().enumerate() {
         let mapping = &built_node.mappings[device_idx];
         let parent_id = mapping.parent_id;
+
+        // Create the parent DeviceSwitch for this virtual device
+        let device_switch = Arc::new(DeviceSwitch::new(true));
+        parent_device_switches.push(device_switch.clone());
 
         // Add descriptor handler for parent (with parts matcher for children)
         dynamic_handler.add_desc_with_parts(
@@ -814,23 +896,38 @@ pub async fn run_matter_stack(
             built_node.parts_matcher,
         );
 
-        // Add bridged device info handler for parent
+        // Add bridged device info handler for parent (always reachable)
         dynamic_handler.add_bridged(
             parent_id,
-            BridgedHandler::new(Dataver::new_rand(matter.rand()), device.label),
+            BridgedHandler::new_always_reachable(Dataver::new_rand(matter.rand()), device.label),
+        );
+
+        // Add OnOff handler for parent (device-level switch)
+        dynamic_handler.add_device_onoff(
+            parent_id,
+            Dataver::new_rand(matter.rand()),
+            device_switch.clone(),
         );
 
         // Create handlers for each child endpoint
         for (child_idx, ep_config) in device.endpoints.iter().enumerate() {
             let child_id = mapping.child_ids[child_idx];
 
+            // Create reachable flag for this child (controlled by parent DeviceSwitch)
+            let child_reachable = Arc::new(AtomicBool::new(true));
+            device_switch.add_child_reachable(child_reachable.clone());
+
             // Add descriptor handler for child (no parts)
             dynamic_handler.add_desc(child_id, Dataver::new_rand(matter.rand()));
 
-            // Add bridged device info handler for child
+            // Add bridged device info handler for child (with dynamic reachable)
             dynamic_handler.add_bridged(
                 child_id,
-                BridgedHandler::new(Dataver::new_rand(matter.rand()), ep_config.label),
+                BridgedHandler::new(
+                    Dataver::new_rand(matter.rand()),
+                    ep_config.label,
+                    child_reachable,
+                ),
             );
 
             match ep_config.kind {
@@ -864,10 +961,17 @@ pub async fn run_matter_stack(
                 }
                 EndpointKind::Switch | EndpointKind::LightSwitch => {
                     let bridge = SwitchBridge::new(ep_config.handler.clone());
+                    // Add child switch to parent's cascade list
+                    device_switch.add_child_switch(bridge.clone());
                     dynamic_handler.add_onoff(child_id, Dataver::new_rand(matter.rand()), bridge);
                 }
             }
         }
+    }
+
+    // Wire up virtual_bridge_onoff to cascade to all parent DeviceSwitches
+    for device_switch in &parent_device_switches {
+        virtual_bridge_onoff.add_cascade_target(device_switch.clone());
     }
 
     // Create handlers for hardcoded doorbell components
@@ -877,11 +981,11 @@ pub async fn run_matter_stack(
         WebRtcTransportProviderHandler::new(Dataver::new_rand(matter.rand()), webrtc_cluster);
     let time_sync_handler = TimeSyncHandler::new(Dataver::new_rand(matter.rand()));
 
-    // Create OnOff handler for master on/off (endpoint 1 - Video Doorbell, NOT bridged)
-    let master_onoff_handler = on_off::OnOffHandler::new_standalone(
+    // Create OnOff handler for virtual bridge on/off (endpoint 1 - Video Doorbell, NOT bridged)
+    let virtual_bridge_onoff_handler = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(matter.rand()),
         1,
-        master_onoff.as_ref(),
+        virtual_bridge_onoff.as_ref(),
     );
 
     // Build the handler chain with dynamic handler for virtual devices
@@ -907,7 +1011,7 @@ pub async fn run_matter_stack(
                     )
                     .chain(
                         EpClMatcher::new(Some(1), Some(Switch::CLUSTER.id)),
-                        on_off::HandlerAsyncAdaptor(&master_onoff_handler),
+                        on_off::HandlerAsyncAdaptor(&virtual_bridge_onoff_handler),
                     )
                     .chain(
                         EpClMatcher::new(Some(1), Some(CameraAvStreamMgmtHandler::CLUSTER.id)),
