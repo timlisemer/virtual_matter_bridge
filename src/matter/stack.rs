@@ -30,7 +30,9 @@ use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM};
 use rs_matter::dm::endpoints;
 use rs_matter::dm::subscriptions::DefaultSubscriptions;
 use rs_matter::dm::{
-    Async, Cluster, DataModel, Dataver, DeviceType, EmptyHandler, Endpoint, EpClMatcher, Node,
+    Async, Cluster, Context, DataModel, Dataver, DeviceType, EmptyHandler, Endpoint, EpClMatcher,
+    Handler, InvokeContext, Matcher, Node, NonBlockingHandler, ReadContext, ReadReply, Reply,
+    WriteContext,
 };
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
@@ -47,6 +49,7 @@ use rs_matter::utils::storage::pooled::PooledBuffers;
 use rs_matter::{MATTER_PORT, Matter, clusters, devices};
 use socket2::{Domain, Protocol, Socket, Type};
 use static_cell::StaticCell;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
@@ -126,6 +129,283 @@ impl PartsMatcher for DynamicPartsMatcher {
                 .map(|(_, children)| children.contains(&endpoint))
                 .unwrap_or(false)
         }
+    }
+}
+
+/// Handler entry for dynamic routing.
+enum DynamicHandlerEntry {
+    /// BooleanState cluster handler using SensorBridge
+    BooleanState {
+        dataver: Dataver,
+        bridge: Arc<SensorBridge>,
+    },
+    /// OccupancySensing cluster handler using SensorBridge
+    OccupancySensing {
+        dataver: Dataver,
+        bridge: Arc<SensorBridge>,
+    },
+    /// OnOff cluster handler using SwitchBridge
+    OnOff {
+        dataver: Dataver,
+        bridge: Arc<SwitchBridge>,
+    },
+    /// Descriptor handler for parent endpoints with PartsMatcher
+    DescWithParts {
+        dataver: Dataver,
+        parts_matcher: &'static DynamicPartsMatcher,
+    },
+    /// Descriptor handler for child endpoints (no parts)
+    Desc { dataver: Dataver },
+    /// BridgedDeviceBasicInformation handler
+    Bridged { handler: BridgedHandler },
+}
+
+/// Dynamic handler that routes requests based on (endpoint_id, cluster_id).
+pub struct DynamicHandler {
+    handlers: HashMap<(u16, u32), DynamicHandlerEntry>,
+}
+
+impl DynamicHandler {
+    pub fn new() -> Self {
+        Self {
+            handlers: HashMap::new(),
+        }
+    }
+
+    pub fn add_boolean_state(&mut self, ep: u16, dataver: Dataver, bridge: Arc<SensorBridge>) {
+        self.handlers.insert(
+            (ep, boolean_state::CLUSTER_ID),
+            DynamicHandlerEntry::BooleanState { dataver, bridge },
+        );
+    }
+
+    pub fn add_occupancy_sensing(&mut self, ep: u16, dataver: Dataver, bridge: Arc<SensorBridge>) {
+        self.handlers.insert(
+            (ep, occupancy_sensing::CLUSTER_ID),
+            DynamicHandlerEntry::OccupancySensing { dataver, bridge },
+        );
+    }
+
+    pub fn add_onoff(&mut self, ep: u16, dataver: Dataver, bridge: Arc<SwitchBridge>) {
+        self.handlers.insert(
+            (ep, Switch::CLUSTER.id),
+            DynamicHandlerEntry::OnOff { dataver, bridge },
+        );
+    }
+
+    pub fn add_desc_with_parts(
+        &mut self,
+        ep: u16,
+        dataver: Dataver,
+        parts_matcher: &'static DynamicPartsMatcher,
+    ) {
+        self.handlers.insert(
+            (ep, desc::DescHandler::CLUSTER.id),
+            DynamicHandlerEntry::DescWithParts {
+                dataver,
+                parts_matcher,
+            },
+        );
+    }
+
+    pub fn add_desc(&mut self, ep: u16, dataver: Dataver) {
+        self.handlers.insert(
+            (ep, desc::DescHandler::CLUSTER.id),
+            DynamicHandlerEntry::Desc { dataver },
+        );
+    }
+
+    pub fn add_bridged(&mut self, ep: u16, handler: BridgedHandler) {
+        self.handlers.insert(
+            (ep, BridgedHandler::CLUSTER.id),
+            DynamicHandlerEntry::Bridged { handler },
+        );
+    }
+}
+
+impl Default for DynamicHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Handler for DynamicHandler {
+    fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
+        let ep = ctx.attr().endpoint_id;
+        let cl = ctx.attr().cluster_id;
+
+        if let Some(entry) = self.handlers.get(&(ep, cl)) {
+            match entry {
+                DynamicHandlerEntry::BooleanState { dataver, bridge } => {
+                    read_boolean_state(dataver, bridge, ctx, reply)
+                }
+                DynamicHandlerEntry::OccupancySensing { dataver, bridge } => {
+                    read_occupancy_sensing(dataver, bridge, ctx, reply)
+                }
+                DynamicHandlerEntry::OnOff { dataver, bridge } => {
+                    read_onoff(dataver, bridge, ctx, reply)
+                }
+                DynamicHandlerEntry::DescWithParts {
+                    dataver,
+                    parts_matcher,
+                } => {
+                    let handler = desc::DescHandler::new_matching(dataver.clone(), *parts_matcher);
+                    Handler::read(&handler.adapt(), ctx, reply)
+                }
+                DynamicHandlerEntry::Desc { dataver } => {
+                    let handler = desc::DescHandler::new(dataver.clone());
+                    Handler::read(&handler.adapt(), ctx, reply)
+                }
+                DynamicHandlerEntry::Bridged { handler } => handler.read(ctx, reply),
+            }
+        } else {
+            Err(rs_matter::error::ErrorCode::ClusterNotFound.into())
+        }
+    }
+
+    fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
+        let ep = ctx.attr().endpoint_id;
+        let cl = ctx.attr().cluster_id;
+
+        if let Some(entry) = self.handlers.get(&(ep, cl)) {
+            match entry {
+                DynamicHandlerEntry::OnOff { dataver, bridge } => write_onoff(dataver, bridge, ctx),
+                _ => Err(rs_matter::error::ErrorCode::UnsupportedAccess.into()),
+            }
+        } else {
+            Err(rs_matter::error::ErrorCode::ClusterNotFound.into())
+        }
+    }
+}
+
+impl NonBlockingHandler for DynamicHandler {}
+
+impl Matcher for DynamicHandler {
+    fn matches(&self, ctx: impl Context) -> bool {
+        let (ep, cl) = if let Some(read_ctx) = ctx.as_read_ctx() {
+            (read_ctx.attr().endpoint_id, read_ctx.attr().cluster_id)
+        } else if let Some(write_ctx) = ctx.as_write_ctx() {
+            (write_ctx.attr().endpoint_id, write_ctx.attr().cluster_id)
+        } else if let Some(invoke_ctx) = ctx.as_invoke_ctx() {
+            (invoke_ctx.cmd().endpoint_id, invoke_ctx.cmd().cluster_id)
+        } else {
+            return false;
+        };
+
+        self.handlers.contains_key(&(ep, cl))
+    }
+}
+
+/// Read handler for BooleanState cluster.
+fn read_boolean_state(
+    dataver: &Dataver,
+    bridge: &SensorBridge,
+    ctx: impl ReadContext,
+    reply: impl ReadReply,
+) -> Result<(), Error> {
+    use rs_matter::tlv::TLVWrite;
+
+    let attr = ctx.attr();
+
+    let Some(mut writer) = reply.with_dataver(dataver.get())? else {
+        return Ok(());
+    };
+
+    if attr.is_system() {
+        return boolean_state::CLUSTER.read(attr, writer);
+    }
+
+    let tag = writer.tag();
+    {
+        let mut tw = writer.writer();
+        match attr.attr_id {
+            0x00 => tw.bool(tag, bridge.get())?, // StateValue
+            _ => return Err(rs_matter::error::ErrorCode::AttributeNotFound.into()),
+        }
+    }
+    writer.complete()
+}
+
+/// Read handler for OccupancySensing cluster.
+fn read_occupancy_sensing(
+    dataver: &Dataver,
+    bridge: &SensorBridge,
+    ctx: impl ReadContext,
+    reply: impl ReadReply,
+) -> Result<(), Error> {
+    use rs_matter::tlv::TLVWrite;
+
+    let attr = ctx.attr();
+
+    let Some(mut writer) = reply.with_dataver(dataver.get())? else {
+        return Ok(());
+    };
+
+    if attr.is_system() {
+        return occupancy_sensing::CLUSTER.read(attr, writer);
+    }
+
+    let tag = writer.tag();
+    {
+        let mut tw = writer.writer();
+        match attr.attr_id {
+            0x00 => tw.u8(tag, if bridge.get() { 1 } else { 0 })?, // Occupancy bitmap
+            0x01 => tw.u8(tag, 0)?,                                // OccupancySensorType (PIR)
+            0x02 => tw.u8(tag, 1)?,                                // OccupancySensorTypeBitmap
+            _ => return Err(rs_matter::error::ErrorCode::AttributeNotFound.into()),
+        }
+    }
+    writer.complete()
+}
+
+/// Read handler for OnOff cluster.
+fn read_onoff(
+    dataver: &Dataver,
+    bridge: &SwitchBridge,
+    ctx: impl ReadContext,
+    reply: impl ReadReply,
+) -> Result<(), Error> {
+    use rs_matter::tlv::TLVWrite;
+
+    let attr = ctx.attr();
+
+    let Some(mut writer) = reply.with_dataver(dataver.get())? else {
+        return Ok(());
+    };
+
+    if attr.is_system() {
+        return Switch::CLUSTER.read(attr, writer);
+    }
+
+    let tag = writer.tag();
+    {
+        let mut tw = writer.writer();
+        match attr.attr_id {
+            0x00 => tw.bool(tag, bridge.get())?, // OnOff
+            _ => return Err(rs_matter::error::ErrorCode::AttributeNotFound.into()),
+        }
+    }
+    writer.complete()
+}
+
+/// Write handler for OnOff cluster.
+fn write_onoff(
+    _dataver: &Dataver,
+    bridge: &SwitchBridge,
+    ctx: impl WriteContext,
+) -> Result<(), Error> {
+    let attr = ctx.attr();
+
+    match attr.attr_id {
+        0x00 => {
+            // OnOff attribute - this is typically controlled via commands, not writes
+            // But we support it for completeness
+            let data = ctx.data();
+            let value = data.bool()?;
+            bridge.set(value);
+            Ok(())
+        }
+        _ => Err(rs_matter::error::ErrorCode::UnsupportedAccess.into()),
     }
 }
 
@@ -517,33 +797,41 @@ pub async fn run_matter_stack(
     let sensor_notify = SENSOR_NOTIFY.uninit().init_with(Signal::new());
     let sensor_notify_ref: &'static Signal<CriticalSectionRawMutex, ()> = sensor_notify;
 
-    // Create bridges and handlers for virtual devices
-    // Store them so they live for the duration of the stack
-    let mut sensor_bridges: Vec<Arc<SensorBridge>> = Vec::new();
-    let mut switch_bridges: Vec<Arc<SwitchBridge>> = Vec::new();
-    let mut bridged_handlers: Vec<BridgedHandler> = Vec::new();
+    // Create DynamicHandler for virtual device endpoints (EP3+)
+    let mut dynamic_handler = DynamicHandler::new();
 
     // Collect cluster change notifications for sensor forwarding
     let mut notification_endpoints: Vec<(u16, u32)> = Vec::new();
 
     for (device_idx, device) in virtual_devices.iter().enumerate() {
         let mapping = &built_node.mappings[device_idx];
+        let parent_id = mapping.parent_id;
 
-        // Create BridgedHandler for parent endpoint
-        bridged_handlers.push(BridgedHandler::new(
+        // Add descriptor handler for parent (with parts matcher for children)
+        dynamic_handler.add_desc_with_parts(
+            parent_id,
             Dataver::new_rand(matter.rand()),
-            device.label,
-        ));
+            built_node.parts_matcher,
+        );
+
+        // Add bridged device info handler for parent
+        dynamic_handler.add_bridged(
+            parent_id,
+            BridgedHandler::new(Dataver::new_rand(matter.rand()), device.label),
+        );
 
         // Create handlers for each child endpoint
         for (child_idx, ep_config) in device.endpoints.iter().enumerate() {
             let child_id = mapping.child_ids[child_idx];
 
-            // Create BridgedHandler for child endpoint
-            bridged_handlers.push(BridgedHandler::new(
-                Dataver::new_rand(matter.rand()),
-                ep_config.label,
-            ));
+            // Add descriptor handler for child (no parts)
+            dynamic_handler.add_desc(child_id, Dataver::new_rand(matter.rand()));
+
+            // Add bridged device info handler for child
+            dynamic_handler.add_bridged(
+                child_id,
+                BridgedHandler::new(Dataver::new_rand(matter.rand()), ep_config.label),
+            );
 
             match ep_config.kind {
                 EndpointKind::ContactSensor => {
@@ -554,7 +842,11 @@ pub async fn run_matter_stack(
                         boolean_state::CLUSTER_ID,
                     ));
                     notification_endpoints.push((child_id, boolean_state::CLUSTER_ID));
-                    sensor_bridges.push(bridge);
+                    dynamic_handler.add_boolean_state(
+                        child_id,
+                        Dataver::new_rand(matter.rand()),
+                        bridge,
+                    );
                 }
                 EndpointKind::OccupancySensor => {
                     let bridge = SensorBridge::new(ep_config.handler.clone());
@@ -564,13 +856,15 @@ pub async fn run_matter_stack(
                         occupancy_sensing::CLUSTER_ID,
                     ));
                     notification_endpoints.push((child_id, occupancy_sensing::CLUSTER_ID));
-                    sensor_bridges.push(bridge);
+                    dynamic_handler.add_occupancy_sensing(
+                        child_id,
+                        Dataver::new_rand(matter.rand()),
+                        bridge,
+                    );
                 }
                 EndpointKind::Switch | EndpointKind::LightSwitch => {
                     let bridge = SwitchBridge::new(ep_config.handler.clone());
-                    // Switches also need notification for external state changes
-                    // (when handler pushes state without Matter command)
-                    switch_bridges.push(bridge);
+                    dynamic_handler.add_onoff(child_id, Dataver::new_rand(matter.rand()), bridge);
                 }
             }
         }
@@ -590,17 +884,7 @@ pub async fn run_matter_stack(
         master_onoff.as_ref(),
     );
 
-    // Build the handler chain dynamically
-    // For now, we'll create a base handler and add virtual device handlers
-    // This is a simplified version - a full implementation would need trait objects
-    // or a more sophisticated approach for truly dynamic handler registration
-
-    // TODO: The current rs-matter chain pattern doesn't easily support dynamic handlers.
-    // For now, this implementation focuses on the node structure and bridging.
-    // The handler chain will need to be built with knowledge of the devices.
-
-    // Create the data model with our handlers
-    // For this initial version, we use a simplified handler that covers the base endpoints
+    // Build the handler chain with dynamic handler for virtual devices
     let handler = (
         built_node.node,
         endpoints::with_eth(
@@ -643,9 +927,12 @@ pub async fn run_matter_stack(
                             )
                             .adapt(),
                         ),
+                    )
+                    // === Endpoint 3+: Virtual Devices (dynamic) ===
+                    .chain(
+                        &dynamic_handler, // Only matches (ep, cl) pairs we have handlers for
+                        Async(&dynamic_handler),
                     ),
-                // Note: Virtual device handlers need to be added here dynamically
-                // This requires a more sophisticated approach - see below
             ),
         ),
     );
