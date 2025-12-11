@@ -631,9 +631,9 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
         let parent_id = next_id;
         next_id += 1;
 
-        // Get device types for parent
+        // Get device types for parent (always OnOffPlugInUnit - parent is generic on/off switch)
         let parent_device_types: &'static [DeviceType] =
-            leak_slice(&[device.device_type.device_type(), DEV_TYPE_BRIDGED_NODE]);
+            leak_slice(&[DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_BRIDGED_NODE]);
 
         // Parent endpoint (bridged node with OnOff cluster for device-level control)
         endpoints_vec.push(Endpoint {
