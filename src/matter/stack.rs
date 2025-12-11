@@ -656,7 +656,7 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
             let (device_types, clusters): (&'static [DeviceType], &'static [Cluster<'static>]) =
                 match ep_config.kind {
                     EndpointKind::ContactSensor => (
-                        leak_slice(&[DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_BRIDGED_NODE]),
+                        leak_slice(&[DEV_TYPE_CONTACT_SENSOR]),
                         clusters!(
                             desc::DescHandler::CLUSTER,
                             BridgedHandler::CLUSTER,
@@ -664,7 +664,7 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
                         ),
                     ),
                     EndpointKind::OccupancySensor => (
-                        leak_slice(&[DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_BRIDGED_NODE]),
+                        leak_slice(&[DEV_TYPE_OCCUPANCY_SENSOR]),
                         clusters!(
                             desc::DescHandler::CLUSTER,
                             BridgedHandler::CLUSTER,
@@ -672,7 +672,7 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
                         ),
                     ),
                     EndpointKind::Switch => (
-                        leak_slice(&[DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_BRIDGED_NODE]),
+                        leak_slice(&[DEV_TYPE_ON_OFF_PLUG_IN_UNIT]),
                         clusters!(
                             desc::DescHandler::CLUSTER,
                             BridgedHandler::CLUSTER,
@@ -680,7 +680,7 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
                         ),
                     ),
                     EndpointKind::LightSwitch => (
-                        leak_slice(&[DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_BRIDGED_NODE]),
+                        leak_slice(&[DEV_TYPE_ON_OFF_LIGHT]),
                         clusters!(
                             desc::DescHandler::CLUSTER,
                             BridgedHandler::CLUSTER,
