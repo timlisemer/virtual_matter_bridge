@@ -461,6 +461,69 @@ make run-debug
 make run-trace
 ```
 
+### Development Workflow
+
+The bridge includes tooling to streamline the development cycle when making changes that affect the device structure.
+
+#### Schema Auto-Reset
+
+The bridge automatically detects when the device endpoint structure changes (device types, labels, endpoint configurations) and resets the persistence file accordingly:
+
+```bash
+# Normal development - auto-resets only if structure changed
+make dev
+
+# Force reset every time (useful for rapid iteration)
+make dev-reset
+```
+
+When schema changes are detected, you'll see:
+```
+Schema hash changed (0x... -> 0x...), resetting persistence
+```
+
+#### Automated Commissioning
+
+Instead of scanning QR codes with your phone, you can commission directly to python-matter-server (used by Home Assistant):
+
+```bash
+# Commission to local python-matter-server
+make commission
+
+# Commission to remote server
+MATTER_SERVER_URL=ws://homeassistant.local:5580/ws make commission
+
+# Check commissioned nodes
+make status
+
+# Remove a node
+make remove NODE_ID=123
+```
+
+**Prerequisites:**
+- python-matter-server must be running and accessible
+- NixOS: `services.matter-server.enable = true`
+- Firewall: Allow port 5580 from your dev machine
+
+#### Typical Development Cycle
+
+```bash
+# Terminal 1: Run the bridge (auto-resets if structure changed)
+make dev
+
+# Terminal 2: Commission once after reset
+MATTER_SERVER_URL=ws://your-ha-server:5580/ws make commission
+
+# Device appears in Home Assistant automatically
+```
+
+#### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEV_AUTO_RESET` | `false` | Force persistence reset on every startup |
+| `MATTER_SERVER_URL` | `ws://localhost:5580/ws` | python-matter-server WebSocket URL |
+
 ### Environment Configuration
 
 Copy `.env.example` to `.env` and adjust values:
