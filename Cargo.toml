@@ -53,6 +53,12 @@ serde_json = "1"
 futures-util = "0.3"
 async-trait = "0.1"
 
+# WebSocket client for dev tooling
+tokio-tungstenite = "0.26"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive", "env"] }
+
 # Synchronization primitives (for Matter handler compatibility)
 parking_lot = "0.12"
 
@@ -77,3 +83,7 @@ tokio-test = "0.4"
 [[bin]]
 name = "virtual-matter-bridge"
 path = "src/main.rs"
+
+[[bin]]
+name = "dev-commission"
+path = "src/bin/dev-commission.rs"

@@ -5,12 +5,13 @@
 
 use super::device_types::VirtualDeviceType;
 use super::endpoints::EndpointHandler;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 /// Type of endpoint (determines which cluster handler to use).
 ///
 /// This defines what kind of child endpoint to create within a Virtual Device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EndpointKind {
     /// Contact sensor using BooleanState cluster (0x0045)
     ContactSensor,
@@ -123,4 +124,34 @@ impl VirtualDevice {
         self.endpoints.push(endpoint);
         self
     }
+
+    /// Compute a hash of this device's structure for schema versioning.
+    ///
+    /// The hash includes device type, label, and all endpoint kinds/labels.
+    /// This is used to detect when the device structure changes and
+    /// persistence needs to be reset.
+    pub fn schema_hash(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.device_type.hash(&mut hasher);
+        self.label.hash(&mut hasher);
+        self.endpoints.len().hash(&mut hasher);
+        for endpoint in &self.endpoints {
+            endpoint.kind.hash(&mut hasher);
+            endpoint.label.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+}
+
+/// Compute a combined schema hash for all virtual devices.
+///
+/// This creates a deterministic hash of the entire device configuration,
+/// used to detect when any device structure changes between runs.
+pub fn compute_schema_hash(devices: &[VirtualDevice]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    devices.len().hash(&mut hasher);
+    for device in devices {
+        device.schema_hash().hash(&mut hasher);
+    }
+    hasher.finish()
 }

@@ -129,7 +129,7 @@ pub const DEV_TYPE_BRIDGED_NODE: DeviceType = DeviceType {
 ///
 /// This enum wraps the device type constants and provides a convenient way
 /// to specify what type of Virtual Device (parent endpoint) to create.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VirtualDeviceType {
     /// Contact sensor (door/window open/close)
     ContactSensor,

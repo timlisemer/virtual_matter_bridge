@@ -13,7 +13,7 @@ use super::endpoints::controls::{DeviceSwitch, LightSwitch, Switch};
 use super::handler_bridge::{SensorBridge, SwitchBridge};
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
-use super::virtual_device::{EndpointKind, VirtualDevice};
+use super::virtual_device::{EndpointKind, VirtualDevice, compute_schema_hash};
 use embassy_futures::select::{select, select4};
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::signal::Signal;
@@ -542,6 +542,7 @@ fn get_interface_index(interface_name: &str) -> Result<u32, Error> {
 /// Directory for persistence data
 const PERSIST_DIR: &str = ".config/virtual-matter-bridge";
 const PERSIST_FILE: &str = "matter.bin";
+const SCHEMA_FILE: &str = "schema.hash";
 
 /// Get the persistence file path
 fn get_persist_path() -> PathBuf {
@@ -549,6 +550,80 @@ fn get_persist_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(PERSIST_DIR)
         .join(PERSIST_FILE)
+}
+
+/// Get the schema hash file path
+fn get_schema_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(PERSIST_DIR)
+        .join(SCHEMA_FILE)
+}
+
+/// Check if schema has changed and reset persistence if needed.
+///
+/// Returns true if persistence was reset (commissioning window should open).
+fn check_schema_and_maybe_reset(
+    virtual_devices: &[VirtualDevice],
+    persist_path: &PathBuf,
+    schema_path: &PathBuf,
+) -> bool {
+    // Check for DEV_AUTO_RESET environment variable
+    let force_reset = std::env::var("DEV_AUTO_RESET")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    if force_reset {
+        info!("DEV_AUTO_RESET is set, forcing persistence reset");
+        let _ = fs::remove_file(persist_path);
+        return true;
+    }
+
+    // Compute current schema hash
+    let current_hash = compute_schema_hash(virtual_devices);
+
+    // Try to read stored schema hash
+    let stored_hash = fs::read_to_string(schema_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+
+    match stored_hash {
+        Some(hash) if hash == current_hash => {
+            info!(
+                "Schema hash unchanged ({:#018x}), keeping persistence",
+                current_hash
+            );
+            false
+        }
+        Some(old_hash) => {
+            info!(
+                "Schema hash changed ({:#018x} -> {:#018x}), resetting persistence",
+                old_hash, current_hash
+            );
+            // Delete matter.bin to force re-commissioning
+            if let Err(e) = fs::remove_file(persist_path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                error!("Failed to delete persistence file: {}", e);
+            }
+            // Write new schema hash
+            if let Err(e) = fs::write(schema_path, format!("{}\n", current_hash)) {
+                error!("Failed to write schema hash: {}", e);
+            }
+            true
+        }
+        None => {
+            // No stored hash, first run or corrupted - write current hash
+            info!(
+                "No schema hash found, storing current ({:#018x})",
+                current_hash
+            );
+            if let Err(e) = fs::write(schema_path, format!("{}\n", current_hash)) {
+                error!("Failed to write schema hash: {}", e);
+            }
+            false
+        }
+    }
 }
 
 /// Root endpoint cluster list with Time Synchronization added
@@ -818,6 +893,7 @@ pub async fn run_matter_stack(
 
     // Initialize Psm (Persistent State Manager) and load existing state
     let persist_path = get_persist_path();
+    let schema_path = get_schema_path();
 
     if let Some(parent) = persist_path.parent()
         && let Err(e) = fs::create_dir_all(parent)
@@ -825,12 +901,20 @@ pub async fn run_matter_stack(
         error!("Failed to create persistence directory {:?}: {}", parent, e);
     }
 
+    // Check if schema changed and reset persistence if needed
+    let schema_reset = check_schema_and_maybe_reset(&virtual_devices, &persist_path, &schema_path);
+
     let psm = PSM.uninit().init_with(Psm::init());
-    if let Err(e) = psm.load(&persist_path, matter, NO_NETWORKS) {
-        error!(
-            "Failed to load persisted state from {:?}: {:?}",
-            persist_path, e
-        );
+    // Only load if persistence file exists (may have been deleted by schema check)
+    if persist_path.exists() {
+        if let Err(e) = psm.load(&persist_path, matter, NO_NETWORKS) {
+            error!(
+                "Failed to load persisted state from {:?}: {:?}",
+                persist_path, e
+            );
+        }
+    } else if schema_reset {
+        info!("Persistence file deleted due to schema change, starting fresh");
     }
 
     // Only open commissioning window if device is not already commissioned
