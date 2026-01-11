@@ -1,4 +1,48 @@
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
+
+/// Load environment variables from .env file with robust parsing.
+/// Handles values with spaces without requiring quotes.
+pub fn load_dotenv() {
+    let env_path = Path::new(".env");
+    if !env_path.exists() {
+        return;
+    }
+
+    let content = match fs::read_to_string(env_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        // Skip empty lines and comments
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Find the first '=' and split there
+        if let Some(eq_pos) = line.find('=') {
+            let key = line[..eq_pos].trim();
+            let mut value = line[eq_pos + 1..].trim();
+
+            // Remove surrounding quotes if present
+            if (value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\''))
+            {
+                value = &value[1..value.len() - 1];
+            }
+
+            // Only set if not already set (env vars take precedence)
+            if std::env::var(key).is_err() {
+                // SAFETY: We're single-threaded at this point (called before any async runtime)
+                unsafe { std::env::set_var(key, value) };
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {

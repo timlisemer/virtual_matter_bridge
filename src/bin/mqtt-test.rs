@@ -17,6 +17,9 @@ use virtual_matter_bridge::input::mqtt::{MqttClient, W100Action, W100Device};
 
 #[tokio::main]
 async fn main() {
+    // Load .env file before anything else
+    virtual_matter_bridge::config::load_dotenv();
+
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 

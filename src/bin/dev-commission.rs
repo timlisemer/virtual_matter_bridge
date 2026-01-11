@@ -145,6 +145,9 @@ fn verhoeff_checksum(input: &str) -> u8 {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load .env file before parsing CLI args (clap reads env vars during parse)
+    virtual_matter_bridge::config::load_dotenv();
+
     let cli = Cli::parse();
 
     println!("Connecting to python-matter-server at {}...", cli.server);

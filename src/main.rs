@@ -104,6 +104,9 @@ async fn run_sensor_simulation(
 
 #[tokio::main]
 async fn main() {
+    // Load .env file before anything else
+    config::load_dotenv();
+
     init_logger();
     info!("Starting Virtual Matter Bridge");
 
