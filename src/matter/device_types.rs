@@ -125,6 +125,32 @@ pub const DEV_TYPE_BRIDGED_NODE: DeviceType = DeviceType {
     drev: 1,
 };
 
+/// Matter Temperature Sensor device type
+///
+/// Device Type ID: 0x0302 (770 decimal)
+/// Device Type Revision: 2
+///
+/// Required clusters:
+/// - TemperatureMeasurement (0x0402)
+/// - Descriptor (standard)
+pub const DEV_TYPE_TEMPERATURE_SENSOR: DeviceType = DeviceType {
+    dtype: 0x0302,
+    drev: 2,
+};
+
+/// Matter Humidity Sensor device type
+///
+/// Device Type ID: 0x0307 (775 decimal)
+/// Device Type Revision: 2
+///
+/// Required clusters:
+/// - RelativeHumidityMeasurement (0x0405)
+/// - Descriptor (standard)
+pub const DEV_TYPE_HUMIDITY_SENSOR: DeviceType = DeviceType {
+    dtype: 0x0307,
+    drev: 2,
+};
+
 /// Virtual Device type enum for dynamic device creation.
 ///
 /// This enum wraps the device type constants and provides a convenient way
@@ -141,6 +167,10 @@ pub enum VirtualDeviceType {
     OnOffLight,
     /// Video doorbell with camera streaming
     VideoDoorbellDevice,
+    /// Temperature sensor
+    TemperatureSensor,
+    /// Humidity sensor
+    HumiditySensor,
 }
 
 impl VirtualDeviceType {
@@ -152,6 +182,8 @@ impl VirtualDeviceType {
             Self::OnOffPlugInUnit => DEV_TYPE_ON_OFF_PLUG_IN_UNIT,
             Self::OnOffLight => DEV_TYPE_ON_OFF_LIGHT,
             Self::VideoDoorbellDevice => DEV_TYPE_VIDEO_DOORBELL,
+            Self::TemperatureSensor => DEV_TYPE_TEMPERATURE_SENSOR,
+            Self::HumiditySensor => DEV_TYPE_HUMIDITY_SENSOR,
         }
     }
 }

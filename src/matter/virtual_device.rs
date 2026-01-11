@@ -3,6 +3,7 @@
 //! A Virtual Device represents a parent endpoint with one or more child Endpoints.
 //! This module provides the configuration types needed to define devices at startup.
 
+use super::clusters::{HumiditySensor, TemperatureSensor};
 use super::device_types::VirtualDeviceType;
 use super::endpoints::EndpointHandler;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -23,6 +24,10 @@ pub enum EndpointKind {
     LightSwitch,
     /// Video doorbell camera using CameraAvStreamMgmt (0x0551) and WebRtcTransportProvider (0x0553) clusters
     VideoDoorbellCamera,
+    /// Temperature sensor using TemperatureMeasurement cluster (0x0402)
+    TemperatureSensor,
+    /// Humidity sensor using RelativeHumidityMeasurement cluster (0x0405)
+    HumiditySensor,
 }
 
 /// Configuration for a child endpoint within a Virtual Device.
@@ -34,8 +39,12 @@ pub struct EndpointConfig {
     pub label: &'static str,
     /// Type of endpoint (determines cluster handler)
     pub kind: EndpointKind,
-    /// Handler for bidirectional communication with business logic
+    /// Handler for bidirectional communication with business logic (boolean sensors/switches)
     pub handler: Arc<dyn EndpointHandler>,
+    /// Optional temperature sensor (for TemperatureSensor endpoints)
+    pub temperature_sensor: Option<Arc<TemperatureSensor>>,
+    /// Optional humidity sensor (for HumiditySensor endpoints)
+    pub humidity_sensor: Option<Arc<HumiditySensor>>,
 }
 
 impl EndpointConfig {
@@ -47,6 +56,8 @@ impl EndpointConfig {
             label,
             kind: EndpointKind::ContactSensor,
             handler,
+            temperature_sensor: None,
+            humidity_sensor: None,
         }
     }
 
@@ -58,6 +69,8 @@ impl EndpointConfig {
             label,
             kind: EndpointKind::OccupancySensor,
             handler,
+            temperature_sensor: None,
+            humidity_sensor: None,
         }
     }
 
@@ -69,6 +82,8 @@ impl EndpointConfig {
             label,
             kind: EndpointKind::Switch,
             handler,
+            temperature_sensor: None,
+            humidity_sensor: None,
         }
     }
 
@@ -80,6 +95,8 @@ impl EndpointConfig {
             label,
             kind: EndpointKind::LightSwitch,
             handler,
+            temperature_sensor: None,
+            humidity_sensor: None,
         }
     }
 
@@ -91,8 +108,53 @@ impl EndpointConfig {
             label,
             kind: EndpointKind::VideoDoorbellCamera,
             handler,
+            temperature_sensor: None,
+            humidity_sensor: None,
         }
     }
+
+    /// Create a temperature sensor endpoint (TemperatureMeasurement cluster).
+    ///
+    /// Used for temperature sensors that report temperature values.
+    /// The sensor Arc can be cloned and used to update the temperature from external sources.
+    pub fn temperature_sensor(label: &'static str, sensor: Arc<TemperatureSensor>) -> Self {
+        // Create a dummy handler - not used for temperature sensors
+        let handler = Arc::new(DummyHandler);
+        Self {
+            label,
+            kind: EndpointKind::TemperatureSensor,
+            handler,
+            temperature_sensor: Some(sensor),
+            humidity_sensor: None,
+        }
+    }
+
+    /// Create a humidity sensor endpoint (RelativeHumidityMeasurement cluster).
+    ///
+    /// Used for humidity sensors that report relative humidity.
+    /// The sensor Arc can be cloned and used to update the humidity from external sources.
+    pub fn humidity_sensor(label: &'static str, sensor: Arc<HumiditySensor>) -> Self {
+        // Create a dummy handler - not used for humidity sensors
+        let handler = Arc::new(DummyHandler);
+        Self {
+            label,
+            kind: EndpointKind::HumiditySensor,
+            handler,
+            temperature_sensor: None,
+            humidity_sensor: Some(sensor),
+        }
+    }
+}
+
+/// Dummy handler for endpoints that don't use the EndpointHandler interface.
+struct DummyHandler;
+
+impl EndpointHandler for DummyHandler {
+    fn on_command(&self, _value: bool) {}
+    fn get_state(&self) -> bool {
+        false
+    }
+    fn set_state_pusher(&self, _pusher: Arc<dyn Fn(bool) + Send + Sync>) {}
 }
 
 /// A Virtual Device (parent endpoint) with one or more child Endpoints.

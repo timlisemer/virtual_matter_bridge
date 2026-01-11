@@ -1,11 +1,13 @@
 use super::clusters::{
     BooleanStateHandler, BridgedHandler, CameraAvStreamMgmtHandler, OccupancySensingHandler,
-    TimeSyncHandler, WebRtcTransportProviderHandler,
+    RelativeHumidityHandler, TemperatureMeasurementHandler, TimeSyncHandler,
+    WebRtcTransportProviderHandler,
 };
 use super::device_info::DEV_INFO;
 use super::device_types::{
-    DEV_TYPE_AGGREGATOR, DEV_TYPE_BRIDGED_NODE, DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR,
-    DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_VIDEO_DOORBELL,
+    DEV_TYPE_AGGREGATOR, DEV_TYPE_BRIDGED_NODE, DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_HUMIDITY_SENSOR,
+    DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_ON_OFF_PLUG_IN_UNIT,
+    DEV_TYPE_TEMPERATURE_SENSOR, DEV_TYPE_VIDEO_DOORBELL,
 };
 use super::endpoints::controls::{DeviceSwitch, LightSwitch, Switch};
 use super::handler_bridge::{SensorBridge, SwitchBridge};
@@ -55,7 +57,9 @@ use std::pin::pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
-use super::clusters::{boolean_state, occupancy_sensing};
+use super::clusters::{
+    boolean_state, occupancy_sensing, relative_humidity, temperature_measurement,
+};
 use super::endpoints::{ClusterNotifier, NotifiableSensor};
 use crate::config::MatterConfig;
 
@@ -161,6 +165,12 @@ enum DynamicHandlerEntry {
     Desc { dataver: Dataver },
     /// BridgedDeviceBasicInformation handler
     Bridged { handler: BridgedHandler },
+    /// TemperatureMeasurement cluster handler
+    Temperature {
+        handler: TemperatureMeasurementHandler,
+    },
+    /// RelativeHumidityMeasurement cluster handler
+    Humidity { handler: RelativeHumidityHandler },
 }
 
 /// Dynamic handler that routes requests based on (endpoint_id, cluster_id).
@@ -231,6 +241,20 @@ impl DynamicHandler {
             DynamicHandlerEntry::Bridged { handler },
         );
     }
+
+    pub fn add_temperature(&mut self, ep: u16, handler: TemperatureMeasurementHandler) {
+        self.handlers.insert(
+            (ep, temperature_measurement::CLUSTER_ID),
+            DynamicHandlerEntry::Temperature { handler },
+        );
+    }
+
+    pub fn add_humidity(&mut self, ep: u16, handler: RelativeHumidityHandler) {
+        self.handlers.insert(
+            (ep, relative_humidity::CLUSTER_ID),
+            DynamicHandlerEntry::Humidity { handler },
+        );
+    }
 }
 
 impl Default for DynamicHandler {
@@ -270,6 +294,8 @@ impl Handler for DynamicHandler {
                     Handler::read(&handler.adapt(), ctx, reply)
                 }
                 DynamicHandlerEntry::Bridged { handler } => handler.read(ctx, reply),
+                DynamicHandlerEntry::Temperature { handler } => handler.read(ctx, reply),
+                DynamicHandlerEntry::Humidity { handler } => handler.read(ctx, reply),
             }
         } else {
             Err(rs_matter::error::ErrorCode::ClusterNotFound.into())
@@ -763,6 +789,22 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
                             WebRtcTransportProviderHandler::CLUSTER
                         ),
                     ),
+                    EndpointKind::TemperatureSensor => (
+                        leak_slice(&[DEV_TYPE_TEMPERATURE_SENSOR]),
+                        clusters!(
+                            desc::DescHandler::CLUSTER,
+                            BridgedHandler::CLUSTER,
+                            TemperatureMeasurementHandler::CLUSTER
+                        ),
+                    ),
+                    EndpointKind::HumiditySensor => (
+                        leak_slice(&[DEV_TYPE_HUMIDITY_SENSOR]),
+                        clusters!(
+                            desc::DescHandler::CLUSTER,
+                            BridgedHandler::CLUSTER,
+                            RelativeHumidityHandler::CLUSTER
+                        ),
+                    ),
                 };
 
             endpoints_vec.push(Endpoint {
@@ -1057,6 +1099,36 @@ pub async fn run_matter_stack(
                         "VideoDoorbellCamera endpoint {} registered but camera handlers not yet wired",
                         child_id
                     );
+                }
+                EndpointKind::TemperatureSensor => {
+                    // Use sensor from EndpointConfig (created by caller)
+                    if let Some(sensor) = &ep_config.temperature_sensor {
+                        let handler = TemperatureMeasurementHandler::new(
+                            Dataver::new_rand(matter.rand()),
+                            sensor.clone(),
+                        );
+                        dynamic_handler.add_temperature(child_id, handler);
+                    } else {
+                        log::warn!(
+                            "TemperatureSensor endpoint {} missing sensor in config",
+                            child_id
+                        );
+                    }
+                }
+                EndpointKind::HumiditySensor => {
+                    // Use sensor from EndpointConfig (created by caller)
+                    if let Some(sensor) = &ep_config.humidity_sensor {
+                        let handler = RelativeHumidityHandler::new(
+                            Dataver::new_rand(matter.rand()),
+                            sensor.clone(),
+                        );
+                        dynamic_handler.add_humidity(child_id, handler);
+                    } else {
+                        log::warn!(
+                            "HumiditySensor endpoint {} missing sensor in config",
+                            child_id
+                        );
+                    }
                 }
             }
         }

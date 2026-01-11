@@ -15,6 +15,8 @@ pub mod boolean_state;
 pub mod bridged_device_basic_info;
 pub mod camera_av_stream_mgmt;
 pub mod occupancy_sensing;
+pub mod relative_humidity;
+pub mod temperature_measurement;
 pub mod time_sync;
 pub mod webrtc_transport_provider;
 
@@ -23,6 +25,8 @@ pub use boolean_state::BooleanStateHandler;
 pub use bridged_device_basic_info::BridgedHandler;
 pub use camera_av_stream_mgmt::CameraAvStreamMgmtHandler;
 pub use occupancy_sensing::OccupancySensingHandler;
+pub use relative_humidity::{HumiditySensor, RelativeHumidityHandler};
+pub use temperature_measurement::{TemperatureMeasurementHandler, TemperatureSensor};
 pub use time_sync::TimeSyncHandler;
 pub use webrtc_transport_provider::WebRtcTransportProviderHandler;
 

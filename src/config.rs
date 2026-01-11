@@ -6,6 +6,16 @@ pub struct Config {
     pub matter: MatterConfig,
     pub webrtc: WebRtcConfig,
     pub doorbell: DoorbellConfig,
+    pub mqtt: MqttConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MqttConfig {
+    pub broker_host: String,
+    pub broker_port: u16,
+    pub client_id: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +74,13 @@ impl Default for Config {
                 max_concurrent_streams: 4,
             },
             doorbell: DoorbellConfig {},
+            mqtt: MqttConfig {
+                broker_host: "10.0.0.2".to_string(),
+                broker_port: 1883,
+                client_id: "virtual-matter-bridge".to_string(),
+                username: None,
+                password: None,
+            },
         }
     }
 }
@@ -93,6 +110,25 @@ impl Config {
             && let Ok(p) = passcode.parse()
         {
             config.matter.passcode = p;
+        }
+
+        // MQTT configuration
+        if let Ok(host) = std::env::var("MQTT_BROKER_HOST") {
+            config.mqtt.broker_host = host;
+        }
+        if let Ok(port) = std::env::var("MQTT_BROKER_PORT")
+            && let Ok(p) = port.parse()
+        {
+            config.mqtt.broker_port = p;
+        }
+        if let Ok(client_id) = std::env::var("MQTT_CLIENT_ID") {
+            config.mqtt.client_id = client_id;
+        }
+        if let Ok(username) = std::env::var("MQTT_USERNAME") {
+            config.mqtt.username = Some(username);
+        }
+        if let Ok(password) = std::env::var("MQTT_PASSWORD") {
+            config.mqtt.password = Some(password);
         }
 
         config
