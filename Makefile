@@ -1,4 +1,4 @@
-.PHONY: check build run run-debug run-trace test clean dev dev-reset commission status
+.PHONY: check build run run-debug run-trace test clean dev dev-reset commission remove status
 
 check:
 	cargo check

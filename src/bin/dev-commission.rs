@@ -40,11 +40,11 @@ enum Commands {
     /// Commission the virtual matter bridge to python-matter-server
     Commission {
         /// Override the discriminator
-        #[arg(long, default_value_t = DEFAULT_DISCRIMINATOR)]
+        #[arg(long, env = "MATTER_DISCRIMINATOR", default_value_t = DEFAULT_DISCRIMINATOR)]
         discriminator: u16,
 
         /// Override the passcode
-        #[arg(long, default_value_t = DEFAULT_PASSCODE)]
+        #[arg(long, env = "MATTER_PASSCODE", default_value_t = DEFAULT_PASSCODE)]
         passcode: u32,
     },
     /// Remove a commissioned node from python-matter-server
@@ -79,25 +79,68 @@ struct WsResponse {
 
 /// Generate the manual pairing code from discriminator and passcode.
 ///
-/// This matches the format used by Matter for commission_with_code.
+/// Matter short manual pairing code is an 11-digit decimal number:
+/// - Chunk 1 (1 digit): discriminator bits 11-10
+/// - Chunk 2 (5 digits): discriminator bits 9-8 (upper 2 bits) + passcode bits 13-0 (lower 14 bits)
+/// - Chunk 3 (4 digits): passcode bits 26-14
+/// - Check digit (1 digit): Verhoeff checksum
+///
+/// Reference: Matter spec Section 5.1.4.1, connectedhomeip ManualSetupPayloadGenerator.h
 fn generate_pairing_code(discriminator: u16, passcode: u32) -> String {
-    // Manual pairing code format: VVVVVVVVVVC
-    // V = Vendor-specific data (derived from passcode and discriminator)
-    // C = Check digit
-    //
-    // The actual algorithm is complex. For development, we use the known
-    // test code that rs-matter generates for discriminator 3840, passcode 20202021.
-    //
-    // If you need other codes, run the bridge and copy the manual code from output.
-    if discriminator == DEFAULT_DISCRIMINATOR && passcode == DEFAULT_PASSCODE {
-        "35325335079".to_string()
-    } else {
-        // For custom values, the user should read the code from bridge output
-        panic!(
-            "Custom discriminator/passcode requires manual code extraction from bridge output.\n\
-            Run the bridge and copy the manual pairing code shown."
-        );
+    // Chunk 1: top 2 bits of discriminator (bits 11-10)
+    let chunk1 = (discriminator >> 10) & 0x03;
+
+    // Chunk 2: discriminator bits 9-8 in upper 2 bits, passcode bits 13-0 in lower 14 bits
+    let discriminator_bits_9_8 = ((discriminator >> 8) & 0x03) as u32;
+    let passcode_bits_13_0 = passcode & 0x3FFF;
+    let chunk2 = (discriminator_bits_9_8 << 14) | passcode_bits_13_0;
+
+    // Chunk 3: passcode bits 26-14
+    let chunk3 = (passcode >> 14) & 0x1FFF;
+
+    // Format as 10 digits (1 + 5 + 4), then add Verhoeff check digit
+    let payload = format!("{}{:05}{:04}", chunk1, chunk2, chunk3);
+    let check_digit = verhoeff_checksum(&payload);
+    format!("{}{}", payload, check_digit)
+}
+
+/// Compute Verhoeff check digit for a string of decimal digits.
+fn verhoeff_checksum(input: &str) -> u8 {
+    // Verhoeff dihedral group D5 multiplication table
+    const D: [[u8; 10]; 10] = [
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        [1, 2, 3, 4, 0, 6, 7, 8, 9, 5],
+        [2, 3, 4, 0, 1, 7, 8, 9, 5, 6],
+        [3, 4, 0, 1, 2, 8, 9, 5, 6, 7],
+        [4, 0, 1, 2, 3, 9, 5, 6, 7, 8],
+        [5, 9, 8, 7, 6, 0, 4, 3, 2, 1],
+        [6, 5, 9, 8, 7, 1, 0, 4, 3, 2],
+        [7, 6, 5, 9, 8, 2, 1, 0, 4, 3],
+        [8, 7, 6, 5, 9, 3, 2, 1, 0, 4],
+        [9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+    ];
+
+    // Verhoeff permutation table
+    const P: [[u8; 10]; 8] = [
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        [1, 5, 7, 6, 2, 8, 3, 0, 9, 4],
+        [5, 8, 0, 3, 7, 9, 6, 1, 4, 2],
+        [8, 9, 1, 6, 0, 4, 3, 5, 2, 7],
+        [9, 4, 5, 3, 1, 2, 6, 8, 7, 0],
+        [4, 2, 8, 6, 5, 7, 3, 9, 0, 1],
+        [2, 7, 9, 3, 8, 0, 6, 4, 1, 5],
+        [7, 0, 4, 6, 9, 1, 3, 2, 5, 8],
+    ];
+
+    // Verhoeff inverse table
+    const INV: [u8; 10] = [0, 4, 3, 2, 1, 5, 6, 7, 8, 9];
+
+    let digits: Vec<u8> = input.bytes().map(|b| b - b'0').collect();
+    let mut c: u8 = 0;
+    for (i, &d) in digits.iter().rev().enumerate() {
+        c = D[c as usize][P[(i + 1) % 8][d as usize] as usize];
     }
+    INV[c as usize]
 }
 
 #[tokio::main]

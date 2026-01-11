@@ -179,21 +179,21 @@ Camera clusters (AV Stream, WebRTC) are stub implementations awaiting Matter 1.5
 
 Configuration is loaded from environment variables with sensible defaults:
 
-| Variable               | Default                                                      | Description                                                 |
-| ---------------------- | ------------------------------------------------------------ | ----------------------------------------------------------- |
-| `MATTER_INTERFACE`     | Auto-detected                                                | Network interface for Matter/mDNS (e.g., `eth0`, `enp14s0`) |
-| `DEVICE_NAME`          | `Virtual Matter Bridge`                                      | Matter device name                                          |
-| `MATTER_DISCRIMINATOR` | `3840`                                                       | Matter pairing discriminator                                |
-| `MATTER_PASSCODE`      | `20202021`                                                   | Matter pairing passcode                                     |
-| `RTSP_URL`             | `rtsp://username:password@10.0.0.38:554/h264Preview_01_main` | Camera RTSP stream URL                                      |
-| `RTSP_USERNAME`        | -                                                            | RTSP authentication username                                |
-| `RTSP_PASSWORD`        | -                                                            | RTSP authentication password                                |
-| `MQTT_BROKER_HOST`     | `10.0.0.2`                                                   | MQTT broker hostname/IP                                     |
-| `MQTT_BROKER_PORT`     | `1883`                                                       | MQTT broker port                                            |
-| `MQTT_CLIENT_ID`       | `virtual-matter-bridge`                                      | MQTT client identifier                                      |
-| `MQTT_USERNAME`        | -                                                            | MQTT authentication username (optional)                     |
-| `MQTT_PASSWORD`        | -                                                            | MQTT authentication password (optional)                     |
-| `RUST_LOG`             | `info`                                                       | Logging level (error, warn, info, debug, trace)             |
+| Variable               | Default                                             | Description                                                 |
+| ---------------------- | --------------------------------------------------- | ----------------------------------------------------------- |
+| `MATTER_INTERFACE`     | Auto-detected                                       | Network interface for Matter/mDNS (e.g., `eth0`, `enp14s0`) |
+| `DEVICE_NAME`          | `Virtual Matter Bridge`                             | Matter device name                                          |
+| `MATTER_DISCRIMINATOR` | `3840`                                              | Matter pairing discriminator                                |
+| `MATTER_PASSCODE`      | `20202021`                                          | Matter pairing passcode                                     |
+| `RTSP_URL`             | `rtsp://user:pass@192.168.1.100:554/stream`         | Camera RTSP stream URL                                      |
+| `RTSP_USERNAME`        | -                                                   | RTSP authentication username                                |
+| `RTSP_PASSWORD`        | -                                                   | RTSP authentication password                                |
+| `MQTT_BROKER_HOST`     | `localhost`                                         | MQTT broker hostname/IP                                     |
+| `MQTT_BROKER_PORT`     | `1883`                                              | MQTT broker port                                            |
+| `MQTT_CLIENT_ID`       | `virtual-matter-bridge`                             | MQTT client identifier                                      |
+| `MQTT_USERNAME`        | -                                                   | MQTT authentication username (optional)                     |
+| `MQTT_PASSWORD`        | -                                                   | MQTT authentication password (optional)                     |
+| `RUST_LOG`             | `info`                                              | Logging level (error, warn, info, debug, trace)             |
 
 ### Network Interface Auto-Detection
 
@@ -519,8 +519,27 @@ MATTER_SERVER_URL=ws://your-ha-server:5580/ws make commission
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DEV_AUTO_RESET` | `false` | Force persistence reset on every startup |
 | `MATTER_SERVER_URL` | `ws://localhost:5580/ws` | python-matter-server WebSocket URL |
+| `MATTER_DISCRIMINATOR` | `3840` | Pairing discriminator (must match bridge config) |
+| `MATTER_PASSCODE` | `20202021` | Pairing passcode (must match bridge config) |
+| `DEV_AUTO_RESET` | `false` | Force persistence reset on every startup |
+
+#### Finding Your Python Matter Server URL
+
+The `MATTER_SERVER_URL` depends on where python-matter-server is running:
+
+**Home Assistant OS / Supervised:**
+- Default: `ws://homeassistant.local:5580/ws`
+- Or use the IP: `ws://<your-ha-ip>:5580/ws`
+
+**Docker (standalone):**
+- Use the IP/hostname of the machine running the container
+- Example: `ws://192.168.1.100:5580/ws`
+
+**Verify connectivity:**
+```bash
+curl -i http://<your-server>:5580/ws
+```
 
 ### Environment Configuration
 
