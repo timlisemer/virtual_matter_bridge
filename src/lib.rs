@@ -7,6 +7,7 @@
 #![allow(unexpected_cfgs)]
 #![recursion_limit = "256"]
 
+pub mod commissioning;
 pub mod config;
 pub mod error;
 pub mod input;

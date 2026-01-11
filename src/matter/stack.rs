@@ -847,7 +847,7 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
 ///
 /// Note: Currently uses test device credentials for development.
 pub async fn run_matter_stack(
-    _config: &MatterConfig,
+    config: &MatterConfig,
     // Bridge master on/off switch (controls EP1, cascades to all parent DeviceSwitches)
     virtual_bridge_onoff: Arc<Switch>,
     // Dynamic virtual devices (bridged under EP2 Aggregator)
@@ -974,14 +974,43 @@ pub async fn run_matter_stack(
         info!("  Discriminator: {}", TEST_DEV_COMM.discriminator);
         info!("  Passcode: {}", TEST_DEV_COMM.password);
 
-        if let Err(e) = matter.print_standard_qr_text(DiscoveryCapabilities::IP) {
-            error!("Failed to print QR text: {:?}", e);
-        }
+        // Try auto-commission if server URL is configured
+        if let Some(ref server_url) = config.server_url {
+            info!("Auto-commission enabled: {}", server_url);
+            // Run auto-commission in a separate thread (prints pairing code on failure)
+            let url = server_url.clone();
+            let discriminator = config.discriminator;
+            let passcode = config.passcode;
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    match crate::commissioning::auto_commission(&url, discriminator, passcode).await
+                    {
+                        Ok(()) => {
+                            info!("Auto-commission completed successfully");
+                        }
+                        Err(e) => {
+                            log::warn!("Auto-commission failed: {}", e);
+                            let pairing_code = crate::commissioning::generate_pairing_code(
+                                discriminator,
+                                passcode,
+                            );
+                            info!("Commission manually with pairing code: {}", pairing_code);
+                        }
+                    }
+                })
+            });
+        } else {
+            // No server URL configured - show QR code for manual commissioning
+            if let Err(e) = matter.print_standard_qr_text(DiscoveryCapabilities::IP) {
+                error!("Failed to print QR text: {:?}", e);
+            }
 
-        if let Err(e) =
-            matter.print_standard_qr_code(QrTextType::Unicode, DiscoveryCapabilities::IP)
-        {
-            error!("Failed to print QR code: {:?}", e);
+            if let Err(e) =
+                matter.print_standard_qr_code(QrTextType::Unicode, DiscoveryCapabilities::IP)
+            {
+                error!("Failed to print QR code: {:?}", e);
+            }
         }
     }
 

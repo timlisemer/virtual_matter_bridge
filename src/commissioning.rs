@@ -37,7 +37,7 @@ struct WsResponse {
 ///
 /// Matter short manual pairing code is an 11-digit decimal number.
 /// Reference: Matter spec Section 5.1.4.1
-fn generate_pairing_code(discriminator: u16, passcode: u32) -> String {
+pub fn generate_pairing_code(discriminator: u16, passcode: u32) -> String {
     // Chunk 1: top 2 bits of discriminator (bits 11-10)
     let chunk1 = (discriminator >> 10) & 0x03;
 
