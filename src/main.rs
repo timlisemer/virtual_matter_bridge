@@ -6,6 +6,7 @@
 // Increase recursion limit for deeply nested Matter handler chains
 #![recursion_limit = "256"]
 
+mod commissioning;
 mod config;
 mod error;
 mod input;
@@ -17,7 +18,7 @@ use crate::input::mqtt::{MqttIntegration, W100Config};
 use crate::matter::clusters::{HumiditySensor, TemperatureSensor};
 use crate::matter::endpoints::EndpointHandler;
 use crate::matter::{EndpointConfig, VirtualDevice, VirtualDeviceType};
-use log::info;
+use log::{info, warn};
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -122,6 +123,11 @@ async fn main() {
     // Clone config parts before moving to camera input
     let matter_config = config.matter.clone();
     let mqtt_config = config.mqtt.clone();
+
+    // Clone auto-commission settings before matter_config is moved
+    let commission_server_url = matter_config.server_url.clone();
+    let commission_discriminator = matter_config.discriminator;
+    let commission_passcode = matter_config.passcode;
 
     // Create the camera input (handles RTSP/WebRTC)
     let camera = Arc::new(SyncRwLock::new(CameraInput::new(config)));
@@ -228,6 +234,29 @@ async fn main() {
 
     info!("Matter stack started on dedicated thread");
 
+    // Auto-commission if MATTER_SERVER_URL is set
+    let commission_task = if let Some(server_url) = commission_server_url {
+        info!("Auto-commission enabled: {}", server_url);
+        Some(tokio::spawn(async move {
+            match commissioning::auto_commission(
+                &server_url,
+                commission_discriminator,
+                commission_passcode,
+            )
+            .await
+            {
+                Ok(()) => info!("Auto-commission completed successfully"),
+                Err(e) => warn!(
+                    "Auto-commission failed: {}. Use QR code to pair manually.",
+                    e
+                ),
+            }
+        }))
+    } else {
+        info!("No MATTER_SERVER_URL set - use QR code to commission");
+        None
+    };
+
     // Wait for shutdown signal
     match signal::ctrl_c().await {
         Ok(()) => {
@@ -241,6 +270,9 @@ async fn main() {
     // Shutdown
     sensor_task.abort();
     mqtt_task.abort();
+    if let Some(task) = commission_task {
+        task.abort();
+    }
 
     // Shutdown the camera input
     let camera_for_shutdown = camera.clone();

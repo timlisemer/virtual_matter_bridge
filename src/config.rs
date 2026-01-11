@@ -76,6 +76,8 @@ pub struct MatterConfig {
     pub device_name: String,
     pub discriminator: u16,
     pub passcode: u32,
+    /// python-matter-server WebSocket URL for auto-commissioning
+    pub server_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +113,7 @@ impl Default for Config {
                 device_name: "Virtual Matter Bridge".to_string(),
                 discriminator: 3840,
                 passcode: 20202021,
+                server_url: None,
             },
             webrtc: WebRtcConfig {
                 stun_servers: vec!["stun:stun.l.google.com:19302".to_string()],
@@ -154,6 +157,9 @@ impl Config {
             && let Ok(p) = passcode.parse()
         {
             config.matter.passcode = p;
+        }
+        if let Ok(server_url) = std::env::var("MATTER_SERVER_URL") {
+            config.matter.server_url = Some(server_url);
         }
 
         // MQTT configuration
