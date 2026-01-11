@@ -56,7 +56,7 @@ async fn main() {
 
     // Spawn MQTT event loop
     let mqtt_handle = tokio::spawn(async move {
-        mqtt_client.run(msg_tx).await;
+        mqtt_client.run(msg_tx, None).await;
     });
 
     // Spawn message processor

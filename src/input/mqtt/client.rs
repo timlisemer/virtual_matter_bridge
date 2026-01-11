@@ -4,7 +4,7 @@ use crate::config::MqttConfig;
 use log::{debug, error, info, warn};
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Message received from MQTT broker.
 #[derive(Debug, Clone)]
@@ -52,31 +52,47 @@ impl MqttClient {
 
     /// Run the MQTT event loop and forward messages to the provided channel.
     ///
+    /// Optionally signals when connected via the `connected_tx` oneshot.
     /// This method runs indefinitely, processing MQTT events and sending
     /// received messages through the channel.
-    pub async fn run(mut self, tx: mpsc::Sender<MqttMessage>) {
+    pub async fn run(
+        mut self,
+        tx: mpsc::Sender<MqttMessage>,
+        connected_tx: Option<oneshot::Sender<()>>,
+    ) {
         info!("Starting MQTT event loop");
+        let mut connected_tx = connected_tx;
 
         loop {
             match self.event_loop.poll().await {
                 Ok(event) => {
-                    if let Event::Incoming(Packet::Publish(publish)) = event {
-                        let topic = publish.topic.clone();
-                        let payload = match String::from_utf8(publish.payload.to_vec()) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                warn!("Invalid UTF-8 in MQTT payload: {}", e);
-                                continue;
+                    match &event {
+                        Event::Incoming(Packet::ConnAck(_)) => {
+                            info!("[MQTT] Connected to broker");
+                            // Signal that we're connected
+                            if let Some(tx) = connected_tx.take() {
+                                let _ = tx.send(());
                             }
-                        };
-
-                        debug!("Received MQTT message on {}: {}", topic, payload);
-
-                        let msg = MqttMessage { topic, payload };
-                        if tx.send(msg).await.is_err() {
-                            error!("MQTT message channel closed");
-                            break;
                         }
+                        Event::Incoming(Packet::Publish(publish)) => {
+                            let topic = publish.topic.clone();
+                            let payload = match String::from_utf8(publish.payload.to_vec()) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    warn!("Invalid UTF-8 in MQTT payload: {}", e);
+                                    continue;
+                                }
+                            };
+
+                            debug!("Received MQTT message on {}: {}", topic, payload);
+
+                            let msg = MqttMessage { topic, payload };
+                            if tx.send(msg).await.is_err() {
+                                error!("MQTT message channel closed");
+                                break;
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Err(e) => {

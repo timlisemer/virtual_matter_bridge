@@ -487,6 +487,86 @@ Scope 3 complete. Ready for **Scope 4: Matter Translation**.
 
 ---
 
+## Scope 4 Implementation (2026-01-11)
+
+### Matter Device Structure
+
+The W100 is exposed as a single parent device "Tim Thermometer" with two child endpoints:
+- Temperature sensor (TemperatureMeasurement cluster 0x0402)
+- Humidity sensor (RelativeHumidityMeasurement cluster 0x0405)
+
+### Files Created/Modified
+
+| File | Purpose |
+|------|---------|
+| `src/matter/clusters/temperature_measurement.rs` | TemperatureSensor + TemperatureMeasurementHandler |
+| `src/matter/clusters/relative_humidity.rs` | HumiditySensor + RelativeHumidityHandler |
+| `src/matter/virtual_device.rs` | Added `EndpointConfig::temperature_sensor()` and `humidity_sensor()` |
+| `src/main.rs` | W100 device registration and MQTT integration wiring |
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ main.rs                                                      │
+├─────────────────────────────────────────────────────────────┤
+│ Arc<TemperatureSensor> ←──shared──→ MqttIntegration        │
+│ Arc<HumiditySensor>    ←──shared──→ MqttIntegration        │
+│         ↓                                  ↓                │
+│   Matter Stack                       MQTT Client            │
+│         ↓                                  ↓                │
+│ TemperatureMeasurementHandler    W100Device::process_*()   │
+│ RelativeHumidityHandler          set_celsius() / set_percent()│
+└─────────────────────────────────────────────────────────────┘
+```
+
+The sensors use atomic values (`AtomicI16`, `AtomicU16`) with version counters for thread-safe updates and Matter subscription notifications.
+
+### Initial Issue: Hardcoded Values on Startup
+
+**Symptom**: Home Assistant showed 20.0°C and 50.0% (initialization defaults) until W100 woke up.
+
+**Resolution**: The MQTT → Matter data flow works correctly. The W100 is battery-powered and only publishes on:
+1. Button press
+2. Temperature/humidity change beyond threshold
+3. Set command received
+
+Once the W100 published (via button press or threshold change), values updated correctly:
+```
+[MQTT] Tim-Thermometer temperature updated: 21.5°C
+[MQTT] Tim-Thermometer humidity updated: 47.5%
+```
+Home Assistant reflected these values immediately.
+
+### Improvement: Request State on Startup
+
+To avoid showing stale defaults on bridge startup, request W100 state immediately after subscribing by publishing to `zigbee2mqtt/Tim-Thermometer/get`.
+
+**Implementation** (in `integration.rs` after subscribing):
+```rust
+// Request current state from all devices
+for device in &self.w100_devices {
+    let get_topic = format!("zigbee2mqtt/{}/get", device.friendly_name);
+    client.publish(&get_topic, QoS::AtMostOnce, false, r#"{"state":""}"#.as_bytes()).await;
+}
+```
+
+### Test Commands
+
+```bash
+# Monitor W100 topics
+nix-shell -p mosquitto --run "mosquitto_sub -h 10.0.0.2 -t 'zigbee2mqtt/Tim-Thermometer/#' -v"
+
+# Force state publish manually
+nix-shell -p mosquitto --run "mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Tim-Thermometer/get' -m '{\"state\":\"\"}'"
+```
+
+### Status
+
+**Scope 4 complete** - Temperature and humidity sensors working via Matter. Remaining: add state request on startup for better UX.
+
+---
+
 ## Technical Implementation Details
 
 ### Phase 1: Add MQTT Input Source to Virtual Matter Bridge

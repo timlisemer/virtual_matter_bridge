@@ -9,7 +9,8 @@ use crate::matter::clusters::{HumiditySensor, TemperatureSensor};
 use log::{info, warn};
 use rumqttc::QoS;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 /// Configuration for a W100 climate sensor.
@@ -176,10 +177,37 @@ impl MqttIntegration {
 
         let mqtt_client = MqttClient::new(&self.config);
 
-        // Get subscribable client (AsyncClient is Send+Sync)
+        // Get client for subscribing/publishing (AsyncClient is Send+Sync)
         let subscribe_client = mqtt_client.client();
 
-        // Subscribe to all device topics
+        // Channel for MQTT messages
+        let (msg_tx, mut msg_rx) = mpsc::channel::<MqttMessage>(64);
+
+        // Channel to signal when connected
+        let (connected_tx, connected_rx) = oneshot::channel();
+
+        // Start MQTT event loop FIRST (so it can establish connection)
+        let mqtt_loop = tokio::spawn(async move {
+            mqtt_client.run(msg_tx, Some(connected_tx)).await;
+        });
+
+        // Wait for connection (with timeout)
+        match tokio::time::timeout(Duration::from_secs(10), connected_rx).await {
+            Ok(Ok(())) => {
+                info!("[MQTT] Connection established, subscribing to topics");
+            }
+            Ok(Err(_)) => {
+                warn!("[MQTT] Connection signal channel dropped");
+                return;
+            }
+            Err(_) => {
+                warn!("[MQTT] Connection timeout after 10 seconds");
+                mqtt_loop.abort();
+                return;
+            }
+        }
+
+        // NOW subscribe to all device topics (after connection is established)
         for device in &self.w100_devices {
             for topic in device.subscribe_topics() {
                 if let Err(e) = subscribe_client.subscribe(&topic, QoS::AtMostOnce).await {
@@ -188,18 +216,32 @@ impl MqttIntegration {
             }
         }
 
+        // Small delay to ensure subscriptions are processed before requesting state
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Request current state from all devices (W100 is battery-powered and sleeps)
+        for device in &self.w100_devices {
+            let get_topic = format!("zigbee2mqtt/{}/get", device.friendly_name);
+            if let Err(e) = subscribe_client
+                .publish(&get_topic, QoS::AtMostOnce, false, r#"{"state":""}"#)
+                .await
+            {
+                warn!(
+                    "[MQTT] Failed to request state for {}: {:?}",
+                    device.friendly_name, e
+                );
+            } else {
+                info!(
+                    "[MQTT] Requested initial state for {}",
+                    device.friendly_name
+                );
+            }
+        }
+
         info!(
             "[MQTT] Integration started with {} W100 device(s)",
             self.w100_devices.len()
         );
-
-        // Channel for MQTT messages
-        let (msg_tx, mut msg_rx) = mpsc::channel::<MqttMessage>(64);
-
-        // Spawn MQTT event loop
-        let mqtt_loop = tokio::spawn(async move {
-            mqtt_client.run(msg_tx).await;
-        });
 
         // Process incoming messages
         while let Some(msg) = msg_rx.recv().await {
