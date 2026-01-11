@@ -182,12 +182,18 @@ Configuration is loaded from environment variables with sensible defaults:
 | Variable               | Default                                                      | Description                                                 |
 | ---------------------- | ------------------------------------------------------------ | ----------------------------------------------------------- |
 | `MATTER_INTERFACE`     | Auto-detected                                                | Network interface for Matter/mDNS (e.g., `eth0`, `enp14s0`) |
-| `RTSP_URL`             | `rtsp://username:password@10.0.0.38:554/h264Preview_01_main` | Camera RTSP stream URL                                      |
-| `RTSP_USERNAME`        | -                                                            | RTSP authentication username                                |
-| `RTSP_PASSWORD`        | -                                                            | RTSP authentication password                                |
 | `DEVICE_NAME`          | `Virtual Matter Bridge`                                      | Matter device name                                          |
 | `MATTER_DISCRIMINATOR` | `3840`                                                       | Matter pairing discriminator                                |
 | `MATTER_PASSCODE`      | `20202021`                                                   | Matter pairing passcode                                     |
+| `RTSP_URL`             | `rtsp://username:password@10.0.0.38:554/h264Preview_01_main` | Camera RTSP stream URL                                      |
+| `RTSP_USERNAME`        | -                                                            | RTSP authentication username                                |
+| `RTSP_PASSWORD`        | -                                                            | RTSP authentication password                                |
+| `MQTT_BROKER_HOST`     | `10.0.0.2`                                                   | MQTT broker hostname/IP                                     |
+| `MQTT_BROKER_PORT`     | `1883`                                                       | MQTT broker port                                            |
+| `MQTT_CLIENT_ID`       | `virtual-matter-bridge`                                      | MQTT client identifier                                      |
+| `MQTT_USERNAME`        | -                                                            | MQTT authentication username (optional)                     |
+| `MQTT_PASSWORD`        | -                                                            | MQTT authentication password (optional)                     |
+| `RUST_LOG`             | `info`                                                       | Logging level (error, warn, info, debug, trace)             |
 
 ### Network Interface Auto-Detection
 
