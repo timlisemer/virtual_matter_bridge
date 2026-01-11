@@ -443,103 +443,86 @@ The network interface implementation:
 ## Building
 
 ```bash
-# Check compilation
+# Check code quality (check, fmt, clippy)
 make check
 
-# Build release binary
-make build
-
-# Run in development
+# Run the bridge
 make run
 
-# Run with debug logging (shows UDP packet flow)
-make run-debug
+# Run tests
+make test
 
-# Run with trace logging (shows full packet dumps)
-make run-trace
+# Build release binary (when needed)
+cargo build --release
 ```
 
 ### Development Workflow
 
-The bridge includes tooling to streamline the development cycle when making changes that affect the device structure.
-
-#### Schema Auto-Reset
-
-The bridge automatically detects when the device endpoint structure changes (device types, labels, endpoint configurations) and resets the persistence file accordingly:
+#### Quick Start
 
 ```bash
-# Normal development - auto-resets only if structure changed
-make dev
+# Check code quality
+make check
 
-# Force reset every time (useful for rapid iteration)
-make dev-reset
+# Run the bridge
+make run
+
+# Run tests
+make test
 ```
 
-When schema changes are detected, you'll see:
-```
-Schema hash changed (0x... -> 0x...), resetting persistence
-```
+#### First-Time Setup
 
-#### Automated Commissioning
+1. Start the bridge in one terminal:
+   ```bash
+   make run
+   ```
 
-Instead of scanning QR codes with your phone, you can commission directly to python-matter-server (used by Home Assistant):
+2. In another terminal, commission to python-matter-server:
+   ```bash
+   cargo run --bin dev-commission -- commission
+   ```
 
-```bash
-# Commission to local python-matter-server
-make commission
+3. After commissioning, the bridge auto-reconnects on restart - just use `make run`
 
-# Commission to remote server
-MATTER_SERVER_URL=ws://homeassistant.local:5580/ws make commission
+#### Available Commands
 
-# Check commissioned nodes
-make status
-
-# Remove a node
-make remove NODE_ID=123
-```
-
-**Prerequisites:**
-- python-matter-server must be running and accessible
-- NixOS: `services.matter-server.enable = true`
-- Firewall: Allow port 5580 from your dev machine
-
-#### Typical Development Cycle
-
-```bash
-# Terminal 1: Run the bridge (auto-resets if structure changed)
-make dev
-
-# Terminal 2: Commission once after reset
-MATTER_SERVER_URL=ws://your-ha-server:5580/ws make commission
-
-# Device appears in Home Assistant automatically
-```
+| Command | Description |
+|---------|-------------|
+| `make check` | Run cargo check, fmt, and clippy |
+| `make run` | Start the Matter bridge |
+| `make test` | Run all tests |
+| `make status` | Show commissioned nodes |
+| `make remove NODE_ID=X` | Remove a node from python-matter-server |
 
 #### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MATTER_SERVER_URL` | `ws://localhost:5580/ws` | python-matter-server WebSocket URL |
-| `MATTER_DISCRIMINATOR` | `3840` | Pairing discriminator (must match bridge config) |
-| `MATTER_PASSCODE` | `20202021` | Pairing passcode (must match bridge config) |
-| `DEV_AUTO_RESET` | `false` | Force persistence reset on every startup |
+| `RUST_LOG` | `info` | Log level (`debug`, `trace` for verbose output) |
+| `DEV_AUTO_RESET` | unset | Set to `1` to force re-commission on startup |
+| `MATTER_SERVER_URL` | from `.env` | python-matter-server WebSocket URL |
+| `MATTER_DISCRIMINATOR` | `3840` | Pairing discriminator |
+| `MATTER_PASSCODE` | `20202021` | Pairing passcode |
 
-#### Finding Your Python Matter Server URL
+#### Schema Auto-Reset
 
-The `MATTER_SERVER_URL` depends on where python-matter-server is running:
-
-**Home Assistant OS / Supervised:**
-- Default: `ws://homeassistant.local:5580/ws`
-- Or use the IP: `ws://<your-ha-ip>:5580/ws`
-
-**Docker (standalone):**
-- Use the IP/hostname of the machine running the container
-- Example: `ws://192.168.1.100:5580/ws`
-
-**Verify connectivity:**
-```bash
-curl -i http://<your-server>:5580/ws
+The bridge detects when device structure changes and resets persistence automatically:
 ```
+Schema hash changed (0x... -> 0x...), resetting persistence
+```
+
+To force a reset: `DEV_AUTO_RESET=1 make run`
+
+#### Python Matter Server URL
+
+Configure `MATTER_SERVER_URL` in `.env` based on your setup:
+
+| Setup | URL |
+|-------|-----|
+| Home Assistant OS | `ws://homeassistant.local:5580/ws` |
+| Docker | `ws://<docker-host-ip>:5580/ws` |
+| NixOS | `ws://localhost:5580/ws` (with `services.matter-server.enable = true`) |
 
 ### Environment Configuration
 
