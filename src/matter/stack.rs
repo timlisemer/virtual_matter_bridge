@@ -1,7 +1,6 @@
 use super::clusters::{
-    BooleanStateHandler, BridgedHandler, CameraAvStreamMgmtHandler, OccupancySensingHandler,
-    RelativeHumidityHandler, TemperatureMeasurementHandler, TimeSyncHandler,
-    WebRtcTransportProviderHandler,
+    BooleanStateHandler, BridgedHandler, OccupancySensingHandler, RelativeHumidityHandler,
+    TemperatureMeasurementHandler, TimeSyncHandler,
 };
 use super::device_info::DEV_INFO;
 use super::device_types::{
@@ -298,6 +297,11 @@ impl Handler for DynamicHandler {
                 DynamicHandlerEntry::Humidity { handler } => handler.read(ctx, reply),
             }
         } else {
+            log::debug!(
+                "DynamicHandler: no handler for endpoint {} cluster 0x{:04x}",
+                ep,
+                cl
+            );
             Err(rs_matter::error::ErrorCode::ClusterNotFound.into())
         }
     }
@@ -424,7 +428,14 @@ fn read_onoff(
         let mut tw = writer.writer();
         match attr.attr_id {
             0x00 => tw.bool(tag, bridge.get())?, // OnOff
-            _ => return Err(rs_matter::error::ErrorCode::AttributeNotFound.into()),
+            other => {
+                log::debug!(
+                    "OnOff cluster: unknown attr 0x{:04x} on endpoint {}",
+                    other,
+                    attr.endpoint_id
+                );
+                return Err(rs_matter::error::ErrorCode::AttributeNotFound.into());
+            }
         }
     }
     writer.complete()
@@ -475,7 +486,14 @@ fn read_device_onoff(
         let mut tw = writer.writer();
         match attr.attr_id {
             0x00 => tw.bool(tag, switch.get())?, // OnOff
-            _ => return Err(rs_matter::error::ErrorCode::AttributeNotFound.into()),
+            other => {
+                log::debug!(
+                    "DeviceOnOff cluster: unknown attr 0x{:04x} on endpoint {}",
+                    other,
+                    attr.endpoint_id
+                );
+                return Err(rs_matter::error::ErrorCode::AttributeNotFound.into());
+            }
         }
     }
     writer.complete()
@@ -784,9 +802,8 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
                         leak_slice(&[DEV_TYPE_VIDEO_DOORBELL]),
                         clusters!(
                             desc::DescHandler::CLUSTER,
-                            BridgedHandler::CLUSTER,
-                            CameraAvStreamMgmtHandler::CLUSTER,
-                            WebRtcTransportProviderHandler::CLUSTER
+                            BridgedHandler::CLUSTER // TODO: Add CameraAvStreamMgmtHandler::CLUSTER and WebRtcTransportProviderHandler::CLUSTER
+                                                    // when handlers are wired (see TODO at ~line 1145)
                         ),
                     ),
                     EndpointKind::TemperatureSensor => (

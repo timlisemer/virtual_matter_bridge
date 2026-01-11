@@ -23,12 +23,13 @@ pub mod webrtc_transport_provider;
 // Re-export for convenience
 pub use boolean_state::BooleanStateHandler;
 pub use bridged_device_basic_info::BridgedHandler;
-pub use camera_av_stream_mgmt::CameraAvStreamMgmtHandler;
 pub use occupancy_sensing::OccupancySensingHandler;
 pub use relative_humidity::{HumiditySensor, RelativeHumidityHandler};
 pub use temperature_measurement::{TemperatureMeasurementHandler, TemperatureSensor};
 pub use time_sync::TimeSyncHandler;
-pub use webrtc_transport_provider::WebRtcTransportProviderHandler;
+// TODO: Re-export when handlers are wired in stack.rs
+// pub use camera_av_stream_mgmt::CameraAvStreamMgmtHandler;
+// pub use webrtc_transport_provider::WebRtcTransportProviderHandler;
 
 /// Sync dataver with sensor version changes.
 ///

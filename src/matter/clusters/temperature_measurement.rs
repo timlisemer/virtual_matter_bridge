@@ -59,6 +59,11 @@ pub const CLUSTER: Cluster<'static> = Cluster {
             Access::RV,
             Quality::NULLABLE
         ),
+        Attribute::new(
+            TemperatureMeasurementAttribute::Tolerance as _,
+            Access::RV,
+            Quality::NONE
+        ),
     ),
     commands: &[],
     with_attrs: with!(all),
@@ -176,8 +181,8 @@ impl TemperatureMeasurementHandler {
                     tw.i16(tag, self.max_value)?;
                 }
                 TemperatureMeasurementAttribute::Tolerance => {
-                    // Not implemented - return error
-                    return Err(ErrorCode::AttributeNotFound.into());
+                    // Tolerance in 0.01°C units (0 = not specified)
+                    tw.u16(tag, 0)?;
                 }
             }
         }
