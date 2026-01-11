@@ -11,18 +11,17 @@ mod error;
 mod input;
 mod matter;
 
-use crate::config::{Config, MqttConfig};
+use crate::config::Config;
 use crate::input::camera::CameraInput;
-use crate::input::mqtt::{MqttClient, W100Device};
+use crate::input::mqtt::{MqttIntegration, W100Config};
 use crate::matter::clusters::{HumiditySensor, TemperatureSensor};
 use crate::matter::endpoints::EndpointHandler;
 use crate::matter::{EndpointConfig, VirtualDevice, VirtualDeviceType};
-use log::{info, warn};
+use log::info;
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::signal;
-use tokio::sync::mpsc;
 
 /// Type alias for the state pusher callback.
 type StatePusher = Arc<dyn Fn(bool) + Send + Sync>;
@@ -103,85 +102,6 @@ async fn run_sensor_simulation(
     }
 }
 
-/// Run MQTT task for W100 climate sensor (Aqara TH-S04D)
-///
-/// Subscribes to zigbee2mqtt topic and updates Matter sensors with live values.
-async fn run_w100_mqtt(
-    mqtt_config: config::MqttConfig,
-    temperature_sensor: Arc<TemperatureSensor>,
-    humidity_sensor: Arc<HumiditySensor>,
-) {
-    info!("[MQTT] Connecting to {}:{}", mqtt_config.broker_host, mqtt_config.broker_port);
-
-    // Create MQTT client
-    let mut mqtt_client = match MqttClient::new(&mqtt_config) {
-        Ok(client) => client,
-        Err(e) => {
-            warn!("[MQTT] Failed to create MQTT client: {:?}", e);
-            return;
-        }
-    };
-
-    // Create W100 device handler
-    let (action_tx, mut action_rx) = mpsc::channel(32);
-    let w100 = Arc::new(W100Device::new("Tim-Thermometer"));
-    w100.with_mqtt_client(mqtt_client.client());
-    w100.with_action_channel(action_tx);
-
-    // Subscribe to W100 topics
-    let state_topic = "zigbee2mqtt/Tim-Thermometer";
-    let action_topic = "zigbee2mqtt/Tim-Thermometer/action";
-    if let Err(e) = mqtt_client.subscribe(state_topic).await {
-        warn!("[MQTT] Failed to subscribe to {}: {:?}", state_topic, e);
-    }
-    if let Err(e) = mqtt_client.subscribe(action_topic).await {
-        warn!("[MQTT] Failed to subscribe to {}: {:?}", action_topic, e);
-    }
-
-    // Channel for MQTT messages
-    let (msg_tx, mut msg_rx) = mpsc::channel(64);
-
-    // Spawn MQTT event loop
-    let mqtt_loop = tokio::spawn(async move {
-        mqtt_client.run(msg_tx).await;
-    });
-
-    info!("[MQTT] W100 integration started - subscribed to {}", state_topic);
-
-    // Process incoming messages
-    loop {
-        tokio::select! {
-            Some((topic, payload)) = msg_rx.recv() => {
-                // Process message through W100 device
-                w100.process_message(&topic, &payload).await;
-
-                // Update Matter sensors with current values
-                if let Some(temp) = w100.get_temperature().await {
-                    let old_temp = temperature_sensor.get_celsius();
-                    temperature_sensor.set_celsius(temp);
-                    if (temp - old_temp).abs() > 0.1 {
-                        info!("[MQTT] Temperature updated: {:.1}°C", temp);
-                    }
-                }
-                if let Some(humidity) = w100.get_humidity().await {
-                    let old_humidity = humidity_sensor.get_percent();
-                    humidity_sensor.set_percent(humidity);
-                    if (humidity - old_humidity).abs() > 0.5 {
-                        info!("[MQTT] Humidity updated: {:.1}%", humidity);
-                    }
-                }
-            }
-            Some(action) = action_rx.recv() => {
-                // Log button actions (will be used for automations in Scope 5)
-                info!("[MQTT] W100 button action: {:?}", action);
-            }
-            else => break,
-        }
-    }
-
-    mqtt_loop.abort();
-}
-
 #[tokio::main]
 async fn main() {
     init_logger();
@@ -196,8 +116,9 @@ async fn main() {
     info!("  Product ID: 0x{:04X}", config.matter.product_id);
     info!("  Discriminator: {}", config.matter.discriminator);
 
-    // Clone config for Matter stack before moving to camera input
+    // Clone config parts before moving to camera input
     let matter_config = config.matter.clone();
+    let mqtt_config = config.mqtt.clone();
 
     // Create the camera input (handles RTSP/WebRTC)
     let camera = Arc::new(SyncRwLock::new(CameraInput::new(config)));
@@ -277,13 +198,14 @@ async fn main() {
         run_sensor_simulation(door_for_sim, motion_for_sim).await;
     });
 
-    // Spawn MQTT task for W100 climate sensor
-    let temp_sensor = w100_temperature.clone();
-    let humidity_sensor = w100_humidity.clone();
-    let mqtt_config = config::MqttConfig::from_env();
-    let mqtt_task = tokio::spawn(async move {
-        run_w100_mqtt(mqtt_config, temp_sensor, humidity_sensor).await;
-    });
+    // Start MQTT integration for W100 climate sensor (self-contained!)
+    let mqtt_task = MqttIntegration::new(mqtt_config)
+        .with_w100(W100Config::new(
+            "Tim-Thermometer",
+            w100_temperature.clone(),
+            w100_humidity.clone(),
+        ))
+        .start();
 
     // Start Matter stack in a separate thread
     // Matter uses blocking I/O internally with embassy, so we run it on a dedicated thread
