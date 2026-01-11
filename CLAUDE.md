@@ -56,9 +56,9 @@ let door_sensor = VirtualDevice::new(VirtualDeviceType::ContactSensor, "Door")
 ### Endpoint Layout
 
 - EP0: Root device
-- EP1: Virtual bridge (master on/off) - WIP
+- EP1: Bridge master on/off control
 - EP2: Aggregator (bridge root) - lists parent devices
-- EP3+: Virtual devices with child endpoints
+- EP3+: Virtual devices with child endpoints (sensors, switches, video doorbell)
 
 ### Threading Model
 

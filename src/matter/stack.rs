@@ -1,5 +1,3 @@
-use super::clusters::camera_av_stream_mgmt::CameraAvStreamMgmtCluster;
-use super::clusters::webrtc_transport_provider::WebRtcTransportProviderCluster;
 use super::clusters::{
     BooleanStateHandler, BridgedHandler, CameraAvStreamMgmtHandler, OccupancySensingHandler,
     TimeSyncHandler, WebRtcTransportProviderHandler,
@@ -21,7 +19,6 @@ use log::{error, info};
 use nix::ifaddrs::getifaddrs;
 use nix::net::if_::if_nametoindex;
 use nix::sys::socket::{AddressFamily, SockaddrLike};
-use parking_lot::RwLock as SyncRwLock;
 use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _, PartsMatcher};
 use rs_matter::dm::clusters::on_off::{self, OnOffHooks};
@@ -682,16 +679,11 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
         clusters: ROOT_CLUSTERS,
     });
 
-    // Endpoint 1: Video Doorbell (NOT bridged - direct endpoint with all clusters)
+    // Endpoint 1: Bridge master on/off control
     endpoints_vec.push(Endpoint {
         id: 1,
-        device_types: devices!(DEV_TYPE_VIDEO_DOORBELL),
-        clusters: clusters!(
-            desc::DescHandler::CLUSTER,
-            Switch::CLUSTER,
-            CameraAvStreamMgmtHandler::CLUSTER,
-            WebRtcTransportProviderHandler::CLUSTER
-        ),
+        device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT),
+        clusters: clusters!(desc::DescHandler::CLUSTER, Switch::CLUSTER),
     });
 
     // Endpoint 2: Aggregator (bridge root - will use DynamicPartsMatcher)
@@ -762,6 +754,15 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
                             LightSwitch::CLUSTER
                         ),
                     ),
+                    EndpointKind::VideoDoorbellCamera => (
+                        leak_slice(&[DEV_TYPE_VIDEO_DOORBELL]),
+                        clusters!(
+                            desc::DescHandler::CLUSTER,
+                            BridgedHandler::CLUSTER,
+                            CameraAvStreamMgmtHandler::CLUSTER,
+                            WebRtcTransportProviderHandler::CLUSTER
+                        ),
+                    ),
                 };
 
             endpoints_vec.push(Endpoint {
@@ -805,11 +806,9 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
 /// Note: Currently uses test device credentials for development.
 pub async fn run_matter_stack(
     _config: &MatterConfig,
-    // Hardcoded doorbell components (kept for now)
-    camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
-    webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
+    // Bridge master on/off switch (controls EP1, cascades to all parent DeviceSwitches)
     virtual_bridge_onoff: Arc<Switch>,
-    // Dynamic virtual devices
+    // Dynamic virtual devices (bridged under EP2 Aggregator)
     virtual_devices: Vec<VirtualDevice>,
 ) -> Result<(), Error> {
     info!("Initializing Matter stack...");
@@ -1049,6 +1048,16 @@ pub async fn run_matter_stack(
                     device_switch.add_child_switch(bridge.clone());
                     dynamic_handler.add_onoff(child_id, Dataver::new_rand(matter.rand()), bridge);
                 }
+                EndpointKind::VideoDoorbellCamera => {
+                    // TODO: Camera handlers are async and need different handling than DynamicHandler.
+                    // For now, VideoDoorbellCamera endpoints are registered but handlers are not wired.
+                    // This requires extending DynamicHandler to support async handlers or
+                    // building a separate async handler chain for camera endpoints.
+                    log::warn!(
+                        "VideoDoorbellCamera endpoint {} registered but camera handlers not yet wired",
+                        child_id
+                    );
+                }
             }
         }
     }
@@ -1058,14 +1067,10 @@ pub async fn run_matter_stack(
         virtual_bridge_onoff.add_cascade_target(device_switch.clone());
     }
 
-    // Create handlers for hardcoded doorbell components
-    let camera_handler =
-        CameraAvStreamMgmtHandler::new(Dataver::new_rand(matter.rand()), camera_cluster);
-    let webrtc_handler =
-        WebRtcTransportProviderHandler::new(Dataver::new_rand(matter.rand()), webrtc_cluster);
+    // Create time sync handler for root endpoint
     let time_sync_handler = TimeSyncHandler::new(Dataver::new_rand(matter.rand()));
 
-    // Create OnOff handler for virtual bridge on/off (endpoint 1 - Video Doorbell, NOT bridged)
+    // Create OnOff handler for bridge master on/off (endpoint 1)
     let virtual_bridge_onoff_handler = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(matter.rand()),
         1,
@@ -1088,7 +1093,7 @@ pub async fn run_matter_stack(
                         EpClMatcher::new(Some(0), Some(TimeSyncHandler::CLUSTER.id)),
                         Async(&time_sync_handler),
                     )
-                    // === Endpoint 1: Video Doorbell (NOT bridged) ===
+                    // === Endpoint 1: Bridge master on/off control ===
                     .chain(
                         EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
                         Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
@@ -1096,14 +1101,6 @@ pub async fn run_matter_stack(
                     .chain(
                         EpClMatcher::new(Some(1), Some(Switch::CLUSTER.id)),
                         on_off::HandlerAsyncAdaptor(&virtual_bridge_onoff_handler),
-                    )
-                    .chain(
-                        EpClMatcher::new(Some(1), Some(CameraAvStreamMgmtHandler::CLUSTER.id)),
-                        Async(&camera_handler),
-                    )
-                    .chain(
-                        EpClMatcher::new(Some(1), Some(WebRtcTransportProviderHandler::CLUSTER.id)),
-                        Async(&webrtc_handler),
                     )
                     // === Endpoint 2: Aggregator ===
                     .chain(

@@ -126,6 +126,7 @@ async fn main() {
     let outlet1_handler = Arc::new(SimulatedHandler::new(true));
     let outlet2_handler = Arc::new(SimulatedHandler::new(false));
     let light_handler = Arc::new(SimulatedHandler::new(false));
+    let doorbell_handler = Arc::new(SimulatedHandler::new(false));
 
     // Define our virtual devices using the new API
     let virtual_devices = vec![
@@ -144,11 +145,14 @@ async fn main() {
         // Light (parent) with light switch endpoint (child)
         VirtualDevice::new(VirtualDeviceType::OnOffLight, "Light")
             .with_endpoint(EndpointConfig::light_switch("Light", light_handler.clone())),
+        // Video Doorbell (parent) with camera endpoint (child)
+        // Note: Camera handlers are stub - actual streaming awaits Matter 1.5 controller support
+        VirtualDevice::new(VirtualDeviceType::VideoDoorbellDevice, "Video Doorbell").with_endpoint(
+            EndpointConfig::video_doorbell_camera("Camera", doorbell_handler.clone()),
+        ),
     ];
 
-    // Create Matter handlers from camera clusters
-    let camera_cluster = camera.read().camera_cluster();
-    let webrtc_cluster = camera.read().webrtc_cluster();
+    // Get the bridge master on/off switch from camera input
     let virtual_bridge_onoff = camera.read().device_power();
 
     // Initialize the camera input
@@ -185,8 +189,6 @@ async fn main() {
         .spawn(move || {
             if let Err(e) = futures_lite::future::block_on(matter::run_matter_stack(
                 &matter_config,
-                camera_cluster,
-                webrtc_cluster,
                 virtual_bridge_onoff,
                 virtual_devices,
             )) {

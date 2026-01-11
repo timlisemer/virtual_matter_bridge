@@ -139,6 +139,8 @@ pub enum VirtualDeviceType {
     OnOffPlugInUnit,
     /// On/Off light
     OnOffLight,
+    /// Video doorbell with camera streaming
+    VideoDoorbellDevice,
 }
 
 impl VirtualDeviceType {
@@ -149,6 +151,7 @@ impl VirtualDeviceType {
             Self::OccupancySensor => DEV_TYPE_OCCUPANCY_SENSOR,
             Self::OnOffPlugInUnit => DEV_TYPE_ON_OFF_PLUG_IN_UNIT,
             Self::OnOffLight => DEV_TYPE_ON_OFF_LIGHT,
+            Self::VideoDoorbellDevice => DEV_TYPE_VIDEO_DOORBELL,
         }
     }
 }

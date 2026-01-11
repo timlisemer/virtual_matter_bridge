@@ -21,6 +21,8 @@ pub enum EndpointKind {
     Switch,
     /// Light switch using OnOff cluster (0x0006) - appears as light
     LightSwitch,
+    /// Video doorbell camera using CameraAvStreamMgmt (0x0551) and WebRtcTransportProvider (0x0553) clusters
+    VideoDoorbellCamera,
 }
 
 /// Configuration for a child endpoint within a Virtual Device.
@@ -77,6 +79,17 @@ impl EndpointConfig {
         Self {
             label,
             kind: EndpointKind::LightSwitch,
+            handler,
+        }
+    }
+
+    /// Create a video doorbell camera endpoint (CameraAvStreamMgmt + WebRtcTransportProvider clusters).
+    ///
+    /// Used for video doorbells and cameras with streaming capability.
+    pub fn video_doorbell_camera(label: &'static str, handler: Arc<dyn EndpointHandler>) -> Self {
+        Self {
+            label,
+            kind: EndpointKind::VideoDoorbellCamera,
             handler,
         }
     }
