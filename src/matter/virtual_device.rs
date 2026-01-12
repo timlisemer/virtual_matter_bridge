@@ -3,7 +3,7 @@
 //! A Virtual Device represents a parent endpoint with one or more child Endpoints.
 //! This module provides the configuration types needed to define devices at startup.
 
-use super::clusters::{HumiditySensor, TemperatureSensor};
+use super::clusters::{BridgedDeviceInfo, HumiditySensor, TemperatureSensor};
 use super::device_types::VirtualDeviceType;
 use super::endpoints::EndpointHandler;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -178,6 +178,8 @@ pub struct VirtualDevice {
     pub label: &'static str,
     /// Child endpoints with functional clusters
     pub endpoints: Vec<EndpointConfig>,
+    /// Optional device info (vendor, product, serial, etc.)
+    pub device_info: Option<BridgedDeviceInfo>,
 }
 
 impl VirtualDevice {
@@ -189,6 +191,7 @@ impl VirtualDevice {
             device_type,
             label,
             endpoints: Vec::new(),
+            device_info: None,
         }
     }
 
@@ -197,6 +200,25 @@ impl VirtualDevice {
     /// Returns self for method chaining.
     pub fn with_endpoint(mut self, endpoint: EndpointConfig) -> Self {
         self.endpoints.push(endpoint);
+        self
+    }
+
+    /// Set device info (vendor, product, serial, etc.) for this Virtual Device.
+    ///
+    /// This information is exposed via the BridgedDeviceBasicInformation cluster
+    /// and displayed in Matter controllers like Home Assistant.
+    ///
+    /// # Example
+    /// ```ignore
+    /// VirtualDevice::new(VirtualDeviceType::TemperatureSensor, "Tim Thermometer")
+    ///     .with_device_info(
+    ///         BridgedDeviceInfo::new("Tim Thermometer")
+    ///             .with_vendor("Aqara")
+    ///             .with_product("Climate Sensor W100")
+    ///     )
+    /// ```
+    pub fn with_device_info(mut self, info: BridgedDeviceInfo) -> Self {
+        self.device_info = Some(info);
         self
     }
 

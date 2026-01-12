@@ -1,6 +1,6 @@
 use super::clusters::{
-    BooleanStateHandler, BridgedHandler, OccupancySensingHandler, RelativeHumidityHandler,
-    TemperatureMeasurementHandler, TimeSyncHandler,
+    BooleanStateHandler, BridgedDeviceInfo, BridgedHandler, OccupancySensingHandler,
+    RelativeHumidityHandler, TemperatureMeasurementHandler, TimeSyncHandler,
 };
 use super::device_info::DEV_INFO;
 use super::device_types::{
@@ -1068,9 +1068,17 @@ pub async fn run_matter_stack(
         );
 
         // Add bridged device info handler for parent (always reachable)
+        // Use device_info if provided, otherwise create from label
+        let parent_device_info = device
+            .device_info
+            .clone()
+            .unwrap_or_else(|| BridgedDeviceInfo::new(device.label));
         dynamic_handler.add_bridged(
             parent_id,
-            BridgedHandler::new_always_reachable(Dataver::new_rand(matter.rand()), device.label),
+            BridgedHandler::new_always_reachable(
+                Dataver::new_rand(matter.rand()),
+                parent_device_info,
+            ),
         );
 
         // Add OnOff handler for parent (device-level switch)
@@ -1092,9 +1100,10 @@ pub async fn run_matter_stack(
             dynamic_handler.add_desc(child_id, Dataver::new_rand(matter.rand()));
 
             // Add bridged device info handler for child (with dynamic reachable)
+            // Child endpoints use label only (device info is on parent)
             dynamic_handler.add_bridged(
                 child_id,
-                BridgedHandler::new(
+                BridgedHandler::new_with_name(
                     Dataver::new_rand(matter.rand()),
                     ep_config.label,
                     child_reachable,

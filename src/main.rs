@@ -15,7 +15,7 @@ mod matter;
 use crate::config::Config;
 use crate::input::camera::CameraInput;
 use crate::input::mqtt::{MqttIntegration, W100Config};
-use crate::matter::clusters::{HumiditySensor, TemperatureSensor};
+use crate::matter::clusters::{BridgedDeviceInfo, HumiditySensor, TemperatureSensor};
 use crate::matter::endpoints::EndpointHandler;
 use crate::matter::{EndpointConfig, VirtualDevice, VirtualDeviceType};
 use log::info;
@@ -163,6 +163,11 @@ async fn main() {
         ),
         // W100 Climate Sensor (Aqara TH-S04D) via MQTT/zigbee2mqtt
         VirtualDevice::new(VirtualDeviceType::TemperatureSensor, "Tim Thermometer")
+            .with_device_info(
+                BridgedDeviceInfo::new("Tim Thermometer")
+                    .with_vendor("Aqara")
+                    .with_product("Climate Sensor W100"),
+            )
             .with_endpoint(EndpointConfig::temperature_sensor(
                 "Temperature",
                 w100_temperature.clone(),

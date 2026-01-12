@@ -22,7 +22,7 @@ pub mod webrtc_transport_provider;
 
 // Re-export for convenience
 pub use boolean_state::BooleanStateHandler;
-pub use bridged_device_basic_info::BridgedHandler;
+pub use bridged_device_basic_info::{BridgedDeviceInfo, BridgedHandler};
 pub use occupancy_sensing::OccupancySensingHandler;
 pub use relative_humidity::{HumiditySensor, RelativeHumidityHandler};
 pub use temperature_measurement::{TemperatureMeasurementHandler, TemperatureSensor};
