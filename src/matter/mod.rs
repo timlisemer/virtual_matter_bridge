@@ -17,5 +17,4 @@ pub use endpoints::controls;
 pub use endpoints::sensors;
 
 // Re-export virtual device types
-pub use device_types::VirtualDeviceType;
 pub use virtual_device::{EndpointConfig, VirtualDevice};

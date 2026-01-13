@@ -523,7 +523,7 @@ fn write_device_onoff(
 
 /// Get IPv4 and IPv6 addresses for a specific network interface.
 ///
-/// Filters out link-local IPv6 addresses (fe80::/10).
+/// Prefers global IPv6 addresses, falls back to link-local (fe80::/10) if no global available.
 fn get_interface_addresses(interface_name: &str) -> Result<(Vec<Ipv4Addr>, Vec<Ipv6Addr>), Error> {
     let addrs = getifaddrs().map_err(|e| {
         error!("Failed to get interface addresses: {:?}", e);
@@ -531,7 +531,8 @@ fn get_interface_addresses(interface_name: &str) -> Result<(Vec<Ipv4Addr>, Vec<I
     })?;
 
     let mut ipv4 = Vec::new();
-    let mut ipv6 = Vec::new();
+    let mut ipv6_global = Vec::new();
+    let mut ipv6_link_local = Vec::new();
 
     for ifaddr in addrs {
         if ifaddr.interface_name != interface_name {
@@ -550,10 +551,12 @@ fn get_interface_addresses(interface_name: &str) -> Result<(Vec<Ipv4Addr>, Vec<I
                 AddressFamily::Inet6 => {
                     if let Some(sockaddr) = addr.as_sockaddr_in6() {
                         let ip = sockaddr.ip();
-                        // Filter out link-local addresses (fe80::/10)
                         let octets = ip.octets();
-                        if !(octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80) {
-                            ipv6.push(ip);
+                        // Separate link-local (fe80::/10) from global addresses
+                        if octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80 {
+                            ipv6_link_local.push(ip);
+                        } else {
+                            ipv6_global.push(ip);
                         }
                     }
                 }
@@ -561,6 +564,13 @@ fn get_interface_addresses(interface_name: &str) -> Result<(Vec<Ipv4Addr>, Vec<I
             }
         }
     }
+
+    // Prefer global IPv6, fall back to link-local if no global available
+    let ipv6 = if ipv6_global.is_empty() {
+        ipv6_link_local
+    } else {
+        ipv6_global
+    };
 
     Ok((ipv4, ipv6))
 }
@@ -906,13 +916,19 @@ pub async fn run_matter_stack(
     }
 
     let ipv6_addr = if ipv6_addrs.is_empty() {
-        info!(
-            "No global IPv6 address on '{}', using unspecified",
-            interface_name
-        );
+        info!("No IPv6 address on '{}', using unspecified", interface_name);
         Ipv6Addr::UNSPECIFIED
     } else {
-        ipv6_addrs[0]
+        // Log whether we're using global or link-local
+        let addr = ipv6_addrs[0];
+        let octets = addr.octets();
+        if octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80 {
+            info!(
+                "Using link-local IPv6 address {} (no global available)",
+                addr
+            );
+        }
+        addr
     };
 
     info!(
@@ -970,6 +986,12 @@ pub async fn run_matter_stack(
                 "Failed to load persisted state from {:?}: {:?}",
                 persist_path, e
             );
+            // Delete corrupt persistence file so device can be re-commissioned cleanly
+            if let Err(del_err) = fs::remove_file(&persist_path) {
+                error!("Failed to delete corrupt persistence file: {}", del_err);
+            } else {
+                info!("Deleted corrupt persistence file, device will need re-commissioning");
+            }
         }
     } else if schema_reset {
         info!("Persistence file deleted due to schema change, starting fresh");

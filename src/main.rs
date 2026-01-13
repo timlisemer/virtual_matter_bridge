@@ -17,7 +17,7 @@ use crate::input::camera::CameraInput;
 use crate::input::mqtt::{MqttIntegration, W100Config};
 use crate::matter::clusters::{BridgedDeviceInfo, HumiditySensor, TemperatureSensor};
 use crate::matter::endpoints::EndpointHandler;
-use crate::matter::{EndpointConfig, VirtualDevice, VirtualDeviceType};
+use crate::matter::{EndpointConfig, VirtualDevice};
 use log::info;
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
@@ -142,27 +142,30 @@ async fn main() {
     // Define our virtual devices using the new API
     let virtual_devices = vec![
         // Door sensor (parent) with contact sensor endpoint (child)
-        VirtualDevice::new(VirtualDeviceType::ContactSensor, "Door").with_endpoint(
-            EndpointConfig::contact_sensor("Door Sensor", door_handler.clone()),
-        ),
+        VirtualDevice::new("Door").with_endpoint(EndpointConfig::contact_sensor(
+            "Door Sensor",
+            door_handler.clone(),
+        )),
         // Motion sensor (parent) with occupancy sensor endpoint (child)
-        VirtualDevice::new(VirtualDeviceType::OccupancySensor, "Motion").with_endpoint(
-            EndpointConfig::occupancy_sensor("Occupancy", motion_handler.clone()),
-        ),
+        VirtualDevice::new("Motion").with_endpoint(EndpointConfig::occupancy_sensor(
+            "Occupancy",
+            motion_handler.clone(),
+        )),
         // Power strip (parent) with two switch endpoints (children)
-        VirtualDevice::new(VirtualDeviceType::OnOffPlugInUnit, "Power Strip")
+        VirtualDevice::new("Power Strip")
             .with_endpoint(EndpointConfig::switch("Outlet 1", outlet1_handler.clone()))
             .with_endpoint(EndpointConfig::switch("Outlet 2", outlet2_handler.clone())),
         // Light (parent) with light switch endpoint (child)
-        VirtualDevice::new(VirtualDeviceType::OnOffLight, "Light")
+        VirtualDevice::new("Light")
             .with_endpoint(EndpointConfig::light_switch("Light", light_handler.clone())),
         // Video Doorbell (parent) with camera endpoint (child)
         // Note: Camera handlers are stub - actual streaming awaits Matter 1.5 controller support
-        VirtualDevice::new(VirtualDeviceType::VideoDoorbellDevice, "Video Doorbell").with_endpoint(
-            EndpointConfig::video_doorbell_camera("Camera", doorbell_handler.clone()),
-        ),
+        VirtualDevice::new("Video Doorbell").with_endpoint(EndpointConfig::video_doorbell_camera(
+            "Camera",
+            doorbell_handler.clone(),
+        )),
         // W100 Climate Sensor (Aqara TH-S04D) via MQTT/zigbee2mqtt
-        VirtualDevice::new(VirtualDeviceType::TemperatureSensor, "Tim Thermometer")
+        VirtualDevice::new("Tim Thermometer")
             .with_device_info(
                 BridgedDeviceInfo::new("Tim Thermometer")
                     .with_vendor("Aqara")

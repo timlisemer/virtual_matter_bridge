@@ -4,7 +4,6 @@
 //! This module provides the configuration types needed to define devices at startup.
 
 use super::clusters::{BridgedDeviceInfo, HumiditySensor, TemperatureSensor};
-use super::device_types::VirtualDeviceType;
 use super::endpoints::EndpointHandler;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -161,19 +160,16 @@ impl EndpointHandler for DummyHandler {
 ///
 /// Virtual Devices are bridged devices that appear under the Aggregator endpoint.
 /// Each Virtual Device has:
-/// - A device type (ContactSensor, Light, etc.)
 /// - A label (displayed in controllers)
 /// - One or more child endpoints with functional clusters
 ///
 /// # Example
 /// ```ignore
-/// let power_strip = VirtualDevice::new(VirtualDeviceType::OnOffPlugInUnit, "Power Strip")
+/// let power_strip = VirtualDevice::new("Power Strip")
 ///     .with_endpoint(EndpointConfig::switch("Outlet 1", outlet1_handler))
 ///     .with_endpoint(EndpointConfig::switch("Outlet 2", outlet2_handler));
 /// ```
 pub struct VirtualDevice {
-    /// Device type for the parent endpoint
-    pub device_type: VirtualDeviceType,
     /// Label displayed in Matter controllers
     pub label: &'static str,
     /// Child endpoints with functional clusters
@@ -183,12 +179,11 @@ pub struct VirtualDevice {
 }
 
 impl VirtualDevice {
-    /// Create a new Virtual Device with the given type and label.
+    /// Create a new Virtual Device with the given label.
     ///
     /// Use `with_endpoint` to add child endpoints.
-    pub fn new(device_type: VirtualDeviceType, label: &'static str) -> Self {
+    pub fn new(label: &'static str) -> Self {
         Self {
-            device_type,
             label,
             endpoints: Vec::new(),
             device_info: None,
@@ -210,7 +205,7 @@ impl VirtualDevice {
     ///
     /// # Example
     /// ```ignore
-    /// VirtualDevice::new(VirtualDeviceType::TemperatureSensor, "Tim Thermometer")
+    /// VirtualDevice::new("Tim Thermometer")
     ///     .with_device_info(
     ///         BridgedDeviceInfo::new("Tim Thermometer")
     ///             .with_vendor("Aqara")
@@ -224,12 +219,11 @@ impl VirtualDevice {
 
     /// Compute a hash of this device's structure for schema versioning.
     ///
-    /// The hash includes device type, label, and all endpoint kinds/labels.
+    /// The hash includes label and all endpoint kinds/labels.
     /// This is used to detect when the device structure changes and
     /// persistence needs to be reset.
     pub fn schema_hash(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
-        self.device_type.hash(&mut hasher);
         self.label.hash(&mut hasher);
         self.endpoints.len().hash(&mut hasher);
         for endpoint in &self.endpoints {
