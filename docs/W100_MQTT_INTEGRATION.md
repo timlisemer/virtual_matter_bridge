@@ -575,245 +575,146 @@ Comparing our implementation against a native Thread/Matter W100 ("Küche Thermo
 
 | Feature | Reference (Thread) | Current (Zigbee→Bridge) | Status |
 |---------|-------------------|------------------------|--------|
-| Device Name | "Aqara Climate Sensor W100 (8196)" | "HumiditySensor" | Missing |
-| Vendor | "by Aqara" | "by timlisemer" | Missing |
-| Temperature | 20.5°C | 21.5°C | Working |
-| Humidity | 45.31% | 50.86% | Working |
-| Button (3) - Plus | Event entity | Not exposed | Missing |
-| Button (4) - Minus | Event entity | Not exposed | Missing |
-| Button (5) - Center | Event entity | Not exposed | Missing |
-| Battery | 100% | Not exposed | Missing |
-| Battery Type | CR2450 | Not exposed | Missing |
-| Battery Voltage | 3V | Not exposed | Missing |
-| Firmware | 1.0.1.0 | Not exposed | Missing |
-| Hardware | 0.0.1.2 | Not exposed | Missing |
-| Serial Number | 54EF441001422B32 | Not exposed | Missing |
-| Identify | 5 endpoints | Not implemented | Missing |
+| Device Name | "Aqara Climate Sensor W100 (8196)" | "Climate Sensor W100" | ✅ Working |
+| Vendor | "by Aqara" | "by Aqara" | ✅ Working |
+| Temperature | 20.5°C | 21.5°C | ✅ Working |
+| Humidity | 45.31% | 50.86% | ✅ Working |
+| Button (3) - Plus | Event entity | Logged only | ⛔ Blocked |
+| Button (4) - Minus | Event entity | Logged only | ⛔ Blocked |
+| Button (5) - Center | Event entity | Logged only | ⛔ Blocked |
+| Battery | 100% | Not exposed | ❌ Missing |
+| Battery Type | CR2450 | Not exposed | ❌ Missing |
+| Battery Voltage | 3V | Not exposed | ❌ Missing |
+| Firmware | 1.0.1.0 | Not exposed | ❌ Missing |
+| Hardware | 0.0.1.2 | Not exposed | ❌ Missing |
+| Serial Number | 54EF441001422B32 | Not exposed | ❌ Missing |
+| Identify | 5 endpoints | Not implemented | ❌ Missing |
 
-### Root Causes
+### Status Summary
 
-1. **Device Name/Vendor**: `BridgedDeviceBasicInformation` cluster (0x0039) only exposes `NodeLabel` and `Reachable`. Missing: `VendorName`, `ProductName`, `HardwareVersion`, `SoftwareVersion`, `SerialNumber`.
+1. **Device Name/Vendor**: ✅ **IMPLEMENTED** - `BridgedDeviceBasicInformation` cluster now exposes `VendorName`, `ProductName`, `NodeLabel`, and other attributes.
 
-2. **Button Events**: W100 button actions ARE parsed from MQTT (`W100Action` enum in `w100.rs`) but only logged. No Matter `GenericSwitch` cluster (0x003B) implementation exists.
+2. **Button Events**: ⛔ **BLOCKED** - W100 button actions ARE parsed from MQTT and logged, but **rs-matter does NOT support Matter events** (listed as "next steps" in rs-matter roadmap). Cannot expose as GenericSwitch without event support.
 
-3. **Battery**: zigbee2mqtt publishes battery data, but it's not parsed or exposed. No `PowerSource` cluster (0x002F) implementation exists.
+3. **Battery**: ❌ **NOT STARTED** - zigbee2mqtt publishes battery data, but no `PowerSource` cluster (0x002F) implementation exists yet.
 
-### Implementation Plan
+### Implementation Status
 
-#### Part A: Enhanced BridgedDeviceBasicInformation
+#### Part A: Enhanced BridgedDeviceBasicInformation - ✅ COMPLETE
 
-Extend `src/matter/clusters/bridged_device_basic_info.rs` to support:
+All attributes now implemented in `src/matter/clusters/bridged_device_basic_info.rs`:
 
-| Attribute | ID | Type | Value for W100 |
-|-----------|-----|------|----------------|
-| VendorName | 0x0001 | string | "Aqara" |
-| ProductName | 0x0003 | string | "Climate Sensor W100" |
-| NodeLabel | 0x0005 | string | "Tim Thermometer" |
-| HardwareVersion | 0x0007 | u16 | From zigbee2mqtt |
-| SoftwareVersion | 0x0009 | u32 | From zigbee2mqtt |
-| SerialNumber | 0x000F | string | IEEE address |
-| Reachable | 0x0011 | bool | true |
+| Attribute | ID | Type | Value for W100 | Status |
+|-----------|-----|------|----------------|--------|
+| VendorName | 0x0001 | string | "Aqara" | ✅ |
+| ProductName | 0x0003 | string | "Climate Sensor W100" | ✅ |
+| NodeLabel | 0x0005 | string | "Tim Thermometer" | ✅ |
+| HardwareVersion | 0x0007 | u16 | From zigbee2mqtt | ✅ |
+| SoftwareVersion | 0x0009 | u32 | From zigbee2mqtt | ✅ |
+| SerialNumber | 0x000F | string | IEEE address | ✅ |
+| Reachable | 0x0011 | bool | true | ✅ |
 
-#### Part B: GenericSwitch Cluster for Buttons
+#### Part B: GenericSwitch Cluster for Buttons - ⛔ BLOCKED
 
-Create `src/matter/clusters/generic_switch.rs`:
+**Blocker:** rs-matter does NOT support Matter events (required for GenericSwitch).
 
-**Matter GenericSwitch Cluster (0x003B)**:
-- Device Type: Generic Switch (0x000F)
-- Feature: Momentary Switch (MS) - bit 2
-- Attributes:
-  - `NumberOfPositions` (0x0000): u8 = 2 (pressed/released)
-  - `CurrentPosition` (0x0001): u8 = current state
-  - `MultiPressMax` (0x0002): u8 = 2 (for double-press)
-- Events:
-  - `InitialPress` (0x01): position
-  - `ShortRelease` (0x03): position (for single press)
-  - `MultiPressComplete` (0x06): count (for double press)
+Button actions ARE parsed and logged, but cannot be exposed to Matter until rs-matter adds event support.
 
-**Button Mapping**:
-
-| W100 Action | Matter Event | Button Endpoint |
-|-------------|--------------|-----------------|
-| `single_plus` | ShortRelease(1) | Button 3 |
-| `single_minus` | ShortRelease(1) | Button 4 |
-| `single_center` | ShortRelease(1) | Button 5 |
-| `double_plus` | MultiPressComplete(2) | Button 3 |
-| `double_minus` | MultiPressComplete(2) | Button 4 |
-| `double_center` | MultiPressComplete(2) | Button 5 |
-| `hold_plus` | InitialPress(1) | Button 3 |
-| `hold_minus` | InitialPress(1) | Button 4 |
-| `hold_center` | InitialPress(1) | Button 5 |
-
-**Endpoint Structure** (matching reference):
+**Current Endpoint Structure:**
 ```
 Tim Thermometer (Parent Device)
-├── EP3: Temperature Sensor
-├── EP4: Humidity Sensor
-├── EP5: Button (Plus) - GenericSwitch
-├── EP6: Button (Minus) - GenericSwitch
-└── EP7: Button (Center) - GenericSwitch
+├── EP3: Temperature Sensor     ✅ Working
+├── EP4: Humidity Sensor        ✅ Working
+├── EP5: Button (Plus)          ⛔ Blocked (needs events)
+├── EP6: Button (Minus)         ⛔ Blocked (needs events)
+└── EP7: Button (Center)        ⛔ Blocked (needs events)
 ```
 
-### Files to Modify
+### Current Success Criteria
 
-| File | Changes |
-|------|---------|
-| `src/matter/clusters/bridged_device_basic_info.rs` | Add VendorName, ProductName, etc. |
-| `src/matter/clusters/generic_switch.rs` | **New** - GenericSwitch cluster handler |
-| `src/matter/clusters/mod.rs` | Export generic_switch |
-| `src/matter/device_types.rs` | Add `GenericSwitch` device type (0x000F) |
-| `src/matter/virtual_device.rs` | Add `EndpointKind::GenericSwitch` |
-| `src/matter/stack.rs` | Wire GenericSwitch handler in DynamicHandler |
-| `src/input/mqtt/integration.rs` | Connect W100Action to GenericSwitch events |
-| `src/main.rs` | Add 3 button endpoints to W100 device |
-
-### Success Criteria
-
-After implementation, Home Assistant should show:
-- Device info: "Climate Sensor W100" by "Aqara"
-- Sensors: Temperature, Humidity (already working)
-- Events: Button (3), Button (4), Button (5) with event triggers
-- Activity: Button press events logged
+| Criteria | Status |
+|----------|--------|
+| Device info: "Climate Sensor W100" by "Aqara" | ✅ Working |
+| Temperature sensor | ✅ Working |
+| Humidity sensor | ✅ Working |
+| Button events in Home Assistant | ⛔ Blocked |
+| Button actions logged to console | ✅ Working |
 
 ---
 
-## Phase 1: BridgedDeviceBasicInformation Enhancement (IMPLEMENT FIRST)
+## Phase 1: BridgedDeviceBasicInformation Enhancement - ✅ COMPLETE (2026-01-13)
 
-This is a PLATFORM-WIDE improvement. The `BridgedDeviceInfo` struct is REUSABLE for ALL bridged devices, not just W100.
+This was a PLATFORM-WIDE improvement. The `BridgedDeviceInfo` struct is REUSABLE for ALL bridged devices, not just W100.
 
-### Current Problem
+### Implementation Summary
 
-Device shows as "HumiditySensor" by "timlisemer" instead of proper identification.
-
-### Target State
-
-Device shows as "Climate Sensor W100" by "Aqara" with full device information.
-
-### BridgedDeviceInfo Struct (REUSABLE)
-
-```rust
-/// Device information for bridged devices.
-/// REUSABLE across ALL bridged devices in the platform.
-#[derive(Clone, Debug)]
-pub struct BridgedDeviceInfo {
-    /// Vendor name (e.g., "Aqara") - Attribute 0x0001
-    pub vendor_name: Option<&'static str>,
-    /// Product name (e.g., "Climate Sensor W100") - Attribute 0x0003
-    pub product_name: Option<&'static str>,
-    /// Node label - user-friendly name - Attribute 0x0005
-    pub node_label: &'static str,
-    /// Hardware version - Attribute 0x0007
-    pub hardware_version: Option<u16>,
-    /// Software version - Attribute 0x0009
-    pub software_version: Option<u32>,
-    /// Serial number (e.g., IEEE address) - Attribute 0x000F
-    pub serial_number: Option<&'static str>,
-}
-
-impl BridgedDeviceInfo {
-    pub fn new(node_label: &'static str) -> Self {
-        Self {
-            vendor_name: None,
-            product_name: None,
-            node_label,
-            hardware_version: None,
-            software_version: None,
-            serial_number: None,
-        }
-    }
-
-    pub fn with_vendor(mut self, name: &'static str) -> Self {
-        self.vendor_name = Some(name);
-        self
-    }
-
-    pub fn with_product(mut self, name: &'static str) -> Self {
-        self.product_name = Some(name);
-        self
-    }
-
-    pub fn with_hardware_version(mut self, version: u16) -> Self {
-        self.hardware_version = Some(version);
-        self
-    }
-
-    pub fn with_software_version(mut self, version: u32) -> Self {
-        self.software_version = Some(version);
-        self
-    }
-
-    pub fn with_serial_number(mut self, serial: &'static str) -> Self {
-        self.serial_number = Some(serial);
-        self
-    }
-}
-```
-
-### BridgedHandler Updates
-
-Current `BridgedHandler` only exposes `NodeLabel` (0x0005) and `Reachable` (0x0011).
-
-New attributes to add:
-
-| Attribute | ID | Type | Description |
-|-----------|-----|------|-------------|
-| VendorName | 0x0001 | string | Manufacturer name |
-| ProductName | 0x0003 | string | Product/model name |
-| NodeLabel | 0x0005 | string | User-friendly endpoint name |
-| HardwareVersion | 0x0007 | u16 | Hardware revision |
-| SoftwareVersion | 0x0009 | u32 | Firmware version |
-| SerialNumber | 0x000F | string | Unique identifier |
-| Reachable | 0x0011 | bool | Device connectivity status |
-
-### Files to Modify
+**Files Modified:**
 
 | File | Changes |
 |------|---------|
-| `src/matter/clusters/bridged_device_basic_info.rs` | Add `BridgedDeviceInfo` struct, update `BridgedHandler` to accept it, add all attribute reads |
-| `src/matter/virtual_device.rs` | Add `device_info: Option<BridgedDeviceInfo>` field, add `with_device_info()` builder |
-| `src/matter/stack.rs` | Pass `device_info` to `BridgedHandler` during endpoint creation |
-| `src/main.rs` | Set W100 device info: vendor="Aqara", product="Climate Sensor W100" |
+| `src/matter/clusters/bridged_device_basic_info.rs` | Added `BridgedDeviceInfo` struct (lines 99-161), updated `BridgedHandler` to read all attributes (lines 163-289) |
+| `src/matter/virtual_device.rs` | Added `device_info: Option<BridgedDeviceInfo>` field, added `with_device_info()` builder |
+| `src/matter/stack.rs` | Passes `device_info` to `BridgedHandler` during endpoint creation |
+| `src/main.rs` | W100 uses device info: vendor="Aqara", product="Climate Sensor W100" (lines 168-173) |
 
-### Usage Example (W100)
+**Attributes Now Exposed:**
+
+| Attribute | ID | Type | Status |
+|-----------|-----|------|--------|
+| VendorName | 0x0001 | string | ✅ Implemented |
+| ProductName | 0x0003 | string | ✅ Implemented |
+| NodeLabel | 0x0005 | string | ✅ Implemented |
+| HardwareVersion | 0x0007 | u16 | ✅ Implemented |
+| SoftwareVersion | 0x0009 | u32 | ✅ Implemented |
+| SerialNumber | 0x000F | string | ✅ Implemented |
+| Reachable | 0x0011 | bool | ✅ Implemented |
+
+**Current W100 Setup (main.rs:168-181):**
 
 ```rust
-VirtualDevice::new(VirtualDeviceType::TemperatureSensor, "Tim Thermometer")
+VirtualDevice::new("Tim Thermometer")
     .with_device_info(
         BridgedDeviceInfo::new("Tim Thermometer")
             .with_vendor("Aqara")
-            .with_product("Climate Sensor W100")
-            .with_serial_number("54EF441001421FB0")
+            .with_product("Climate Sensor W100"),
     )
-    .with_endpoint(EndpointConfig::temperature_sensor("Temperature", temp_sensor))
-    .with_endpoint(EndpointConfig::humidity_sensor("Humidity", humidity_sensor))
+    .with_endpoint(EndpointConfig::temperature_sensor("Temperature", w100_temperature.clone()))
+    .with_endpoint(EndpointConfig::humidity_sensor("Humidity", w100_humidity.clone()))
 ```
+
+**Also Implemented:** State request on startup (`integration.rs:222-239`) - bridge now requests current state from W100 immediately after subscribing, avoiding stale default values.
 
 ---
 
-## Phase 2: GenericSwitch Cluster (FOR BUTTON EVENTS)
+## Phase 2: GenericSwitch Cluster (FOR BUTTON EVENTS) - ⛔ BLOCKED
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                          ║
-║  !!!!! UNVERIFIED CLAIM - MUST BE CHECKED VIA WEB SEARCH BEFORE IMPLEMENTATION !!!!!    ║
+║  ⛔ VERIFIED BLOCKER (2026-01-14)                                                        ║
 ║                                                                                          ║
-║  THE PLAN AGENT CLAIMED: "rs-matter does NOT support Matter events yet - events are     ║
-║  listed as 'next steps' in the rs-matter README"                                        ║
+║  rs-matter does NOT support Matter events yet.                                          ║
 ║                                                                                          ║
-║  THIS CLAIM MAY BE WRONG, OUTDATED, OR HALLUCINATED BY THE AI.                          ║
+║  Verified via: https://github.com/project-chip/rs-matter README                         ║
+║  Under "Next steps" it explicitly states: "Support for Events" as a future objective.   ║
 ║                                                                                          ║
-║  BEFORE IMPLEMENTING GenericSwitch, YOU MUST WEB SEARCH TO VERIFY:                      ║
-║  - Search "rs-matter matter events support"                                             ║
-║  - Check https://github.com/project-chip/rs-matter README and issues                    ║
-║  - Search rs-matter issues/PRs for "event" or "GenericSwitch"                           ║
-║  - Check recent commits for event-related changes                                       ║
+║  GenericSwitch REQUIRES Matter events (InitialPress, ShortRelease, MultiPressComplete)  ║
+║  to function. Without event support, button presses cannot be exposed to Home Assistant.║
 ║                                                                                          ║
-║  DO NOT TRUST THE AI CLAIM WITHOUT VERIFICATION!                                        ║
+║  CURRENT STATE:                                                                          ║
+║  - Button actions ARE parsed from MQTT (integration.rs:112-114, 122-125)                ║
+║  - Button actions ARE logged to console                                                 ║
+║  - Button actions CANNOT be forwarded to Matter (no event support)                      ║
+║                                                                                          ║
+║  ALTERNATIVES:                                                                           ║
+║  1. Skip buttons until rs-matter adds event support                                     ║
+║  2. Hacky workaround: Expose buttons as OnOff switches that briefly toggle              ║
+║  3. Use MQTT directly from Home Assistant for button automations (bypasses Matter)      ║
 ║                                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════╝
 ```
 
-This is a PLATFORM-WIDE improvement. The `GenericSwitchHandler` is REUSABLE for ANY device with buttons, not just W100.
+This would be a PLATFORM-WIDE improvement. The `GenericSwitchHandler` would be REUSABLE for ANY device with buttons, not just W100.
 
 ### GenericSwitch Cluster Details
 
