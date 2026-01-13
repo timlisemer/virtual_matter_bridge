@@ -29,8 +29,8 @@ use rs_matter::dm::endpoints;
 use rs_matter::dm::subscriptions::DefaultSubscriptions;
 use rs_matter::dm::{
     Async, Cluster, Context, DataModel, Dataver, DeviceType, EmptyHandler, Endpoint, EpClMatcher,
-    Handler, InvokeContext, Matcher, Node, NonBlockingHandler, ReadContext, ReadReply, Reply,
-    WriteContext,
+    Handler, InvokeContext, InvokeReply, Matcher, Node, NonBlockingHandler, ReadContext, ReadReply,
+    Reply, WriteContext,
 };
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
@@ -317,6 +317,58 @@ impl Handler for DynamicHandler {
                     write_device_onoff(dataver, switch, ctx)
                 }
                 _ => Err(rs_matter::error::ErrorCode::UnsupportedAccess.into()),
+            }
+        } else {
+            Err(rs_matter::error::ErrorCode::ClusterNotFound.into())
+        }
+    }
+
+    fn invoke(&self, ctx: impl InvokeContext, _reply: impl InvokeReply) -> Result<(), Error> {
+        let cmd = ctx.cmd();
+        let ep = cmd.endpoint_id;
+        let cl = cmd.cluster_id;
+        let cmd_id = cmd.cmd_id;
+
+        if let Some(entry) = self.handlers.get(&(ep, cl)) {
+            match entry {
+                DynamicHandlerEntry::OnOff { bridge, .. } => {
+                    // OnOff cluster commands: Off=0x00, On=0x01, Toggle=0x02
+                    match cmd_id {
+                        0x00 => {
+                            bridge.set(false);
+                            Ok(())
+                        }
+                        0x01 => {
+                            bridge.set(true);
+                            Ok(())
+                        }
+                        0x02 => {
+                            bridge.toggle();
+                            Ok(())
+                        }
+                        _ => Err(rs_matter::error::ErrorCode::CommandNotFound.into()),
+                    }
+                }
+                DynamicHandlerEntry::DeviceOnOff { switch, .. } => {
+                    // Parent device switch - uses OnOffHooks trait methods
+                    match cmd_id {
+                        0x00 => {
+                            switch.set_on_off(false);
+                            Ok(())
+                        }
+                        0x01 => {
+                            switch.set_on_off(true);
+                            Ok(())
+                        }
+                        0x02 => {
+                            let new_val = !switch.on_off();
+                            switch.set_on_off(new_val);
+                            Ok(())
+                        }
+                        _ => Err(rs_matter::error::ErrorCode::CommandNotFound.into()),
+                    }
+                }
+                _ => Err(rs_matter::error::ErrorCode::CommandNotFound.into()),
             }
         } else {
             Err(rs_matter::error::ErrorCode::ClusterNotFound.into())
@@ -1163,6 +1215,13 @@ pub async fn run_matter_stack(
                 }
                 EndpointKind::Switch | EndpointKind::LightSwitch => {
                     let bridge = SwitchBridge::new(ep_config.handler.clone());
+                    // Set notifier for switch subscription updates
+                    bridge.set_notifier(ClusterNotifier::new(
+                        sensor_notify_ref,
+                        child_id,
+                        Switch::CLUSTER.id,
+                    ));
+                    notification_endpoints.push((child_id, Switch::CLUSTER.id));
                     // Add child switch to parent's cascade list
                     device_switch.add_child_switch(bridge.clone());
                     dynamic_handler.add_onoff(child_id, Dataver::new_rand(matter.rand()), bridge);
