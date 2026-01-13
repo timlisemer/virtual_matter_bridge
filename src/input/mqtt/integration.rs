@@ -5,7 +5,7 @@
 
 use super::client::{MqttClient, MqttMessage};
 use crate::config::MqttConfig;
-use crate::matter::clusters::{HumiditySensor, TemperatureSensor};
+use crate::matter::clusters::{GenericSwitchState, HumiditySensor, TemperatureSensor};
 use log::{info, warn};
 use rumqttc::QoS;
 use std::sync::Arc;
@@ -21,6 +21,10 @@ pub struct W100Config {
     pub temperature_sensor: Arc<TemperatureSensor>,
     /// Shared humidity sensor (also used by Matter)
     pub humidity_sensor: Arc<HumiditySensor>,
+    /// Shared button states for Plus/Minus/Center buttons (also used by Matter)
+    pub button_plus: Option<Arc<GenericSwitchState>>,
+    pub button_minus: Option<Arc<GenericSwitchState>>,
+    pub button_center: Option<Arc<GenericSwitchState>>,
 }
 
 impl W100Config {
@@ -34,7 +38,23 @@ impl W100Config {
             friendly_name: friendly_name.into(),
             temperature_sensor,
             humidity_sensor,
+            button_plus: None,
+            button_minus: None,
+            button_center: None,
         }
+    }
+
+    /// Add button state handlers for Matter GenericSwitch integration.
+    pub fn with_buttons(
+        mut self,
+        plus: Arc<GenericSwitchState>,
+        minus: Arc<GenericSwitchState>,
+        center: Arc<GenericSwitchState>,
+    ) -> Self {
+        self.button_plus = Some(plus);
+        self.button_minus = Some(minus);
+        self.button_center = Some(center);
+        self
     }
 }
 
@@ -43,6 +63,9 @@ struct W100Device {
     friendly_name: String,
     temperature_sensor: Arc<TemperatureSensor>,
     humidity_sensor: Arc<HumiditySensor>,
+    button_plus: Option<Arc<GenericSwitchState>>,
+    button_minus: Option<Arc<GenericSwitchState>>,
+    button_center: Option<Arc<GenericSwitchState>>,
 }
 
 impl W100Device {
@@ -122,6 +145,89 @@ impl W100Device {
     fn process_action_message(&self, payload: &str) {
         let action = payload.trim();
         info!("[MQTT] {} button action: {}", self.friendly_name, action);
+
+        // Map W100 actions to GenericSwitch events
+        match action {
+            // Single press
+            "single_plus" => {
+                if let Some(btn) = &self.button_plus {
+                    btn.single_press();
+                    info!("[Matter] Button Plus: single press event emitted");
+                }
+            }
+            "single_minus" => {
+                if let Some(btn) = &self.button_minus {
+                    btn.single_press();
+                    info!("[Matter] Button Minus: single press event emitted");
+                }
+            }
+            "single_center" | "single" => {
+                if let Some(btn) = &self.button_center {
+                    btn.single_press();
+                    info!("[Matter] Button Center: single press event emitted");
+                }
+            }
+            // Double press
+            "double_plus" => {
+                if let Some(btn) = &self.button_plus {
+                    btn.double_press();
+                    info!("[Matter] Button Plus: double press event emitted");
+                }
+            }
+            "double_minus" => {
+                if let Some(btn) = &self.button_minus {
+                    btn.double_press();
+                    info!("[Matter] Button Minus: double press event emitted");
+                }
+            }
+            "double_center" | "double" => {
+                if let Some(btn) = &self.button_center {
+                    btn.double_press();
+                    info!("[Matter] Button Center: double press event emitted");
+                }
+            }
+            // Hold (long press)
+            "hold_plus" => {
+                if let Some(btn) = &self.button_plus {
+                    btn.hold_start();
+                    info!("[Matter] Button Plus: hold start event emitted");
+                }
+            }
+            "hold_minus" => {
+                if let Some(btn) = &self.button_minus {
+                    btn.hold_start();
+                    info!("[Matter] Button Minus: hold start event emitted");
+                }
+            }
+            "hold_center" | "hold" => {
+                if let Some(btn) = &self.button_center {
+                    btn.hold_start();
+                    info!("[Matter] Button Center: hold start event emitted");
+                }
+            }
+            // Release (after hold)
+            "release_plus" => {
+                if let Some(btn) = &self.button_plus {
+                    btn.hold_release();
+                    info!("[Matter] Button Plus: release event emitted");
+                }
+            }
+            "release_minus" => {
+                if let Some(btn) = &self.button_minus {
+                    btn.hold_release();
+                    info!("[Matter] Button Minus: release event emitted");
+                }
+            }
+            "release_center" | "release" => {
+                if let Some(btn) = &self.button_center {
+                    btn.hold_release();
+                    info!("[Matter] Button Center: release event emitted");
+                }
+            }
+            _ => {
+                warn!("[MQTT] Unknown W100 action: {}", action);
+            }
+        }
     }
 }
 
@@ -149,6 +255,9 @@ impl MqttIntegration {
             friendly_name: config.friendly_name,
             temperature_sensor: config.temperature_sensor,
             humidity_sensor: config.humidity_sensor,
+            button_plus: config.button_plus,
+            button_minus: config.button_minus,
+            button_center: config.button_center,
         });
         self
     }

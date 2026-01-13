@@ -3,7 +3,7 @@
 //! A Virtual Device represents a parent endpoint with one or more child Endpoints.
 //! This module provides the configuration types needed to define devices at startup.
 
-use super::clusters::{BridgedDeviceInfo, HumiditySensor, TemperatureSensor};
+use super::clusters::{BridgedDeviceInfo, GenericSwitchState, HumiditySensor, TemperatureSensor};
 use super::endpoints::EndpointHandler;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -27,6 +27,8 @@ pub enum EndpointKind {
     TemperatureSensor,
     /// Humidity sensor using RelativeHumidityMeasurement cluster (0x0405)
     HumiditySensor,
+    /// Generic switch using GenericSwitch cluster (0x003B) - for buttons
+    GenericSwitch,
 }
 
 /// Configuration for a child endpoint within a Virtual Device.
@@ -44,6 +46,8 @@ pub struct EndpointConfig {
     pub temperature_sensor: Option<Arc<TemperatureSensor>>,
     /// Optional humidity sensor (for HumiditySensor endpoints)
     pub humidity_sensor: Option<Arc<HumiditySensor>>,
+    /// Optional generic switch state (for GenericSwitch endpoints)
+    pub generic_switch_state: Option<Arc<GenericSwitchState>>,
 }
 
 impl EndpointConfig {
@@ -57,6 +61,7 @@ impl EndpointConfig {
             handler,
             temperature_sensor: None,
             humidity_sensor: None,
+            generic_switch_state: None,
         }
     }
 
@@ -70,6 +75,7 @@ impl EndpointConfig {
             handler,
             temperature_sensor: None,
             humidity_sensor: None,
+            generic_switch_state: None,
         }
     }
 
@@ -83,6 +89,7 @@ impl EndpointConfig {
             handler,
             temperature_sensor: None,
             humidity_sensor: None,
+            generic_switch_state: None,
         }
     }
 
@@ -96,6 +103,7 @@ impl EndpointConfig {
             handler,
             temperature_sensor: None,
             humidity_sensor: None,
+            generic_switch_state: None,
         }
     }
 
@@ -109,6 +117,7 @@ impl EndpointConfig {
             handler,
             temperature_sensor: None,
             humidity_sensor: None,
+            generic_switch_state: None,
         }
     }
 
@@ -125,6 +134,7 @@ impl EndpointConfig {
             handler,
             temperature_sensor: Some(sensor),
             humidity_sensor: None,
+            generic_switch_state: None,
         }
     }
 
@@ -141,6 +151,24 @@ impl EndpointConfig {
             handler,
             temperature_sensor: None,
             humidity_sensor: Some(sensor),
+            generic_switch_state: None,
+        }
+    }
+
+    /// Create a generic switch endpoint (GenericSwitch cluster).
+    ///
+    /// Used for physical buttons that emit press/release events.
+    /// The state Arc can be cloned and used to trigger button events from external sources.
+    pub fn generic_switch(label: &'static str, state: Arc<GenericSwitchState>) -> Self {
+        // Create a dummy handler - not used for generic switches
+        let handler = Arc::new(DummyHandler);
+        Self {
+            label,
+            kind: EndpointKind::GenericSwitch,
+            handler,
+            temperature_sensor: None,
+            humidity_sensor: None,
+            generic_switch_state: Some(state),
         }
     }
 }

@@ -1,12 +1,13 @@
 use super::clusters::{
-    BooleanStateHandler, BridgedDeviceInfo, BridgedHandler, OccupancySensingHandler,
-    RelativeHumidityHandler, TemperatureMeasurementHandler, TimeSyncHandler,
+    BooleanStateHandler, BridgedDeviceInfo, BridgedHandler, GenericSwitchHandler,
+    OccupancySensingHandler, RelativeHumidityHandler, TemperatureMeasurementHandler,
+    TimeSyncHandler,
 };
 use super::device_info::DEV_INFO;
 use super::device_types::{
-    DEV_TYPE_AGGREGATOR, DEV_TYPE_BRIDGED_NODE, DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_HUMIDITY_SENSOR,
-    DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_ON_OFF_PLUG_IN_UNIT,
-    DEV_TYPE_TEMPERATURE_SENSOR, DEV_TYPE_VIDEO_DOORBELL,
+    DEV_TYPE_AGGREGATOR, DEV_TYPE_BRIDGED_NODE, DEV_TYPE_CONTACT_SENSOR, DEV_TYPE_GENERIC_SWITCH,
+    DEV_TYPE_HUMIDITY_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_ON_OFF_LIGHT,
+    DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_TEMPERATURE_SENSOR, DEV_TYPE_VIDEO_DOORBELL,
 };
 use super::endpoints::controls::{DeviceSwitch, LightSwitch, Switch};
 use super::handler_bridge::{SensorBridge, SwitchBridge};
@@ -57,7 +58,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use super::clusters::{
-    boolean_state, occupancy_sensing, relative_humidity, temperature_measurement,
+    boolean_state, generic_switch, occupancy_sensing, relative_humidity, temperature_measurement,
 };
 use super::endpoints::{ClusterNotifier, NotifiableSensor};
 use crate::config::MatterConfig;
@@ -170,6 +171,8 @@ enum DynamicHandlerEntry {
     },
     /// RelativeHumidityMeasurement cluster handler
     Humidity { handler: RelativeHumidityHandler },
+    /// GenericSwitch cluster handler (for buttons)
+    GenericSwitch { handler: GenericSwitchHandler },
 }
 
 /// Dynamic handler that routes requests based on (endpoint_id, cluster_id).
@@ -254,6 +257,13 @@ impl DynamicHandler {
             DynamicHandlerEntry::Humidity { handler },
         );
     }
+
+    pub fn add_generic_switch(&mut self, ep: u16, handler: GenericSwitchHandler) {
+        self.handlers.insert(
+            (ep, generic_switch::CLUSTER_ID),
+            DynamicHandlerEntry::GenericSwitch { handler },
+        );
+    }
 }
 
 impl Default for DynamicHandler {
@@ -295,6 +305,7 @@ impl Handler for DynamicHandler {
                 DynamicHandlerEntry::Bridged { handler } => handler.read(ctx, reply),
                 DynamicHandlerEntry::Temperature { handler } => handler.read(ctx, reply),
                 DynamicHandlerEntry::Humidity { handler } => handler.read(ctx, reply),
+                DynamicHandlerEntry::GenericSwitch { handler } => handler.read(ctx, reply),
             }
         } else {
             log::debug!(
@@ -884,6 +895,14 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
                             RelativeHumidityHandler::CLUSTER
                         ),
                     ),
+                    EndpointKind::GenericSwitch => (
+                        leak_slice(&[DEV_TYPE_GENERIC_SWITCH]),
+                        clusters!(
+                            desc::DescHandler::CLUSTER,
+                            BridgedHandler::CLUSTER,
+                            GenericSwitchHandler::CLUSTER
+                        ),
+                    ),
                 };
 
             endpoints_vec.push(Endpoint {
@@ -1262,6 +1281,27 @@ pub async fn run_matter_stack(
                     } else {
                         log::warn!(
                             "HumiditySensor endpoint {} missing sensor in config",
+                            child_id
+                        );
+                    }
+                }
+                EndpointKind::GenericSwitch => {
+                    // Use state from EndpointConfig (created by caller)
+                    if let Some(state) = &ep_config.generic_switch_state {
+                        // Set endpoint ID so events know where they came from
+                        state.set_endpoint_id(child_id);
+                        let handler = GenericSwitchHandler::new(
+                            Dataver::new_rand(matter.rand()),
+                            state.clone(),
+                        );
+                        dynamic_handler.add_generic_switch(child_id, handler);
+                        info!(
+                            "[Matter] GenericSwitch endpoint {} registered for '{}'",
+                            child_id, ep_config.label
+                        );
+                    } else {
+                        log::warn!(
+                            "GenericSwitch endpoint {} missing state in config",
                             child_id
                         );
                     }

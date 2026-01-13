@@ -686,35 +686,33 @@ VirtualDevice::new("Tim Thermometer")
 
 ---
 
-## Phase 2: GenericSwitch Cluster (FOR BUTTON EVENTS) - ⛔ BLOCKED
+## Phase 2: GenericSwitch Cluster (FOR BUTTON EVENTS) - ✅ INFRASTRUCTURE COMPLETE (2026-01-14)
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                          ║
-║  ⛔ VERIFIED BLOCKER (2026-01-14)                                                        ║
+║  ✅ INFRASTRUCTURE IMPLEMENTED - AWAITING rs-matter EVENT SUPPORT                        ║
 ║                                                                                          ║
-║  rs-matter does NOT support Matter events yet.                                          ║
+║  We implemented a temporary Matter events shim to prepare for when rs-matter adds       ║
+║  native event support (Issue #36, open since March 2023).                               ║
 ║                                                                                          ║
-║  Verified via: https://github.com/project-chip/rs-matter README                         ║
-║  Under "Next steps" it explicitly states: "Support for Events" as a future objective.   ║
+║  IMPLEMENTED:                                                                            ║
+║  - Event TLV structures: EventPath, EventDataIB, EventPriority (src/matter/events/)    ║
+║  - GenericSwitch cluster handler (src/matter/clusters/generic_switch.rs)                ║
+║  - GenericSwitchState with event queue (press, release, double_press, hold)            ║
+║  - DEV_TYPE_GENERIC_SWITCH (0x000F) device type                                         ║
+║  - EndpointKind::GenericSwitch and factory method                                       ║
+║  - W100 button integration: Plus, Minus, Center endpoints                               ║
+║  - MQTT action → GenericSwitch event mapping in integration.rs                          ║
 ║                                                                                          ║
-║  GenericSwitch REQUIRES Matter events (InitialPress, ShortRelease, MultiPressComplete)  ║
-║  to function. Without event support, button presses cannot be exposed to Home Assistant.║
-║                                                                                          ║
-║  CURRENT STATE:                                                                          ║
-║  - Button actions ARE parsed from MQTT (integration.rs:112-114, 122-125)                ║
-║  - Button actions ARE logged to console                                                 ║
-║  - Button actions CANNOT be forwarded to Matter (no event support)                      ║
-║                                                                                          ║
-║  ALTERNATIVES:                                                                           ║
-║  1. Skip buttons until rs-matter adds event support                                     ║
-║  2. Hacky workaround: Expose buttons as OnOff switches that briefly toggle              ║
-║  3. Use MQTT directly from Home Assistant for button automations (bypasses Matter)      ║
+║  AWAITING:                                                                               ║
+║  - rs-matter native event support (events are queued but not yet reported to Matter)    ║
+║  - Once rs-matter adds events, replace shim with native implementation                  ║
 ║                                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════╝
 ```
 
-This would be a PLATFORM-WIDE improvement. The `GenericSwitchHandler` would be REUSABLE for ANY device with buttons, not just W100.
+This is a PLATFORM-WIDE improvement. The `GenericSwitchHandler` is REUSABLE for ANY device with buttons, not just W100.
 
 ### GenericSwitch Cluster Details
 

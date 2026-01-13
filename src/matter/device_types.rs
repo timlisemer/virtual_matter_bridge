@@ -150,3 +150,19 @@ pub const DEV_TYPE_HUMIDITY_SENSOR: DeviceType = DeviceType {
     dtype: 0x0307,
     drev: 2,
 };
+
+/// Matter Generic Switch device type
+///
+/// Device Type ID: 0x000F (15 decimal)
+/// Device Type Revision: 2
+///
+/// Required clusters:
+/// - GenericSwitch (0x003B)
+/// - Descriptor (standard)
+///
+/// Used for physical switches/buttons that emit events.
+/// Features: MS (Momentary Switch), MSR (Momentary Switch Release), MSM (Multi Press)
+pub const DEV_TYPE_GENERIC_SWITCH: DeviceType = DeviceType {
+    dtype: 0x000F,
+    drev: 2,
+};

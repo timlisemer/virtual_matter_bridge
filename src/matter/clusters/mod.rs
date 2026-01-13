@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub mod boolean_state;
 pub mod bridged_device_basic_info;
 pub mod camera_av_stream_mgmt;
+pub mod generic_switch;
 pub mod occupancy_sensing;
 pub mod relative_humidity;
 pub mod temperature_measurement;
@@ -23,6 +24,7 @@ pub mod webrtc_transport_provider;
 // Re-export for convenience
 pub use boolean_state::BooleanStateHandler;
 pub use bridged_device_basic_info::{BridgedDeviceInfo, BridgedHandler};
+pub use generic_switch::{GenericSwitchHandler, GenericSwitchState};
 pub use occupancy_sensing::OccupancySensingHandler;
 pub use relative_humidity::{HumiditySensor, RelativeHumidityHandler};
 pub use temperature_measurement::{TemperatureMeasurementHandler, TemperatureSensor};

@@ -7,6 +7,7 @@ mod stack;
 pub mod clusters;
 pub mod device_types;
 pub mod endpoints;
+pub mod events;
 pub mod handler_bridge;
 pub mod virtual_device;
 

@@ -15,7 +15,9 @@ mod matter;
 use crate::config::Config;
 use crate::input::camera::CameraInput;
 use crate::input::mqtt::{MqttIntegration, W100Config};
-use crate::matter::clusters::{BridgedDeviceInfo, HumiditySensor, TemperatureSensor};
+use crate::matter::clusters::{
+    BridgedDeviceInfo, GenericSwitchState, HumiditySensor, TemperatureSensor,
+};
 use crate::matter::endpoints::EndpointHandler;
 use crate::matter::{EndpointConfig, VirtualDevice};
 use log::info;
@@ -138,6 +140,10 @@ async fn main() {
     // Create W100 climate sensors (will be updated by MQTT)
     let w100_temperature = Arc::new(TemperatureSensor::new(20.0)); // Default 20°C
     let w100_humidity = Arc::new(HumiditySensor::new(50.0)); // Default 50%
+    // W100 button states (Plus, Minus, Center buttons)
+    let w100_button_plus = Arc::new(GenericSwitchState::new());
+    let w100_button_minus = Arc::new(GenericSwitchState::new());
+    let w100_button_center = Arc::new(GenericSwitchState::new());
 
     // Define our virtual devices using the new API
     let virtual_devices = vec![
@@ -178,6 +184,18 @@ async fn main() {
             .with_endpoint(EndpointConfig::humidity_sensor(
                 "Humidity",
                 w100_humidity.clone(),
+            ))
+            .with_endpoint(EndpointConfig::generic_switch(
+                "Button Plus",
+                w100_button_plus.clone(),
+            ))
+            .with_endpoint(EndpointConfig::generic_switch(
+                "Button Minus",
+                w100_button_minus.clone(),
+            ))
+            .with_endpoint(EndpointConfig::generic_switch(
+                "Button Center",
+                w100_button_center.clone(),
             )),
     ];
 
@@ -212,11 +230,18 @@ async fn main() {
 
     // Start MQTT integration for W100 climate sensor (self-contained!)
     let mqtt_task = MqttIntegration::new(mqtt_config)
-        .with_w100(W100Config::new(
-            "Tim-Thermometer",
-            w100_temperature.clone(),
-            w100_humidity.clone(),
-        ))
+        .with_w100(
+            W100Config::new(
+                "Tim-Thermometer",
+                w100_temperature.clone(),
+                w100_humidity.clone(),
+            )
+            .with_buttons(
+                w100_button_plus.clone(),
+                w100_button_minus.clone(),
+                w100_button_center.clone(),
+            ),
+        )
         .start();
 
     // Start Matter stack in a separate thread
