@@ -1091,9 +1091,20 @@ pub async fn run_matter_stack(
             let url = server_url.clone();
             let discriminator = config.discriminator;
             let passcode = config.passcode;
+            let vendor_id = config.vendor_id;
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
+                    // If schema was reset, clean up old nodes from controller first
+                    if schema_reset {
+                        info!("Schema changed, cleaning up old nodes from controller");
+                        if let Err(e) =
+                            crate::commissioning::remove_bridge_nodes(&url, vendor_id).await
+                        {
+                            log::warn!("Failed to cleanup old nodes: {}", e);
+                        }
+                    }
+
                     match crate::commissioning::auto_commission(&url, discriminator, passcode).await
                     {
                         Ok(()) => {

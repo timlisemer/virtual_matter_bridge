@@ -91,6 +91,148 @@ fn verhoeff_checksum(input: &str) -> u8 {
     INV[c as usize]
 }
 
+/// Remove existing bridge nodes from python-matter-server.
+///
+/// This should be called before re-commissioning after a schema change
+/// to clean up orphaned device entries from the controller.
+///
+/// Returns the number of nodes removed.
+pub async fn remove_bridge_nodes(
+    server_url: &str,
+    vendor_id: u16,
+) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+    info!(
+        "[Commission] Connecting to {} to cleanup old nodes",
+        server_url
+    );
+
+    let (ws_stream, _) = connect_async(server_url)
+        .await
+        .map_err(|e| format!("Failed to connect to {}: {}", server_url, e))?;
+
+    let (mut write, mut read) = ws_stream.split();
+
+    // Get list of all nodes
+    let request = WsRequest {
+        message_id: "get-nodes".to_string(),
+        command: "get_nodes".to_string(),
+        args: None,
+    };
+
+    write
+        .send(Message::Text(serde_json::to_string(&request)?.into()))
+        .await?;
+
+    // Wait for response
+    let nodes_response = tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(msg) = read.next().await {
+            if let Ok(Message::Text(text)) = msg {
+                let text_str: &str = &text;
+                if let Ok(response) = serde_json::from_str::<WsResponse>(text_str)
+                    && response.message_id == "get-nodes"
+                {
+                    return Some(response);
+                }
+            }
+        }
+        None
+    })
+    .await
+    .map_err(|_| "Timeout waiting for get_nodes response")?
+    .ok_or("Connection closed")?;
+
+    // Parse nodes and find ones matching our vendor ID
+    let nodes = nodes_response.result.ok_or("No nodes in response")?;
+    let nodes_array = nodes.as_array().ok_or("Nodes is not an array")?;
+
+    let mut removed_count = 0u32;
+    for node in nodes_array {
+        // Extract node_id and vendor_id from the node data
+        let node_id = node.get("node_id").and_then(|v| v.as_u64());
+        let node_vendor_id = node
+            .get("attributes")
+            .and_then(|a| a.get("0"))
+            .and_then(|ep| ep.get("40"))
+            .and_then(|basic| basic.get("1"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u16);
+
+        if let (Some(nid), Some(vid)) = (node_id, node_vendor_id)
+            && vid == vendor_id
+        {
+            info!(
+                "[Commission] Removing old bridge node {} (vendor_id={:#06x})",
+                nid, vid
+            );
+
+            let remove_request = WsRequest {
+                message_id: format!("remove-{}", nid),
+                command: "remove_node".to_string(),
+                args: Some(serde_json::json!({ "node_id": nid })),
+            };
+
+            if let Err(e) = write
+                .send(Message::Text(
+                    serde_json::to_string(&remove_request)?.into(),
+                ))
+                .await
+            {
+                warn!(
+                    "[Commission] Failed to send remove request for node {}: {}",
+                    nid, e
+                );
+                continue;
+            }
+
+            // Wait for remove response
+            let remove_timeout = tokio::time::timeout(Duration::from_secs(30), async {
+                while let Some(msg) = read.next().await {
+                    if let Ok(Message::Text(text)) = msg {
+                        let text_str: &str = &text;
+                        if let Ok(response) = serde_json::from_str::<WsResponse>(text_str)
+                            && response.message_id == format!("remove-{}", nid)
+                        {
+                            return Some(response);
+                        }
+                    }
+                }
+                None
+            })
+            .await;
+
+            match remove_timeout {
+                Ok(Some(response)) if response.error_code.is_none() => {
+                    info!("[Commission] Successfully removed node {}", nid);
+                    removed_count += 1;
+                }
+                Ok(Some(response)) => {
+                    warn!(
+                        "[Commission] Failed to remove node {}: {:?}",
+                        nid, response.details
+                    );
+                }
+                Ok(None) => {
+                    warn!("[Commission] Connection closed while removing node {}", nid);
+                }
+                Err(_) => {
+                    warn!("[Commission] Timeout removing node {}", nid);
+                }
+            }
+        }
+    }
+
+    if removed_count > 0 {
+        info!(
+            "[Commission] Removed {} old bridge node(s) from controller",
+            removed_count
+        );
+    } else {
+        info!("[Commission] No old bridge nodes found to remove");
+    }
+
+    Ok(removed_count)
+}
+
 /// Auto-commission the bridge to python-matter-server.
 ///
 /// This function waits for the bridge to be ready, then connects to
