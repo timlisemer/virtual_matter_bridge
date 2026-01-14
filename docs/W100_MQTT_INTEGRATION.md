@@ -994,6 +994,813 @@ New clusters needed for W100:
 
 ---
 
+## Phase 3: Matter Events Implementation (rs-matter Fork)
+
+This section documents the complete technical approach to implementing Matter event support in rs-matter, enabling GenericSwitch button events to reach Home Assistant.
+
+### Problem Statement
+
+rs-matter (as of January 2025) does **not support Matter events**. This is tracked in [rs-matter issue #36](https://github.com/project-chip/rs-matter/issues/36), open since March 2023.
+
+**Current blocker**: Button presses on W100 are:
+1. Received via MQTT ✅
+2. Parsed and mapped to GenericSwitch events ✅
+3. Queued in `GenericSwitchState` ✅
+4. **Never sent to Matter controllers** ❌
+
+The events sit in a queue with no code path to include them in Matter subscription reports.
+
+### Solution Overview
+
+Fork rs-matter to `/home/tim/Coding/public_repos/rs-matter` and implement:
+
+1. **EventReportIB TLV structures** - Protocol-level event encoding
+2. **ReportDataResponder enhancement** - Include events in subscription reports
+3. **Event source interface** - Allow handlers to expose pending events
+4. **GenericSwitch integration** - Connect our existing event queue
+
+---
+
+### rs-matter Architecture Overview
+
+#### Repository Structure
+
+```
+rs-matter/
+├── rs-matter/src/
+│   ├── im/                    # Interaction Model (protocol layer)
+│   │   ├── attr.rs            # ReportDataReq, ReportDataResp, EventPath
+│   │   └── mod.rs             # OpCodes, protocol constants
+│   ├── dm/                    # Data Model (application layer)
+│   │   ├── mod.rs             # DataModel, report_data(), ReportDataResponder
+│   │   ├── subscriptions.rs   # Subscription management
+│   │   └── types/
+│   │       ├── handler.rs     # AsyncHandler trait
+│   │       └── node.rs        # Node, Cluster, Endpoint metadata
+│   └── tlv/                   # TLV encoding/decoding
+│       ├── write.rs           # TLVWrite, WriteBuf
+│       └── traits.rs          # FromTLV, ToTLV derive macros
+```
+
+#### Key Data Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         SUBSCRIPTION FLOW                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  1. Controller sends SubscribeRequest                                    │
+│     └─> dm.rs: subscribe() handles request                              │
+│         └─> Creates subscription in DefaultSubscriptions                 │
+│                                                                          │
+│  2. Attribute changes trigger notification                               │
+│     └─> subscriptions.notify_cluster_changed(fabric, node, endpoint)    │
+│         └─> Marks subscription as "changed"                              │
+│                                                                          │
+│  3. Subscription timer fires or change detected                          │
+│     └─> dm.rs: process_subscriptions() loops through subscriptions      │
+│         └─> report_data() called for changed subscriptions              │
+│             └─> ReportDataResponder::respond() builds TLV response      │
+│                 └─> Iterates attr_requests(), encodes AttributeReports  │
+│                 └─> ❌ NO EVENT ITERATION EXISTS                         │
+│                                                                          │
+│  4. ReportData message sent to controller                                │
+│     └─> Contains AttributeReports array                                  │
+│     └─> ❌ EventReports array is MISSING                                 │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### rs-matter Code Analysis
+
+#### File: `rs-matter/src/im/attr.rs`
+
+This file defines the protocol structures for read/subscribe operations.
+
+##### EventPath (lines 208-239) - ALREADY EXISTS
+
+```rust
+#[derive(Debug, Clone, Eq, PartialEq, Hash, FromTLV, ToTLV)]
+#[tlvargs(lifetime = "'a")]
+pub struct EventPath {
+    #[tlvargs(tag = 0)]
+    pub node: Option<u64>,
+    #[tlvargs(tag = 1)]
+    pub endpoint: Option<EndptId>,
+    #[tlvargs(tag = 2)]
+    pub cluster: Option<ClusterId>,
+    #[tlvargs(tag = 3)]
+    pub event: Option<u32>,
+    #[tlvargs(tag = 4)]
+    pub is_urgent: Option<bool>,
+}
+```
+
+This is already implemented and usable - no changes needed.
+
+##### ReportDataResp (lines 284-290) - NEEDS MODIFICATION
+
+```rust
+#[derive(FromTLV, ToTLV, Debug)]
+#[tlvargs(lifetime = "'a")]
+pub struct ReportDataResp<'a> {
+    pub subscription_id: Option<u32>,
+    pub attr_reports: Option<TLVArray<'a, AttrResp<'a>>>,
+    pub event_reports: Option<bool>,  // ❌ STUB - just a bool!
+    pub more_chunks: Option<bool>,
+    pub suppress_response: Option<bool>,
+}
+```
+
+**Problem**: `event_reports` is `Option<bool>` instead of `Option<TLVArray<EventReportIB>>`.
+
+##### ReportDataRespTag (lines 296-306) - EXISTS BUT UNDERSCORE PREFIX
+
+```rust
+#[repr(u8)]
+pub enum ReportDataRespTag {
+    SubscriptionId = 0,
+    AttributeReports = 1,
+    _EventReport = 2,      // Note underscore - treated as unused
+    MoreChunkedMsgs = 3,
+    SupressResponse = 4,
+}
+```
+
+The `_EventReport` tag exists but is never used in the codebase.
+
+##### ReportDataReq Methods (lines 250-275) - EVENT METHODS EXIST BUT UNUSED
+
+```rust
+impl<'a> ReportDataReq<'a> {
+    // Used extensively:
+    pub fn attr_requests(&self) -> Result<Option<TLVArray<'a, AttrPath>>, Error>
+    pub fn dataver_filters(&self) -> Result<Option<TLVArray<'a, DataVersionFilter>>, Error>
+
+    // EXIST but NEVER CALLED:
+    pub fn event_requests(&self) -> Result<Option<TLVArray<'a, EventPath>>, Error>
+    pub fn event_filters(&self) -> Result<Option<TLVArray<'a, EventFilter>>, Error>
+}
+```
+
+The infrastructure to parse event requests from controllers exists, but nothing uses it.
+
+---
+
+#### File: `rs-matter/src/dm.rs`
+
+This file contains the data model logic and the critical `ReportDataResponder`.
+
+##### ReportDataResponder Structure (lines 813-818)
+
+```rust
+struct ReportDataResponder<'a, 'b, 'c, D, B> {
+    req: &'a ReportDataReq<'a>,
+    node: &'a Node<'a>,
+    subscription_id: Option<u32>,
+    invoker: HandlerInvoker<'b, 'c, D, B>,
+}
+```
+
+##### ReportDataResponder::respond() - THE CRITICAL METHOD
+
+Location: `rs-matter/src/dm.rs` lines ~847-1100
+
+This is where attribute reports are serialized. The pattern we must replicate for events:
+
+```rust
+// Simplified flow of respond() method:
+
+async fn respond(&mut self, exchange: &mut Exchange<'_>) -> Result<(), Error> {
+    loop {
+        // Get buffer for writing response
+        let mut wb = exchange.writer()?;
+
+        // Start ReportData structure
+        wb.start_struct(&TLVTag::Anonymous)?;
+
+        // Write subscription ID if present
+        if let Some(id) = self.subscription_id {
+            wb.u32(&TLVTag::Context(ReportDataRespTag::SubscriptionId as u8), id)?;
+        }
+
+        // Check if there are attribute requests
+        let has_attr_requests = self.req.attr_requests()?.is_some();
+
+        if has_attr_requests {
+            // Start AttributeReports array (tag = 1)
+            wb.start_array(&TLVTag::Context(ReportDataRespTag::AttributeReports as u8))?;
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // ATTRIBUTE ITERATION LOOP (lines ~920-1020)
+        // This is the pattern we need to replicate for events
+        // ═══════════════════════════════════════════════════════════════
+
+        for attr_path in self.req.attr_requests()?.unwrap() {
+            // Expand wildcards via node.read()
+            for (endpoint, cluster, attr) in self.node.read(&attr_path)? {
+                // Get handler for this endpoint/cluster
+                let handler = self.invoker.handler(endpoint, cluster)?;
+
+                // Read attribute value
+                let value = handler.read(attr, &mut wb)?;
+
+                // Write AttributeReportIB structure
+                // ... TLV encoding of path + data + status
+            }
+        }
+
+        if has_attr_requests {
+            // End AttributeReports array
+            wb.end_container()?;
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // ❌ EVENT ITERATION WOULD GO HERE - BUT DOESN'T EXIST
+        // ═══════════════════════════════════════════════════════════════
+
+        // Write more_chunks flag if needed
+        if more_chunks {
+            wb.bool(&TLVTag::Context(ReportDataRespTag::MoreChunkedMsgs as u8), true)?;
+        }
+
+        // Write suppress_response flag
+        if suppress_response {
+            wb.bool(&TLVTag::Context(ReportDataRespTag::SupressResponse as u8), true)?;
+        }
+
+        // End ReportData structure
+        wb.end_container()?;
+
+        // Send response
+        exchange.send(OpCode::ReportData, wb)?;
+
+        if !more_chunks {
+            break;
+        }
+
+        // Wait for StatusResponse before next chunk
+        exchange.recv_status()?;
+    }
+
+    Ok(())
+}
+```
+
+---
+
+#### File: `rs-matter/src/dm/subscriptions.rs`
+
+##### DefaultSubscriptions (lines 20-50)
+
+```rust
+pub struct DefaultSubscriptions<const N: usize> {
+    subscriptions: heapless::Vec<Subscription, N>,
+}
+
+struct Subscription {
+    fabric_idx: u8,
+    peer_node_id: u64,
+    id: u32,
+    min_interval_secs: u16,
+    max_interval_secs: u16,
+    last_report: Option<Instant>,
+    changed: bool,  // Set by notify_cluster_changed()
+}
+```
+
+##### notify_cluster_changed() (lines 138-149)
+
+```rust
+pub fn notify_cluster_changed(
+    &mut self,
+    fabric_idx: u8,
+    peer_node_id: u64,
+    endpoint_id: EndptId,
+) {
+    for sub in &mut self.subscriptions {
+        if sub.fabric_idx == fabric_idx && sub.peer_node_id == peer_node_id {
+            sub.changed = true;  // Marks subscription for report
+        }
+    }
+}
+```
+
+This is called when attributes change. For events, we might need:
+- An `notify_event()` method, OR
+- Re-use `changed` flag (simpler - events just trigger a report cycle)
+
+---
+
+### Matter Event TLV Specification
+
+Based on Matter Core Specification 1.4, Section 10.6.
+
+#### EventReportIB Structure
+
+```
+EventReportIB ::= STRUCTURE {
+    event_status [0, opt]: EventStatusIB,    // For error reporting
+    event_data [1, opt]: EventDataIB,        // Actual event data
+}
+```
+
+#### EventDataIB Structure
+
+```
+EventDataIB ::= STRUCTURE {
+    path [0]: EventPathIB,
+    event_number [1]: UNSIGNED INTEGER (64-bit),
+    priority [2]: UNSIGNED INTEGER (8-bit),
+    // Exactly ONE of the following timestamps:
+    epoch_timestamp [3, opt]: UNSIGNED INTEGER (64-bit),      // Microseconds since Unix epoch
+    system_timestamp [4, opt]: UNSIGNED INTEGER (64-bit),     // Milliseconds since boot
+    delta_epoch_timestamp [5, opt]: UNSIGNED INTEGER (64-bit),
+    delta_system_timestamp [6, opt]: UNSIGNED INTEGER (64-bit),
+    data [7, opt]: ANY,  // Cluster-specific event payload
+}
+```
+
+#### EventPathIB Structure (already in rs-matter)
+
+```
+EventPathIB ::= STRUCTURE {
+    node [0, opt]: UNSIGNED INTEGER (64-bit),
+    endpoint [1, opt]: UNSIGNED INTEGER (16-bit),
+    cluster [2, opt]: UNSIGNED INTEGER (32-bit),
+    event [3, opt]: UNSIGNED INTEGER (32-bit),
+    is_urgent [4, opt]: BOOLEAN,
+}
+```
+
+#### GenericSwitch Event Payloads
+
+| Event ID | Name | Payload |
+|----------|------|---------|
+| 0x00 | SwitchLatched | `{ NewPosition [0]: u8 }` |
+| 0x01 | InitialPress | `{ NewPosition [0]: u8 }` |
+| 0x02 | LongPress | `{ NewPosition [0]: u8 }` |
+| 0x03 | ShortRelease | `{ PreviousPosition [0]: u8 }` |
+| 0x04 | LongRelease | `{ PreviousPosition [0]: u8 }` |
+| 0x05 | MultiPressOngoing | `{ NewPosition [0]: u8, CurrentCount [1]: u8 }` |
+| 0x06 | MultiPressComplete | `{ PreviousPosition [0]: u8, TotalCount [1]: u8 }` |
+
+---
+
+### Implementation Plan
+
+#### Step 1: Clone rs-matter Fork
+
+```bash
+cd /home/tim/Coding/public_repos/
+git clone https://github.com/project-chip/rs-matter.git
+cd rs-matter
+git checkout -b event-support
+```
+
+Update `virtual_matter_bridge/Cargo.toml`:
+```toml
+rs-matter = { path = "../rs-matter/rs-matter", features = ["std", "os", "zbus", "async-io"] }
+```
+
+#### Step 2: Add EventReportIB Structures
+
+**File**: `rs-matter/rs-matter/src/im/attr.rs`
+
+Add after `AttrResp` definition (~line 180):
+
+```rust
+/// Event status for error reporting in event responses.
+#[derive(Debug, Clone, FromTLV, ToTLV)]
+pub struct EventStatusIB {
+    #[tlvargs(tag = 0)]
+    pub path: EventPath,
+    #[tlvargs(tag = 1)]
+    pub status: StatusIB,
+}
+
+/// Single event report in a ReportData response.
+#[derive(Debug, Clone)]
+pub struct EventReportIB<'a> {
+    pub event_status: Option<EventStatusIB>,
+    pub event_data: Option<EventDataIB<'a>>,
+}
+
+/// Event data with path, number, priority, timestamp, and payload.
+#[derive(Debug, Clone)]
+pub struct EventDataIB<'a> {
+    pub path: EventPath,
+    pub event_number: u64,
+    pub priority: u8,
+    pub epoch_timestamp: Option<u64>,
+    pub system_timestamp: Option<u64>,
+    pub data: Option<&'a [u8]>,  // Pre-encoded TLV payload
+}
+
+/// Context tags for EventReportIB
+pub mod EventReportIBTag {
+    pub const EVENT_STATUS: u8 = 0;
+    pub const EVENT_DATA: u8 = 1;
+}
+
+/// Context tags for EventDataIB
+pub mod EventDataIBTag {
+    pub const PATH: u8 = 0;
+    pub const EVENT_NUMBER: u8 = 1;
+    pub const PRIORITY: u8 = 2;
+    pub const EPOCH_TIMESTAMP: u8 = 3;
+    pub const SYSTEM_TIMESTAMP: u8 = 4;
+    pub const DELTA_EPOCH_TIMESTAMP: u8 = 5;
+    pub const DELTA_SYSTEM_TIMESTAMP: u8 = 6;
+    pub const DATA: u8 = 7;
+}
+```
+
+#### Step 3: Implement ToTLV for EventDataIB
+
+**File**: `rs-matter/rs-matter/src/im/attr.rs`
+
+```rust
+impl<'a> ToTLV for EventDataIB<'a> {
+    fn to_tlv<W: TLVWrite>(&self, tag: &TLVTag, tw: &mut W) -> Result<(), Error> {
+        tw.start_struct(tag)?;
+
+        // Path (tag 0) - required
+        self.path.to_tlv(&TLVTag::Context(EventDataIBTag::PATH), tw)?;
+
+        // Event number (tag 1) - required
+        tw.u64(&TLVTag::Context(EventDataIBTag::EVENT_NUMBER), self.event_number)?;
+
+        // Priority (tag 2) - required
+        tw.u8(&TLVTag::Context(EventDataIBTag::PRIORITY), self.priority)?;
+
+        // Timestamp - exactly one required
+        if let Some(ts) = self.epoch_timestamp {
+            tw.u64(&TLVTag::Context(EventDataIBTag::EPOCH_TIMESTAMP), ts)?;
+        } else if let Some(ts) = self.system_timestamp {
+            tw.u64(&TLVTag::Context(EventDataIBTag::SYSTEM_TIMESTAMP), ts)?;
+        }
+
+        // Data payload (tag 7) - optional, pre-encoded TLV
+        if let Some(data) = self.data {
+            tw.raw_value(&TLVTag::Context(EventDataIBTag::DATA), data)?;
+        }
+
+        tw.end_container()
+    }
+}
+
+impl<'a> ToTLV for EventReportIB<'a> {
+    fn to_tlv<W: TLVWrite>(&self, tag: &TLVTag, tw: &mut W) -> Result<(), Error> {
+        tw.start_struct(tag)?;
+
+        if let Some(status) = &self.event_status {
+            status.to_tlv(&TLVTag::Context(EventReportIBTag::EVENT_STATUS), tw)?;
+        }
+
+        if let Some(data) = &self.event_data {
+            data.to_tlv(&TLVTag::Context(EventReportIBTag::EVENT_DATA), tw)?;
+        }
+
+        tw.end_container()
+    }
+}
+```
+
+#### Step 4: Fix ReportDataRespTag
+
+**File**: `rs-matter/rs-matter/src/im/attr.rs` (~line 299)
+
+```rust
+pub enum ReportDataRespTag {
+    SubscriptionId = 0,
+    AttributeReports = 1,
+    EventReports = 2,      // Remove underscore prefix
+    MoreChunkedMsgs = 3,
+    SupressResponse = 4,
+}
+```
+
+#### Step 5: Add Event Source Trait
+
+**File**: `rs-matter/rs-matter/src/dm/types/handler.rs`
+
+Add new trait for handlers that can produce events:
+
+```rust
+/// Trait for handlers that can produce Matter events.
+///
+/// Handlers implementing this trait can queue events that will be
+/// included in subscription reports to controllers.
+pub trait EventSource: Send + Sync {
+    /// Returns pending events and clears the internal queue.
+    ///
+    /// Called during subscription report generation. Events returned
+    /// here will be encoded as EventReportIB structures in the
+    /// ReportData response.
+    ///
+    /// # Returns
+    /// Vector of (event_id, event_number, priority, timestamp_ms, payload_tlv)
+    fn take_pending_events(&self) -> Vec<PendingEvent>;
+
+    /// Check if there are pending events without draining.
+    fn has_pending_events(&self) -> bool;
+}
+
+/// A pending event ready to be reported.
+#[derive(Debug, Clone)]
+pub struct PendingEvent {
+    /// Event ID within the cluster (e.g., 0x01 for InitialPress)
+    pub event_id: u32,
+    /// Monotonically increasing event number (never resets)
+    pub event_number: u64,
+    /// Priority: 0=Debug, 1=Info, 2=Critical
+    pub priority: u8,
+    /// System timestamp in milliseconds since boot
+    pub system_timestamp_ms: u64,
+    /// Pre-encoded TLV payload (cluster-specific event data)
+    pub payload: Vec<u8>,
+}
+```
+
+#### Step 6: Modify ReportDataResponder
+
+**File**: `rs-matter/rs-matter/src/dm.rs`
+
+Add event iteration after attribute reports in `respond()` method.
+
+Location: After the attribute reports `wb.end_container()` call (~line 1020), before `more_chunks` handling:
+
+```rust
+// ═══════════════════════════════════════════════════════════════════════
+// EVENT REPORTS - New code to add
+// ═══════════════════════════════════════════════════════════════════════
+
+// Check if there are event requests in the subscription
+let has_event_requests = self.req.event_requests()?.is_some();
+
+if has_event_requests {
+    // Collect pending events from all endpoints with EventSource handlers
+    let mut all_events: Vec<(EndptId, ClusterId, PendingEvent)> = Vec::new();
+
+    // Iterate through event requests to find matching endpoints/clusters
+    if let Some(event_requests) = self.req.event_requests()? {
+        for event_path in event_requests {
+            // Expand wildcards similar to attr_requests
+            let endpoint_id = event_path.endpoint.unwrap_or(0);  // TODO: wildcard expansion
+            let cluster_id = event_path.cluster.unwrap_or(0);
+
+            // Get handler and check if it implements EventSource
+            if let Ok(handler) = self.invoker.handler(endpoint_id, cluster_id) {
+                if let Some(event_source) = handler.as_event_source() {
+                    for event in event_source.take_pending_events() {
+                        // Filter by event ID if specified
+                        if event_path.event.is_none() || event_path.event == Some(event.event_id) {
+                            all_events.push((endpoint_id, cluster_id, event));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Only write EventReports array if we have events
+    if !all_events.is_empty() {
+        wb.start_array(&TLVTag::Context(ReportDataRespTag::EventReports as u8))?;
+
+        for (endpoint_id, cluster_id, event) in all_events {
+            // Build EventPath
+            let path = EventPath {
+                node: None,
+                endpoint: Some(endpoint_id),
+                cluster: Some(cluster_id),
+                event: Some(event.event_id),
+                is_urgent: None,
+            };
+
+            // Build EventDataIB
+            let event_data = EventDataIB {
+                path,
+                event_number: event.event_number,
+                priority: event.priority,
+                epoch_timestamp: None,
+                system_timestamp: Some(event.system_timestamp_ms),
+                data: if event.payload.is_empty() { None } else { Some(&event.payload) },
+            };
+
+            // Build EventReportIB
+            let report = EventReportIB {
+                event_status: None,
+                event_data: Some(event_data),
+            };
+
+            // Write to TLV
+            report.to_tlv(&TLVTag::Anonymous, &mut wb)?;
+        }
+
+        wb.end_container()?;
+    }
+}
+```
+
+#### Step 7: Add as_event_source() to Handler
+
+**File**: `rs-matter/rs-matter/src/dm/types/handler.rs`
+
+Add to the `AsyncHandler` trait or create a wrapper:
+
+```rust
+/// Extension trait for handlers that can also be event sources.
+pub trait AsyncHandlerExt: AsyncHandler {
+    /// Returns this handler as an EventSource if it implements the trait.
+    fn as_event_source(&self) -> Option<&dyn EventSource> {
+        None  // Default implementation returns None
+    }
+}
+```
+
+---
+
+### virtual_matter_bridge Integration
+
+#### Step 8: Implement EventSource for GenericSwitchHandler
+
+**File**: `src/matter/clusters/generic_switch.rs`
+
+```rust
+use rs_matter::dm::types::handler::{EventSource, PendingEvent};
+
+impl EventSource for GenericSwitchHandler {
+    fn take_pending_events(&self) -> Vec<PendingEvent> {
+        self.state.take_pending_events()
+            .into_iter()
+            .map(|e| {
+                // Encode GenericSwitch event payload to TLV
+                let payload = encode_generic_switch_payload(&e.data);
+
+                PendingEvent {
+                    event_id: e.path.event_id.unwrap_or(0),
+                    event_number: e.event_number,
+                    priority: e.priority.as_u8(),
+                    system_timestamp_ms: e.timestamp.value(),
+                    payload,
+                }
+            })
+            .collect()
+    }
+
+    fn has_pending_events(&self) -> bool {
+        self.state.has_pending_events()
+    }
+}
+
+/// Encode GenericSwitch event data to TLV bytes.
+fn encode_generic_switch_payload(data: &EventData) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16);
+    let mut tw = TLVWriter::new(&mut buf);
+
+    tw.start_struct(&TLVTag::Anonymous).unwrap();
+
+    match data {
+        EventData::InitialPress { new_position } |
+        EventData::LongPress { new_position } => {
+            tw.u8(&TLVTag::Context(0), *new_position).unwrap();
+        }
+        EventData::ShortRelease { previous_position } |
+        EventData::LongRelease { previous_position } => {
+            tw.u8(&TLVTag::Context(0), *previous_position).unwrap();
+        }
+        EventData::MultiPressOngoing { new_position, current_number_of_presses_counted } => {
+            tw.u8(&TLVTag::Context(0), *new_position).unwrap();
+            tw.u8(&TLVTag::Context(1), *current_number_of_presses_counted).unwrap();
+        }
+        EventData::MultiPressComplete { previous_position, total_number_of_presses_counted } => {
+            tw.u8(&TLVTag::Context(0), *previous_position).unwrap();
+            tw.u8(&TLVTag::Context(1), *total_number_of_presses_counted).unwrap();
+        }
+        EventData::Empty => {}
+    }
+
+    tw.end_container().unwrap();
+    buf
+}
+```
+
+#### Step 9: Wire EventSource in DynamicHandler
+
+**File**: `src/matter/stack.rs`
+
+Modify `DynamicHandler` to track which handlers are event sources and implement `as_event_source()`:
+
+```rust
+impl AsyncHandlerExt for DynamicHandler {
+    fn as_event_source(&self) -> Option<&dyn EventSource> {
+        // Return the GenericSwitch handler if this endpoint has one
+        match &self.handlers.get(&self.current_endpoint)? {
+            HandlerType::GenericSwitch { handler } => Some(handler),
+            _ => None,
+        }
+    }
+}
+```
+
+---
+
+### Testing Strategy
+
+#### Test 1: TLV Encoding Verification
+
+Create unit test that encodes an EventReportIB and verifies the TLV structure:
+
+```rust
+#[test]
+fn test_event_report_ib_encoding() {
+    let path = EventPath {
+        node: None,
+        endpoint: Some(5),
+        cluster: Some(0x003B),  // GenericSwitch
+        event: Some(0x03),      // ShortRelease
+        is_urgent: None,
+    };
+
+    let event = EventDataIB {
+        path,
+        event_number: 42,
+        priority: 1,  // Info
+        epoch_timestamp: None,
+        system_timestamp: Some(123456),
+        data: Some(&[0x15, 0x24, 0x00, 0x01, 0x18]),  // {NewPosition: 1}
+    };
+
+    let report = EventReportIB {
+        event_status: None,
+        event_data: Some(event),
+    };
+
+    let mut buf = [0u8; 256];
+    let mut tw = TLVWriter::new(&mut buf);
+    report.to_tlv(&TLVTag::Anonymous, &mut tw).unwrap();
+
+    // Verify TLV structure matches Matter spec
+    // ...
+}
+```
+
+#### Test 2: End-to-End with Home Assistant
+
+1. Start bridge with W100 and GenericSwitch endpoints
+2. Commission to Home Assistant
+3. Verify button entities appear in HA
+4. Press W100 button
+5. Check HA event entity updates (or automation triggers)
+
+Log output should show:
+```
+[Matter] GenericSwitch endpoint 5: InitialPress event queued (event_number=1)
+[Matter] GenericSwitch endpoint 5: ShortRelease event queued (event_number=2)
+[Matter] Subscription report: 2 events included
+```
+
+---
+
+### Estimated Changes
+
+| Component | File | Lines Changed |
+|-----------|------|---------------|
+| EventReportIB structs | rs-matter/src/im/attr.rs | +80 |
+| ToTLV implementations | rs-matter/src/im/attr.rs | +60 |
+| EventSource trait | rs-matter/src/dm/types/handler.rs | +40 |
+| ReportDataResponder | rs-matter/src/dm.rs | +80 |
+| GenericSwitchHandler | src/matter/clusters/generic_switch.rs | +50 |
+| DynamicHandler | src/matter/stack.rs | +30 |
+| **Total** | | **~340 lines** |
+
+---
+
+### Future Work (General Event Support)
+
+Once GenericSwitch events work, extend to support any cluster:
+
+1. **EventSource registry**: Allow any cluster handler to register as event source
+2. **Event filtering**: Implement full `event_filters()` support per Matter spec
+3. **Event persistence**: Queue events across subscription reconnects
+4. **Urgent events**: Implement `is_urgent` flag to bypass min interval
+5. **Event number persistence**: Save last event number across restarts
+
+---
+
+### References
+
+- [Matter Core Specification 1.4, Chapter 10 - Interaction Model](https://csa-iot.org/wp-content/uploads/2024/11/24-27349-006_Matter-1.4-Core-Specification.pdf)
+- [Matter Application Cluster Spec - GenericSwitch Cluster](https://csa-iot.org/wp-content/uploads/2022/11/22-27350-001_Matter-1.0-Application-Cluster-Specification.pdf)
+- [rs-matter GitHub - Issue #36 (Event Support)](https://github.com/project-chip/rs-matter/issues/36)
+- [rs-matter source code](https://github.com/project-chip/rs-matter)
+
+---
+
 ## References
 
 - [zigbee2mqtt W100 device page](https://www.zigbee2mqtt.io/devices/TH-S04D.html)
