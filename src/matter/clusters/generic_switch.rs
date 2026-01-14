@@ -1,32 +1,33 @@
 //! GenericSwitch cluster handler (0x003B).
 //!
 //! The GenericSwitch cluster represents a physical switch/button that can emit events.
-//! This is a temporary implementation until rs-matter adds native event support.
+//! Uses rs-matter's native event support for Matter event reporting.
 //!
 //! ## Features Supported
 //! - Momentary Switch (MS) - Button that returns to default position when released
 //! - Momentary Switch Release (MSR) - Generates events on button release
+//! - Momentary Switch Multi Press (MSM) - Multi-press detection
 //!
-//! ## Events (when event support is available)
+//! ## Events
 //! - InitialPress (0x01) - Button pressed down
 //! - ShortRelease (0x03) - Button released after short press
 //! - MultiPressComplete (0x06) - Multi-press sequence completed
 
-use crate::matter::events::{
-    EventData, EventDataIB, EventPath, EventPriority,
-    data::{EventTimestamp, generic_switch_events},
-};
 use parking_lot::Mutex;
+use rs_matter::dm::clusters::generic_switch::{
+    encode_initial_press, encode_multi_press_complete, encode_short_release, events,
+};
 use rs_matter::dm::{
     Access, Attribute, Cluster, Dataver, Handler, NonBlockingHandler, Quality, ReadContext,
     ReadReply, Reply, WriteContext,
 };
+use rs_matter::dm::{EventNumberGenerator, EventSource, MAX_PENDING_EVENTS, PendingEvent};
 use rs_matter::error::{Error, ErrorCode};
+use rs_matter::im::EventPriority;
 use rs_matter::tlv::TLVWrite;
 use rs_matter::{attribute_enum, attributes, with};
-use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Instant;
 use strum::FromRepr;
 
@@ -98,10 +99,10 @@ pub const CLUSTER: Cluster<'static> = Cluster {
 pub struct GenericSwitchState {
     /// Current position (0 = released, 1 = pressed)
     current_position: AtomicU8,
-    /// Event number counter (sequential, never resets)
-    event_number: AtomicU64,
-    /// Pending events queue
-    pending_events: Mutex<VecDeque<EventDataIB>>,
+    /// Event number generator (sequential, never resets)
+    event_number: EventNumberGenerator,
+    /// Pending events queue (uses rs-matter's native type)
+    pending_events: Mutex<heapless::Vec<PendingEvent, MAX_PENDING_EVENTS>>,
     /// Time when the switch was created (for elapsed timestamps)
     start_time: Instant,
     /// Endpoint ID (set when wired to Matter stack)
@@ -113,8 +114,8 @@ impl GenericSwitchState {
     pub fn new() -> Self {
         Self {
             current_position: AtomicU8::new(0),
-            event_number: AtomicU64::new(1),
-            pending_events: Mutex::new(VecDeque::new()),
+            event_number: EventNumberGenerator::new(),
+            pending_events: Mutex::new(heapless::Vec::new()),
             start_time: Instant::now(),
             endpoint_id: AtomicU8::new(0),
         }
@@ -135,11 +136,6 @@ impl GenericSwitchState {
         self.start_time.elapsed().as_millis() as u64
     }
 
-    /// Get the next event number.
-    fn next_event_number(&self) -> u64 {
-        self.event_number.fetch_add(1, Ordering::SeqCst)
-    }
-
     /// Get endpoint ID.
     fn get_endpoint_id(&self) -> u16 {
         self.endpoint_id.load(Ordering::SeqCst) as u16
@@ -149,40 +145,38 @@ impl GenericSwitchState {
     pub fn press(&self) {
         self.current_position.store(1, Ordering::SeqCst);
 
-        let event = EventDataIB::new(
-            EventPath::new(
-                self.get_endpoint_id(),
-                CLUSTER_ID,
-                generic_switch_events::INITIAL_PRESS,
-            ),
-            self.next_event_number(),
+        let payload: heapless::Vec<u8, 16> = encode_initial_press(1);
+        let event = PendingEvent::with_payload(
+            self.get_endpoint_id(),
+            CLUSTER_ID,
+            events::INITIAL_PRESS,
+            self.event_number.next(),
             EventPriority::Info,
-            EventTimestamp::SystemTime(self.elapsed_ms()),
-            EventData::InitialPress { new_position: 1 },
+            self.elapsed_ms(),
+            &payload,
         );
 
-        self.pending_events.lock().push_back(event);
+        let mut events = self.pending_events.lock();
+        events.push(event).ok();
     }
 
     /// Record a ShortRelease event (button released after short press).
     pub fn release(&self) {
         let prev_position = self.current_position.swap(0, Ordering::SeqCst);
 
-        let event = EventDataIB::new(
-            EventPath::new(
-                self.get_endpoint_id(),
-                CLUSTER_ID,
-                generic_switch_events::SHORT_RELEASE,
-            ),
-            self.next_event_number(),
+        let payload: heapless::Vec<u8, 16> = encode_short_release(prev_position);
+        let event = PendingEvent::with_payload(
+            self.get_endpoint_id(),
+            CLUSTER_ID,
+            events::SHORT_RELEASE,
+            self.event_number.next(),
             EventPriority::Info,
-            EventTimestamp::SystemTime(self.elapsed_ms()),
-            EventData::ShortRelease {
-                previous_position: prev_position,
-            },
+            self.elapsed_ms(),
+            &payload,
         );
 
-        self.pending_events.lock().push_back(event);
+        let mut events = self.pending_events.lock();
+        events.push(event).ok();
     }
 
     /// Record a single press (InitialPress + ShortRelease).
@@ -195,22 +189,19 @@ impl GenericSwitchState {
     pub fn double_press(&self) {
         self.current_position.store(0, Ordering::SeqCst);
 
-        let event = EventDataIB::new(
-            EventPath::new(
-                self.get_endpoint_id(),
-                CLUSTER_ID,
-                generic_switch_events::MULTI_PRESS_COMPLETE,
-            ),
-            self.next_event_number(),
+        let payload: heapless::Vec<u8, 16> = encode_multi_press_complete(1, 2);
+        let event = PendingEvent::with_payload(
+            self.get_endpoint_id(),
+            CLUSTER_ID,
+            events::MULTI_PRESS_COMPLETE,
+            self.event_number.next(),
             EventPriority::Info,
-            EventTimestamp::SystemTime(self.elapsed_ms()),
-            EventData::MultiPressComplete {
-                previous_position: 1,
-                total_number_of_presses_counted: 2,
-            },
+            self.elapsed_ms(),
+            &payload,
         );
 
-        self.pending_events.lock().push_back(event);
+        let mut events = self.pending_events.lock();
+        events.push(event).ok();
     }
 
     /// Record a hold start (InitialPress, kept pressed).
@@ -222,17 +213,6 @@ impl GenericSwitchState {
     pub fn hold_release(&self) {
         self.release();
     }
-
-    /// Get and clear pending events.
-    pub fn take_pending_events(&self) -> Vec<EventDataIB> {
-        let mut events = self.pending_events.lock();
-        events.drain(..).collect()
-    }
-
-    /// Check if there are pending events.
-    pub fn has_pending_events(&self) -> bool {
-        !self.pending_events.lock().is_empty()
-    }
 }
 
 impl Default for GenericSwitchState {
@@ -241,11 +221,22 @@ impl Default for GenericSwitchState {
     }
 }
 
+impl EventSource for GenericSwitchState {
+    fn take_pending_events(&self) -> heapless::Vec<PendingEvent, MAX_PENDING_EVENTS> {
+        let mut events = self.pending_events.lock();
+        core::mem::take(&mut *events)
+    }
+
+    fn has_pending_events(&self) -> bool {
+        !self.pending_events.lock().is_empty()
+    }
+}
+
 /// Handler for GenericSwitch cluster.
 ///
 /// This handler serves the GenericSwitch cluster attributes and manages events.
-/// Events are stored in the shared GenericSwitchState and should be retrieved
-/// and reported via the event notification system.
+/// Events are stored in the shared GenericSwitchState and reported via
+/// the EventSource trait implementation.
 pub struct GenericSwitchHandler {
     dataver: Dataver,
     state: Arc<GenericSwitchState>,

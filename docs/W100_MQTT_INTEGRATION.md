@@ -686,28 +686,32 @@ VirtualDevice::new("Tim Thermometer")
 
 ---
 
-## Phase 2: GenericSwitch Cluster (FOR BUTTON EVENTS) - ✅ INFRASTRUCTURE COMPLETE (2026-01-14)
+## Phase 2: GenericSwitch Cluster (FOR BUTTON EVENTS) - ✅ INTEGRATION COMPLETE (2026-01-14)
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                          ║
-║  ✅ INFRASTRUCTURE IMPLEMENTED - AWAITING rs-matter EVENT SUPPORT                        ║
+║  ✅ INTEGRATION COMPLETE - UNTESTED                                                      ║
 ║                                                                                          ║
-║  We implemented a temporary Matter events shim to prepare for when rs-matter adds       ║
-║  native event support (Issue #36, open since March 2023).                               ║
+║  The rs-matter fork (github.com/timlisemer/rs-matter) provides native event support.    ║
+║  virtual_matter_bridge now uses the fork's EventSource trait directly.                  ║
 ║                                                                                          ║
 ║  IMPLEMENTED:                                                                            ║
-║  - Event TLV structures: EventPath, EventDataIB, EventPriority (src/matter/events/)    ║
-║  - GenericSwitch cluster handler (src/matter/clusters/generic_switch.rs)                ║
-║  - GenericSwitchState with event queue (press, release, double_press, hold)            ║
-║  - DEV_TYPE_GENERIC_SWITCH (0x000F) device type                                         ║
-║  - EndpointKind::GenericSwitch and factory method                                       ║
+║  - GenericSwitch cluster handler using rs-matter native types                           ║
+║  - GenericSwitchState implements rs_matter::dm::EventSource trait                       ║
+║  - Event encoding via encode_initial_press(), encode_short_release(), etc.              ║
+║  - AggregatedEventSource in DynamicHandler collects events from all switches            ║
+║  - AsyncHandler trait implementation wires events to Matter subscription reports        ║
 ║  - W100 button integration: Plus, Minus, Center endpoints                               ║
 ║  - MQTT action → GenericSwitch event mapping in integration.rs                          ║
 ║                                                                                          ║
-║  AWAITING:                                                                               ║
-║  - rs-matter native event support (events are queued but not yet reported to Matter)    ║
-║  - Once rs-matter adds events, replace shim with native implementation                  ║
+║  REMOVED (was temporary shim):                                                           ║
+║  - src/matter/events/ directory (mod.rs, data.rs, path.rs)                              ║
+║                                                                                          ║
+║  TESTING REQUIRED:                                                                       ║
+║  - Commission bridge to Home Assistant                                                   ║
+║  - Verify 3 button entities appear (Plus, Minus, Center)                                ║
+║  - Press W100 button and confirm event appears in HA                                    ║
 ║                                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════╝
 ```
@@ -742,45 +746,57 @@ This is a PLATFORM-WIDE improvement. The `GenericSwitchHandler` is REUSABLE for 
 ### GenericSwitchHandler Struct (REUSABLE)
 
 ```rust
+/// Shared state for GenericSwitch that can be updated from external sources.
+/// Implements EventSource to provide events to Matter subscription reports.
+pub struct GenericSwitchState {
+    current_position: AtomicU8,
+    event_number: EventNumberGenerator,
+    pending_events: Mutex<heapless::Vec<PendingEvent, MAX_PENDING_EVENTS>>,
+    start_time: Instant,
+    endpoint_id: AtomicU8,
+}
+
+impl GenericSwitchState {
+    /// Record an InitialPress event (button pressed down).
+    pub fn press(&self) {
+        self.current_position.store(1, Ordering::SeqCst);
+        let payload = encode_initial_press(1);
+        let event = PendingEvent::with_payload(/* ... */);
+        self.pending_events.lock().push(event).ok();
+    }
+
+    /// Record a ShortRelease event (button released).
+    pub fn release(&self) {
+        self.current_position.store(0, Ordering::SeqCst);
+        let payload = encode_short_release(prev_position);
+        let event = PendingEvent::with_payload(/* ... */);
+        self.pending_events.lock().push(event).ok();
+    }
+
+    /// Record a double press (MultiPressComplete with count=2).
+    pub fn double_press(&self) {
+        let payload = encode_multi_press_complete(1, 2);
+        let event = PendingEvent::with_payload(/* ... */);
+        self.pending_events.lock().push(event).ok();
+    }
+}
+
 /// Handler for GenericSwitch cluster.
 /// REUSABLE for ANY device with buttons - not just W100.
 pub struct GenericSwitchHandler {
     dataver: Dataver,
-    /// Current position (0 = released, 1 = pressed)
-    current_position: AtomicU8,
-    /// Version counter for change detection
-    version: AtomicU32,
-    /// Number of positions (always 2 for momentary)
+    state: Arc<GenericSwitchState>,
     num_positions: u8,
-    /// Maximum multi-press count
     multi_press_max: u8,
 }
 
 impl GenericSwitchHandler {
-    pub fn new(dataver: Dataver) -> Self {
-        Self {
-            dataver,
-            current_position: AtomicU8::new(0),
-            version: AtomicU32::new(0),
-            num_positions: 2,
-            multi_press_max: 2,
-        }
+    pub fn new(dataver: Dataver, state: Arc<GenericSwitchState>) -> Self {
+        Self { dataver, state, num_positions: 2, multi_press_max: 2 }
     }
 
-    /// Called when button is pressed.
-    /// TODO: Emit InitialPress event when rs-matter supports events.
-    pub fn on_press(&self) {
-        self.current_position.store(1, Ordering::SeqCst);
-        self.version.fetch_add(1, Ordering::SeqCst);
-        self.dataver.changed();
-    }
-
-    /// Called when button is released.
-    /// TODO: Emit ShortRelease/MultiPressComplete event when rs-matter supports events.
-    pub fn on_release(&self, press_type: ButtonPress) {
-        self.current_position.store(0, Ordering::SeqCst);
-        self.version.fetch_add(1, Ordering::SeqCst);
-        self.dataver.changed();
+    pub fn state(&self) -> &Arc<GenericSwitchState> {
+        &self.state
     }
 }
 ```
@@ -814,9 +830,10 @@ impl GenericSwitchHandler {
 ### Usage Example (W100 with Buttons)
 
 ```rust
-let button_plus = Arc::new(GenericSwitchHandler::new(Dataver::new_rand(rand)));
-let button_minus = Arc::new(GenericSwitchHandler::new(Dataver::new_rand(rand)));
-let button_center = Arc::new(GenericSwitchHandler::new(Dataver::new_rand(rand)));
+// Create shared state for each button (can be updated from MQTT handler)
+let state_plus = Arc::new(GenericSwitchState::new());
+let state_minus = Arc::new(GenericSwitchState::new());
+let state_center = Arc::new(GenericSwitchState::new());
 
 VirtualDevice::new(VirtualDeviceType::TemperatureSensor, "Tim Thermometer")
     .with_device_info(
@@ -826,9 +843,15 @@ VirtualDevice::new(VirtualDeviceType::TemperatureSensor, "Tim Thermometer")
     )
     .with_endpoint(EndpointConfig::temperature_sensor("Temperature", temp))
     .with_endpoint(EndpointConfig::humidity_sensor("Humidity", humidity))
-    .with_endpoint(EndpointConfig::generic_switch("Button Plus", button_plus))
-    .with_endpoint(EndpointConfig::generic_switch("Button Minus", button_minus))
-    .with_endpoint(EndpointConfig::generic_switch("Button Center", button_center))
+    .with_endpoint(EndpointConfig::generic_switch("Button Plus", state_plus.clone()))
+    .with_endpoint(EndpointConfig::generic_switch("Button Minus", state_minus.clone()))
+    .with_endpoint(EndpointConfig::generic_switch("Button Center", state_center.clone()))
+
+// In MQTT handler, call state methods to generate events:
+// state_plus.single_press();     // single press
+// state_minus.double_press();    // double press
+// state_center.hold_start();     // hold started
+// state_center.hold_release();   // hold released
 ```
 
 ---
@@ -998,17 +1021,33 @@ New clusters needed for W100:
 
 This section documents the complete technical approach to implementing Matter event support in rs-matter, enabling GenericSwitch button events to reach Home Assistant.
 
-### Problem Statement
+> **Status: IMPLEMENTED ✅** (January 2025)
+>
+> Fork: https://github.com/timlisemer/rs-matter
+>
+> All core event functionality is complete, including:
+> - EventDataIB/EventReportIB TLV structures with ToTLV
+> - ReportDataResponder event iteration
+> - EventSource trait and PendingEvent
+> - GenericSwitch cluster with all 6 event types
+> - Long press detection (500ms configurable threshold)
+> - Multi-press detection (300ms window, max 3 presses)
+> - Event filtering with wildcard support
+> - Event number persistence framework
+>
+> The documentation below serves as both historical reference and implementation guide.
+
+### Problem Statement (SOLVED ✅)
 
 rs-matter (as of January 2025) does **not support Matter events**. This is tracked in [rs-matter issue #36](https://github.com/project-chip/rs-matter/issues/36), open since March 2023.
 
-**Current blocker**: Button presses on W100 are:
+**Original blocker** (now resolved): Button presses on W100 were:
 1. Received via MQTT ✅
 2. Parsed and mapped to GenericSwitch events ✅
 3. Queued in `GenericSwitchState` ✅
-4. **Never sent to Matter controllers** ❌
+4. ~~**Never sent to Matter controllers** ❌~~ → **Now sent via EventReports** ✅
 
-The events sit in a queue with no code path to include them in Matter subscription reports.
+The events previously sat in a queue with no code path to include them in Matter subscription reports. This has been fixed in the fork.
 
 ### Solution Overview
 
@@ -1100,7 +1139,7 @@ pub struct EventPath {
 
 This is already implemented and usable - no changes needed.
 
-##### ReportDataResp (lines 284-290) - NEEDS MODIFICATION
+##### ReportDataResp (lines 284-290) - ~~NEEDS MODIFICATION~~ IMPLEMENTED ✅
 
 ```rust
 #[derive(FromTLV, ToTLV, Debug)]
@@ -1116,7 +1155,7 @@ pub struct ReportDataResp<'a> {
 
 **Problem**: `event_reports` is `Option<bool>` instead of `Option<TLVArray<EventReportIB>>`.
 
-##### ReportDataRespTag (lines 296-306) - EXISTS BUT UNDERSCORE PREFIX
+##### ReportDataRespTag (lines 296-306) - ~~EXISTS BUT UNDERSCORE PREFIX~~ FIXED ✅
 
 ```rust
 #[repr(u8)]
@@ -1131,7 +1170,7 @@ pub enum ReportDataRespTag {
 
 The `_EventReport` tag exists but is never used in the codebase.
 
-##### ReportDataReq Methods (lines 250-275) - EVENT METHODS EXIST BUT UNUSED
+##### ReportDataReq Methods (lines 250-275) - ~~EVENT METHODS EXIST BUT UNUSED~~ NOW USED ✅
 
 ```rust
 impl<'a> ReportDataReq<'a> {
@@ -1164,7 +1203,7 @@ struct ReportDataResponder<'a, 'b, 'c, D, B> {
 }
 ```
 
-##### ReportDataResponder::respond() - THE CRITICAL METHOD
+##### ReportDataResponder::respond() - ~~THE CRITICAL METHOD~~ IMPLEMENTED ✅
 
 Location: `rs-matter/src/dm.rs` lines ~847-1100
 
@@ -1350,9 +1389,9 @@ EventPathIB ::= STRUCTURE {
 
 ---
 
-### Implementation Plan
+### Implementation Plan (ALL STEPS COMPLETE ✅)
 
-#### Step 1: Clone rs-matter Fork
+#### Step 1: Clone rs-matter Fork ✅
 
 ```bash
 cd /home/tim/Coding/public_repos/
@@ -1366,9 +1405,9 @@ Update `virtual_matter_bridge/Cargo.toml`:
 rs-matter = { path = "../rs-matter/rs-matter", features = ["std", "os", "zbus", "async-io"] }
 ```
 
-#### Step 2: Add EventReportIB Structures
+#### Step 2: Add EventReportIB Structures ✅
 
-**File**: `rs-matter/rs-matter/src/im/attr.rs`
+**File**: `rs-matter/rs-matter/src/im/event.rs` (created)
 
 Add after `AttrResp` definition (~line 180):
 
@@ -1419,9 +1458,9 @@ pub mod EventDataIBTag {
 }
 ```
 
-#### Step 3: Implement ToTLV for EventDataIB
+#### Step 3: Implement ToTLV for EventDataIB ✅
 
-**File**: `rs-matter/rs-matter/src/im/attr.rs`
+**File**: `rs-matter/rs-matter/src/im/event.rs`
 
 ```rust
 impl<'a> ToTLV for EventDataIB<'a> {
@@ -1470,7 +1509,7 @@ impl<'a> ToTLV for EventReportIB<'a> {
 }
 ```
 
-#### Step 4: Fix ReportDataRespTag
+#### Step 4: Fix ReportDataRespTag ✅
 
 **File**: `rs-matter/rs-matter/src/im/attr.rs` (~line 299)
 
@@ -1484,9 +1523,9 @@ pub enum ReportDataRespTag {
 }
 ```
 
-#### Step 5: Add Event Source Trait
+#### Step 5: Add Event Source Trait ✅
 
-**File**: `rs-matter/rs-matter/src/dm/types/handler.rs`
+**File**: `rs-matter/rs-matter/src/dm/types/event.rs` (created)
 
 Add new trait for handlers that can produce events:
 
@@ -1526,7 +1565,7 @@ pub struct PendingEvent {
 }
 ```
 
-#### Step 6: Modify ReportDataResponder
+#### Step 6: Modify ReportDataResponder ✅
 
 **File**: `rs-matter/rs-matter/src/dm.rs`
 
@@ -1606,7 +1645,7 @@ if has_event_requests {
 }
 ```
 
-#### Step 7: Add as_event_source() to Handler
+#### Step 7: Add as_event_source() to Handler ✅
 
 **File**: `rs-matter/rs-matter/src/dm/types/handler.rs`
 
@@ -1624,86 +1663,79 @@ pub trait AsyncHandlerExt: AsyncHandler {
 
 ---
 
-### virtual_matter_bridge Integration
+### virtual_matter_bridge Integration - ✅ COMPLETE (2026-01-14)
 
-#### Step 8: Implement EventSource for GenericSwitchHandler
+> **Status**: Integration complete, UNTESTED. The rs-matter fork provides native event support, and virtual_matter_bridge now uses it directly.
+
+#### Step 8: Implement EventSource for GenericSwitchState ✅
 
 **File**: `src/matter/clusters/generic_switch.rs`
 
+The `GenericSwitchState` struct now implements `rs_matter::dm::EventSource` directly:
+
 ```rust
-use rs_matter::dm::types::handler::{EventSource, PendingEvent};
+use rs_matter::dm::clusters::generic_switch::{
+    encode_initial_press, encode_multi_press_complete, encode_short_release, events,
+};
+use rs_matter::dm::{EventNumberGenerator, EventSource, MAX_PENDING_EVENTS, PendingEvent};
 
-impl EventSource for GenericSwitchHandler {
-    fn take_pending_events(&self) -> Vec<PendingEvent> {
-        self.state.take_pending_events()
-            .into_iter()
-            .map(|e| {
-                // Encode GenericSwitch event payload to TLV
-                let payload = encode_generic_switch_payload(&e.data);
-
-                PendingEvent {
-                    event_id: e.path.event_id.unwrap_or(0),
-                    event_number: e.event_number,
-                    priority: e.priority.as_u8(),
-                    system_timestamp_ms: e.timestamp.value(),
-                    payload,
-                }
-            })
-            .collect()
+impl EventSource for GenericSwitchState {
+    fn take_pending_events(&self) -> heapless::Vec<PendingEvent, MAX_PENDING_EVENTS> {
+        let mut events = self.pending_events.lock();
+        core::mem::take(&mut *events)
     }
 
     fn has_pending_events(&self) -> bool {
-        self.state.has_pending_events()
+        !self.pending_events.lock().is_empty()
     }
-}
-
-/// Encode GenericSwitch event data to TLV bytes.
-fn encode_generic_switch_payload(data: &EventData) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(16);
-    let mut tw = TLVWriter::new(&mut buf);
-
-    tw.start_struct(&TLVTag::Anonymous).unwrap();
-
-    match data {
-        EventData::InitialPress { new_position } |
-        EventData::LongPress { new_position } => {
-            tw.u8(&TLVTag::Context(0), *new_position).unwrap();
-        }
-        EventData::ShortRelease { previous_position } |
-        EventData::LongRelease { previous_position } => {
-            tw.u8(&TLVTag::Context(0), *previous_position).unwrap();
-        }
-        EventData::MultiPressOngoing { new_position, current_number_of_presses_counted } => {
-            tw.u8(&TLVTag::Context(0), *new_position).unwrap();
-            tw.u8(&TLVTag::Context(1), *current_number_of_presses_counted).unwrap();
-        }
-        EventData::MultiPressComplete { previous_position, total_number_of_presses_counted } => {
-            tw.u8(&TLVTag::Context(0), *previous_position).unwrap();
-            tw.u8(&TLVTag::Context(1), *total_number_of_presses_counted).unwrap();
-        }
-        EventData::Empty => {}
-    }
-
-    tw.end_container().unwrap();
-    buf
 }
 ```
 
-#### Step 9: Wire EventSource in DynamicHandler
+Event payloads are encoded using rs-matter's built-in functions:
+- `encode_initial_press(position)` - for button press events
+- `encode_short_release(position)` - for button release events
+- `encode_multi_press_complete(position, count)` - for double-press events
+
+#### Step 9: Wire EventSource in DynamicHandler ✅
 
 **File**: `src/matter/stack.rs`
 
-Modify `DynamicHandler` to track which handlers are event sources and implement `as_event_source()`:
+An `AggregatedEventSource` collects events from all GenericSwitch handlers:
 
 ```rust
-impl AsyncHandlerExt for DynamicHandler {
+pub struct AggregatedEventSource {
+    sources: Vec<Arc<GenericSwitchState>>,
+}
+
+impl EventSource for AggregatedEventSource {
+    fn take_pending_events(&self) -> heapless::Vec<PendingEvent, MAX_PENDING_EVENTS> {
+        let mut events = heapless::Vec::new();
+        for source in &self.sources {
+            for event in source.take_pending_events() {
+                let _ = events.push(event);
+            }
+        }
+        events
+    }
+
+    fn has_pending_events(&self) -> bool {
+        self.sources.iter().any(|s| s.has_pending_events())
+    }
+}
+```
+
+The `DynamicHandler` implements `AsyncHandler` with `as_event_source()`:
+
+```rust
+impl AsyncHandler for DynamicHandler {
     fn as_event_source(&self) -> Option<&dyn EventSource> {
-        // Return the GenericSwitch handler if this endpoint has one
-        match &self.handlers.get(&self.current_endpoint)? {
-            HandlerType::GenericSwitch { handler } => Some(handler),
-            _ => None,
+        if self.event_sources.has_sources() {
+            Some(&self.event_sources)
+        } else {
+            None
         }
     }
+    // ... read, write, invoke implementations
 }
 ```
 
@@ -1780,15 +1812,29 @@ Log output should show:
 
 ---
 
-### Future Work (General Event Support)
+### Future Work (Nice-to-Have Enhancements)
 
-Once GenericSwitch events work, extend to support any cluster:
+> **Note**: Core GenericSwitch event support is complete in the fork. These are optional enhancements.
 
 1. **EventSource registry**: Allow any cluster handler to register as event source
-2. **Event filtering**: Implement full `event_filters()` support per Matter spec
+2. ~~**Event filtering**: Implement full `event_filters()` support per Matter spec~~ ✅ (implemented with wildcard support)
 3. **Event persistence**: Queue events across subscription reconnects
-4. **Urgent events**: Implement `is_urgent` flag to bypass min interval
-5. **Event number persistence**: Save last event number across restarts
+4. ~~**Urgent events**: Implement `is_urgent` flag to bypass min interval~~ ✅ (implemented for Critical priority)
+5. ~~**Event number persistence**: Save last event number across restarts~~ ✅ (framework implemented - `EventNumberGeneratorPersistent<P>` trait, needs platform storage integration)
+6. **Epoch timestamps**: Infrastructure ready (`new_with_epoch()` constructor), needs platform time sync (NTP/RTC)
+7. **Delta timestamps**: TLV tags defined, falls back to absolute timestamps - bandwidth optimization only
+8. ~~**Long press detection**: Timing logic for `LongPress`/`LongRelease` events~~ ✅ (implemented with configurable 500ms threshold)
+9. ~~**Multi-press detection**: Timing logic for `MultiPressOngoing`/`MultiPressComplete` events~~ ✅ (implemented with configurable 300ms window, max 3 presses)
+
+### Remaining TODOs (Non-Blocking)
+
+| Category | Item | Status |
+|----------|------|--------|
+| Platform Integration | Event number persistence storage | Framework ready, needs NVS/file impl |
+| Platform Integration | Epoch timestamp time source | Infrastructure ready, needs NTP/RTC |
+| Optimization | Delta timestamp encoding | Nice-to-have bandwidth optimization |
+| Code Quality | `tlv_iter()` implementations | Uses `to_tlv()` directly - works fine |
+| Configuration | `MAX_PENDING_EVENTS` / `MAX_EVENT_PAYLOAD_SIZE` | Hardcoded (16/64), sufficient for W100 |
 
 ---
 
@@ -1797,7 +1843,7 @@ Once GenericSwitch events work, extend to support any cluster:
 - [Matter Core Specification 1.4, Chapter 10 - Interaction Model](https://csa-iot.org/wp-content/uploads/2024/11/24-27349-006_Matter-1.4-Core-Specification.pdf)
 - [Matter Application Cluster Spec - GenericSwitch Cluster](https://csa-iot.org/wp-content/uploads/2022/11/22-27350-001_Matter-1.0-Application-Cluster-Specification.pdf)
 - [rs-matter GitHub - Issue #36 (Event Support)](https://github.com/project-chip/rs-matter/issues/36)
-- [rs-matter source code](https://github.com/project-chip/rs-matter)
+- [rs-matter fork with event support](https://github.com/timlisemer/rs-matter)
 
 ---
 

@@ -1,7 +1,7 @@
 use super::clusters::{
     BooleanStateHandler, BridgedDeviceInfo, BridgedHandler, GenericSwitchHandler,
-    OccupancySensingHandler, RelativeHumidityHandler, TemperatureMeasurementHandler,
-    TimeSyncHandler,
+    GenericSwitchState, OccupancySensingHandler, RelativeHumidityHandler,
+    TemperatureMeasurementHandler, TimeSyncHandler,
 };
 use super::device_info::DEV_INFO;
 use super::device_types::{
@@ -29,10 +29,11 @@ use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM};
 use rs_matter::dm::endpoints;
 use rs_matter::dm::subscriptions::DefaultSubscriptions;
 use rs_matter::dm::{
-    Async, Cluster, Context, DataModel, Dataver, DeviceType, EmptyHandler, Endpoint, EpClMatcher,
-    Handler, InvokeContext, InvokeReply, Matcher, Node, NonBlockingHandler, ReadContext, ReadReply,
-    Reply, WriteContext,
+    Async, AsyncHandler, Cluster, Context, DataModel, Dataver, DeviceType, EmptyHandler, Endpoint,
+    EpClMatcher, Handler, InvokeContext, InvokeReply, Matcher, Node, NonBlockingHandler,
+    ReadContext, ReadReply, Reply, WriteContext,
 };
+use rs_matter::dm::{EventSource, MAX_PENDING_EVENTS, PendingEvent};
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::pairing::qr::QrTextType;
@@ -134,6 +135,53 @@ impl PartsMatcher for DynamicPartsMatcher {
     }
 }
 
+/// Aggregated event source that collects events from multiple GenericSwitch states.
+///
+/// This enables DynamicHandler to provide events from all button endpoints to the
+/// Matter subscription system.
+pub struct AggregatedEventSource {
+    sources: Vec<Arc<GenericSwitchState>>,
+}
+
+impl AggregatedEventSource {
+    pub fn new() -> Self {
+        Self {
+            sources: Vec::new(),
+        }
+    }
+
+    pub fn add(&mut self, state: Arc<GenericSwitchState>) {
+        self.sources.push(state);
+    }
+
+    /// Returns true if any event sources are registered.
+    pub fn has_sources(&self) -> bool {
+        !self.sources.is_empty()
+    }
+}
+
+impl Default for AggregatedEventSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EventSource for AggregatedEventSource {
+    fn take_pending_events(&self) -> heapless::Vec<PendingEvent, MAX_PENDING_EVENTS> {
+        let mut events = heapless::Vec::new();
+        for source in &self.sources {
+            for event in source.take_pending_events() {
+                let _ = events.push(event);
+            }
+        }
+        events
+    }
+
+    fn has_pending_events(&self) -> bool {
+        self.sources.iter().any(|s| s.has_pending_events())
+    }
+}
+
 /// Handler entry for dynamic routing.
 enum DynamicHandlerEntry {
     /// BooleanState cluster handler using SensorBridge
@@ -178,12 +226,15 @@ enum DynamicHandlerEntry {
 /// Dynamic handler that routes requests based on (endpoint_id, cluster_id).
 pub struct DynamicHandler {
     handlers: HashMap<(u16, u32), DynamicHandlerEntry>,
+    /// Aggregated event sources for button handlers
+    event_sources: AggregatedEventSource,
 }
 
 impl DynamicHandler {
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
+            event_sources: AggregatedEventSource::new(),
         }
     }
 
@@ -259,6 +310,8 @@ impl DynamicHandler {
     }
 
     pub fn add_generic_switch(&mut self, ep: u16, handler: GenericSwitchHandler) {
+        // Also register the state for event collection
+        self.event_sources.add(handler.state().clone());
         self.handlers.insert(
             (ep, generic_switch::CLUSTER_ID),
             DynamicHandlerEntry::GenericSwitch { handler },
@@ -388,6 +441,40 @@ impl Handler for DynamicHandler {
 }
 
 impl NonBlockingHandler for DynamicHandler {}
+
+impl AsyncHandler for DynamicHandler {
+    fn read_awaits(&self, _ctx: impl ReadContext) -> bool {
+        false // DynamicHandler is non-blocking
+    }
+
+    fn write_awaits(&self, _ctx: impl WriteContext) -> bool {
+        false // DynamicHandler is non-blocking
+    }
+
+    fn invoke_awaits(&self, _ctx: impl InvokeContext) -> bool {
+        false // DynamicHandler is non-blocking
+    }
+
+    async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
+        Handler::read(self, ctx, reply)
+    }
+
+    async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
+        Handler::write(self, ctx)
+    }
+
+    async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
+        Handler::invoke(self, ctx, reply)
+    }
+
+    fn as_event_source(&self) -> Option<&dyn EventSource> {
+        if self.event_sources.has_sources() {
+            Some(&self.event_sources)
+        } else {
+            None
+        }
+    }
+}
 
 impl Matcher for DynamicHandler {
     fn matches(&self, ctx: impl Context) -> bool {
@@ -1373,9 +1460,10 @@ pub async fn run_matter_stack(
                         ),
                     )
                     // === Endpoint 3+: Virtual Devices (dynamic) ===
+                    // Use &dynamic_handler directly (not Async wrapper) to preserve as_event_source()
                     .chain(
                         &dynamic_handler, // Only matches (ep, cl) pairs we have handlers for
-                        Async(&dynamic_handler),
+                        &dynamic_handler,
                     ),
             ),
         ),
@@ -1481,8 +1569,9 @@ pub async fn run_matter_stack(
         loop {
             sensor_notify_ref.wait().await;
             // Notify all registered sensor endpoints
+            // Using attr_id 0 as the primary measured value attribute for sensor clusters
             for (endpoint_id, cluster_id) in &notification_endpoints {
-                subscriptions.notify_cluster_changed(*endpoint_id, *cluster_id);
+                subscriptions.notify_attribute_changed(*endpoint_id, *cluster_id, 0);
             }
         }
     });
