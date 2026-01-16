@@ -5,6 +5,8 @@
 //!
 //! For example: 21.5°C is reported as 2150.
 
+use crate::matter::endpoints::ClusterNotifier;
+use parking_lot::RwLock;
 use rs_matter::dm::{
     Access, Attribute, Cluster, Dataver, Handler, NonBlockingHandler, Quality, ReadContext,
     ReadReply, Reply, WriteContext,
@@ -76,6 +78,8 @@ pub struct TemperatureSensor {
     value: AtomicI16,
     /// Version counter for change detection
     version: AtomicU32,
+    /// Notifier for Matter subscription updates
+    notifier: RwLock<Option<ClusterNotifier>>,
 }
 
 impl TemperatureSensor {
@@ -87,7 +91,16 @@ impl TemperatureSensor {
         Self {
             value: AtomicI16::new((initial_celsius * 100.0) as i16),
             version: AtomicU32::new(0),
+            notifier: RwLock::new(None),
         }
+    }
+
+    /// Set a notifier for Matter subscription updates.
+    ///
+    /// When temperature changes, the notifier will signal the Matter stack
+    /// to push updates to subscribed controllers.
+    pub fn set_notifier(&self, notifier: ClusterNotifier) {
+        *self.notifier.write() = Some(notifier);
     }
 
     /// Get the current temperature in degrees Celsius.
@@ -105,6 +118,10 @@ impl TemperatureSensor {
         let centidegrees = (celsius * 100.0) as i16;
         self.value.store(centidegrees, Ordering::SeqCst);
         self.version.fetch_add(1, Ordering::SeqCst);
+        // Notify subscribers of the change
+        if let Some(notifier) = self.notifier.read().as_ref() {
+            notifier.notify();
+        }
     }
 
     /// Get the current version (incremented on each change).

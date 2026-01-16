@@ -5,6 +5,8 @@
 //!
 //! For example: 55.5% is reported as 5550.
 
+use crate::matter::endpoints::ClusterNotifier;
+use parking_lot::RwLock;
 use rs_matter::dm::{
     Access, Attribute, Cluster, Dataver, Handler, NonBlockingHandler, Quality, ReadContext,
     ReadReply, Reply, WriteContext,
@@ -76,6 +78,8 @@ pub struct HumiditySensor {
     value: AtomicU16,
     /// Version counter for change detection
     version: AtomicU32,
+    /// Notifier for Matter subscription updates
+    notifier: RwLock<Option<ClusterNotifier>>,
 }
 
 impl HumiditySensor {
@@ -87,7 +91,16 @@ impl HumiditySensor {
         Self {
             value: AtomicU16::new((initial_percent * 100.0) as u16),
             version: AtomicU32::new(0),
+            notifier: RwLock::new(None),
         }
+    }
+
+    /// Set a notifier for Matter subscription updates.
+    ///
+    /// When humidity changes, the notifier will signal the Matter stack
+    /// to push updates to subscribed controllers.
+    pub fn set_notifier(&self, notifier: ClusterNotifier) {
+        *self.notifier.write() = Some(notifier);
     }
 
     /// Get the current humidity in percent.
@@ -105,6 +118,10 @@ impl HumiditySensor {
         let centipercent = (percent * 100.0) as u16;
         self.value.store(centipercent, Ordering::SeqCst);
         self.version.fetch_add(1, Ordering::SeqCst);
+        // Notify subscribers of the change
+        if let Some(notifier) = self.notifier.read().as_ref() {
+            notifier.notify();
+        }
     }
 
     /// Get the current version (incremented on each change).

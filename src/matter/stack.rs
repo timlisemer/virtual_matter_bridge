@@ -1356,6 +1356,15 @@ pub async fn run_matter_stack(
                 EndpointKind::TemperatureSensor => {
                     // Use sensor from EndpointConfig (created by caller)
                     if let Some(sensor) = &ep_config.temperature_sensor {
+                        // Set notifier for subscription updates
+                        sensor.set_notifier(ClusterNotifier::new(
+                            sensor_notify_ref,
+                            child_id,
+                            temperature_measurement::CLUSTER_ID,
+                        ));
+                        notification_endpoints
+                            .push((child_id, temperature_measurement::CLUSTER_ID));
+
                         let handler = TemperatureMeasurementHandler::new(
                             Dataver::new_rand(matter.rand()),
                             sensor.clone(),
@@ -1371,6 +1380,14 @@ pub async fn run_matter_stack(
                 EndpointKind::HumiditySensor => {
                     // Use sensor from EndpointConfig (created by caller)
                     if let Some(sensor) = &ep_config.humidity_sensor {
+                        // Set notifier for subscription updates
+                        sensor.set_notifier(ClusterNotifier::new(
+                            sensor_notify_ref,
+                            child_id,
+                            relative_humidity::CLUSTER_ID,
+                        ));
+                        notification_endpoints.push((child_id, relative_humidity::CLUSTER_ID));
+
                         let handler = RelativeHumidityHandler::new(
                             Dataver::new_rand(matter.rand()),
                             sensor.clone(),

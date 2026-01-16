@@ -105,8 +105,8 @@ impl W100Device {
             temperature: Option<f32>,
             #[serde(default)]
             humidity: Option<f32>,
-            #[serde(default)]
-            action: Option<String>,
+            // Note: 'action' field is intentionally not parsed here.
+            // Button actions are processed via the dedicated /action topic.
         }
 
         match serde_json::from_str::<W100State>(payload) {
@@ -131,10 +131,8 @@ impl W100Device {
                         );
                     }
                 }
-                // Handle button actions (will be used for automations in Scope 5)
-                if let Some(action) = state.action {
-                    info!("[MQTT] {} button action: {}", self.friendly_name, action);
-                }
+                // Note: Button actions are also included in state messages, but we process
+                // them via the dedicated /action topic to avoid duplicate processing.
             }
             Err(e) => {
                 warn!("[MQTT] Failed to parse {} state: {}", self.friendly_name, e);
