@@ -33,7 +33,7 @@ use rs_matter::dm::{
     EpClMatcher, Handler, InvokeContext, InvokeReply, Matcher, Node, NonBlockingHandler,
     ReadContext, ReadReply, Reply, WriteContext,
 };
-use rs_matter::dm::{EventSource, MAX_PENDING_EVENTS, PendingEvent};
+use rs_matter::dm::{EventCollector, EventSource, MAX_PENDING_EVENTS, PendingEvent};
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::pairing::qr::QrTextType;
@@ -472,6 +472,16 @@ impl AsyncHandler for DynamicHandler {
             Some(&self.event_sources)
         } else {
             None
+        }
+    }
+}
+
+impl EventCollector for DynamicHandler {
+    fn collect_events(&self, events: &mut heapless::Vec<PendingEvent, { MAX_PENDING_EVENTS }>) {
+        if let Some(source) = self.as_event_source() {
+            for event in source.take_pending_events() {
+                let _ = events.push(event);
+            }
         }
     }
 }
