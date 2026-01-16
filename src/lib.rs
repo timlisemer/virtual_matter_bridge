@@ -11,4 +11,5 @@ pub mod commissioning;
 pub mod config;
 pub mod error;
 pub mod input;
+pub mod instance_lock;
 pub mod matter;

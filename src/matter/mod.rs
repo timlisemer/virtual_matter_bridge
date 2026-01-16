@@ -10,7 +10,7 @@ pub mod endpoints;
 pub mod handler_bridge;
 pub mod virtual_device;
 
-pub use stack::run_matter_stack;
+pub use stack::{run_matter_stack, signal_shutdown};
 
 // Re-export from endpoints for convenience
 pub use endpoints::controls;

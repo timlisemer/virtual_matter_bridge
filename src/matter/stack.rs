@@ -73,8 +73,28 @@ static PSM: StaticCell<Psm<4096>> = StaticCell::new();
 /// Uses CriticalSectionRawMutex because sensors are updated from different threads
 static SENSOR_NOTIFY: StaticCell<Signal<CriticalSectionRawMutex, ()>> = StaticCell::new();
 
+/// Signal for shutdown notification (wakes Matter stack to exit)
+/// Can be signaled from any thread (e.g., from tokio runtime on SIGTERM)
+/// Uses OnceLock so we can check if initialized before signaling
+static SHUTDOWN_SIGNAL: OnceLock<Signal<CriticalSectionRawMutex, ()>> = OnceLock::new();
+
 /// Static hostname storage for mDNS (needs 'static lifetime for Host struct)
 static HOSTNAME: OnceLock<String> = OnceLock::new();
+
+/// Signal the Matter stack to shut down gracefully.
+///
+/// This can be called from any thread (e.g., from the tokio runtime on SIGTERM).
+/// The Matter stack will exit its event loop and return from `run_matter_stack`.
+pub fn signal_shutdown() {
+    // Get the shutdown signal if it was initialized
+    if let Some(signal) = SHUTDOWN_SIGNAL.get() {
+        info!("Signaling Matter stack shutdown");
+        signal.signal(());
+    } else {
+        // Stack wasn't started yet, nothing to do
+        info!("Shutdown signaled but Matter stack not running");
+    }
+}
 
 /// Dynamic PartsMatcher that handles all parent-child relationships.
 /// Built from VirtualDevice configurations at runtime.
@@ -1244,6 +1264,10 @@ pub async fn run_matter_stack(
     let sensor_notify = SENSOR_NOTIFY.uninit().init_with(Signal::new());
     let sensor_notify_ref: &'static Signal<CriticalSectionRawMutex, ()> = sensor_notify;
 
+    // Initialize shutdown signal (can be triggered from any thread via signal_shutdown())
+    let shutdown_signal_ref: &'static Signal<CriticalSectionRawMutex, ()> =
+        SHUTDOWN_SIGNAL.get_or_init(Signal::new);
+
     // Create DynamicHandler for virtual device endpoints (EP3+)
     let mut dynamic_handler = DynamicHandler::new();
 
@@ -1415,6 +1439,13 @@ pub async fn run_matter_stack(
                     if let Some(state) = &ep_config.generic_switch_state {
                         // Set endpoint ID so events know where they came from
                         state.set_endpoint_id(child_id);
+                        // Set notifier for subscription updates when events are recorded
+                        state.set_notifier(ClusterNotifier::new(
+                            sensor_notify_ref,
+                            child_id,
+                            generic_switch::CLUSTER_ID,
+                        ));
+                        notification_endpoints.push((child_id, generic_switch::CLUSTER_ID));
                         let handler = GenericSwitchHandler::new(
                             Dataver::new_rand(matter.rand()),
                             state.clone(),
@@ -1603,19 +1634,30 @@ pub async fn run_matter_stack(
         }
     });
 
+    // Shutdown task - completes when signal_shutdown() is called
+    let mut shutdown_task = pin!(async {
+        shutdown_signal_ref.wait().await;
+        info!("Matter stack received shutdown signal, exiting...");
+        Ok::<_, Error>(())
+    });
+
     let result = select4(
         &mut transport,
         &mut mdns,
         select(&mut respond, &mut dm_job).coalesce(),
-        select(&mut persist, &mut sensor_forward).coalesce(),
+        select(
+            &mut persist,
+            select(&mut sensor_forward, &mut shutdown_task).coalesce(),
+        )
+        .coalesce(),
     )
     .coalesce()
     .await;
 
-    if let Err(e) = result {
-        error!("Matter stack error: {:?}", e);
-        return Err(e);
+    match &result {
+        Ok(()) => info!("Matter stack shut down gracefully"),
+        Err(e) => error!("Matter stack error: {:?}", e),
     }
 
-    Ok(())
+    result
 }

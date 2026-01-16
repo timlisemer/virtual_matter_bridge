@@ -10,11 +10,13 @@ mod commissioning;
 mod config;
 mod error;
 mod input;
+mod instance_lock;
 mod matter;
 
 use crate::config::Config;
 use crate::input::camera::CameraInput;
 use crate::input::mqtt::{MqttIntegration, W100Config};
+use crate::instance_lock::{InstanceLock, InstanceLockError};
 use crate::matter::clusters::{
     BridgedDeviceInfo, GenericSwitchState, HumiditySensor, TemperatureSensor,
 };
@@ -24,6 +26,7 @@ use log::info;
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::signal;
 
 /// Type alias for the state pusher callback.
@@ -107,10 +110,42 @@ async fn run_sensor_simulation(
 
 #[tokio::main]
 async fn main() {
+    // Set up parent death signal FIRST (before any other initialization)
+    // If the parent process dies (e.g., bash session killed), we'll receive SIGTERM
+    #[cfg(target_os = "linux")]
+    {
+        use nix::sys::prctl::set_pdeathsig;
+        use nix::sys::signal::Signal;
+        if let Err(e) = set_pdeathsig(Signal::SIGTERM) {
+            eprintln!("Warning: Failed to set parent death signal: {}", e);
+        }
+    }
+
     // Load .env file before anything else
     config::load_dotenv();
 
     init_logger();
+
+    // Acquire instance lock - exit if another instance is already running
+    let _instance_lock = match InstanceLock::acquire() {
+        Ok(lock) => {
+            info!(
+                "Instance lock acquired: {}",
+                InstanceLock::socket_path().display()
+            );
+            lock
+        }
+        Err(InstanceLockError::AlreadyRunning) => {
+            eprintln!("Error: Another instance of virtual-matter-bridge is already running");
+            eprintln!("Socket: {}", InstanceLock::socket_path().display());
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error acquiring instance lock: {}", e);
+            std::process::exit(1);
+        }
+    };
+
     info!("Starting Virtual Matter Bridge");
 
     // Load configuration
@@ -246,7 +281,7 @@ async fn main() {
 
     // Start Matter stack in a separate thread
     // Matter uses blocking I/O internally with embassy, so we run it on a dedicated thread
-    let _matter_handle = std::thread::Builder::new()
+    let matter_handle = std::thread::Builder::new()
         .name("matter-stack".into())
         .stack_size(550 * 1024) // 550KB stack for Matter operations (matches rs-matter examples)
         .spawn(move || {
@@ -265,16 +300,48 @@ async fn main() {
     // Wait for shutdown signal
     match signal::ctrl_c().await {
         Ok(()) => {
-            info!("Received shutdown signal");
+            info!("Received shutdown signal, initiating graceful shutdown...");
         }
         Err(e) => {
             log::error!("Failed to listen for shutdown signal: {}", e);
         }
     }
 
-    // Shutdown
+    // Signal Matter stack to shut down
+    matter::signal_shutdown();
+
+    // Abort async tasks
     sensor_task.abort();
     mqtt_task.abort();
+
+    // Wait for Matter thread to finish (with timeout)
+    info!("Waiting for Matter stack to shut down...");
+    let join_result = std::thread::spawn(move || {
+        // We can't directly timeout a thread join, so we spawn a helper thread
+        matter_handle.join()
+    });
+
+    // Give Matter stack up to 5 seconds to shut down gracefully
+    let shutdown_timeout = Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    loop {
+        if join_result.is_finished() {
+            match join_result.join() {
+                Ok(Ok(())) => info!("Matter stack thread joined successfully"),
+                Ok(Err(_)) => log::warn!("Matter stack thread panicked during shutdown"),
+                Err(_) => log::warn!("Failed to join Matter helper thread"),
+            }
+            break;
+        }
+        if start.elapsed() > shutdown_timeout {
+            log::warn!(
+                "Matter stack did not shut down within {:?}, proceeding anyway",
+                shutdown_timeout
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
     // Shutdown the camera input
     let camera_for_shutdown = camera.clone();
@@ -282,12 +349,12 @@ async fn main() {
         let camera_lock = camera_for_shutdown.read();
         futures_lite::future::block_on(async {
             if let Err(e) = camera_lock.shutdown().await {
-                log::error!("Error during shutdown: {}", e);
+                log::error!("Error during camera shutdown: {}", e);
             }
         });
     })
     .await
-    .expect("Shutdown task panicked");
+    .expect("Camera shutdown task panicked");
 
     info!("Virtual Matter Bridge stopped");
 }

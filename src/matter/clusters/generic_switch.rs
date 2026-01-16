@@ -13,7 +13,8 @@
 //! - ShortRelease (0x03) - Button released after short press
 //! - MultiPressComplete (0x06) - Multi-press sequence completed
 
-use parking_lot::Mutex;
+use crate::matter::endpoints::ClusterNotifier;
+use parking_lot::{Mutex, RwLock};
 use rs_matter::dm::clusters::generic_switch::{
     encode_initial_press, encode_multi_press_complete, encode_short_release, events,
 };
@@ -107,6 +108,8 @@ pub struct GenericSwitchState {
     start_time: Instant,
     /// Endpoint ID (set when wired to Matter stack)
     endpoint_id: AtomicU8,
+    /// Notifier for Matter subscription updates
+    notifier: RwLock<Option<ClusterNotifier>>,
 }
 
 impl GenericSwitchState {
@@ -118,6 +121,22 @@ impl GenericSwitchState {
             pending_events: Mutex::new(heapless::Vec::new()),
             start_time: Instant::now(),
             endpoint_id: AtomicU8::new(0),
+            notifier: RwLock::new(None),
+        }
+    }
+
+    /// Set a notifier for Matter subscription updates.
+    ///
+    /// When events are recorded, the notifier will signal the Matter stack
+    /// to push updates to subscribed controllers.
+    pub fn set_notifier(&self, notifier: ClusterNotifier) {
+        *self.notifier.write() = Some(notifier);
+    }
+
+    /// Notify the Matter stack that an event occurred.
+    fn notify(&self) {
+        if let Some(notifier) = self.notifier.read().as_ref() {
+            notifier.notify();
         }
     }
 
@@ -158,6 +177,9 @@ impl GenericSwitchState {
 
         let mut events = self.pending_events.lock();
         events.push(event).ok();
+
+        // Notify subscription system that an event occurred
+        self.notify();
     }
 
     /// Record a ShortRelease event (button released after short press).
@@ -177,6 +199,9 @@ impl GenericSwitchState {
 
         let mut events = self.pending_events.lock();
         events.push(event).ok();
+
+        // Notify subscription system that an event occurred
+        self.notify();
     }
 
     /// Record a single press (InitialPress + ShortRelease).
@@ -202,6 +227,9 @@ impl GenericSwitchState {
 
         let mut events = self.pending_events.lock();
         events.push(event).ok();
+
+        // Notify subscription system that an event occurred
+        self.notify();
     }
 
     /// Record a hold start (InitialPress, kept pressed).
