@@ -1869,3 +1869,549 @@ Log output should show:
 - [GitHub issue: W100 external temperature workaround](https://github.com/Koenkk/zigbee2mqtt/issues/27262)
 - [Home Assistant blueprint for W100](https://github.com/clementTal/homelab/blob/main/blueprint/aqara-w100.yaml)
 - [Matter specification clusters](https://csa-iot.org/developer-resource/specifications-download-request/)
+
+---
+
+## Phase 4: Event Delivery Investigation (2026-01-16)
+
+### Current Status
+
+Events are being **queued and collected correctly**, but Home Assistant never receives them.
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│                          EVENT PIPELINE STATUS                              │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. Button press detected via MQTT                           ✅ WORKING    │
+│     └─> W100Action::SingleCenter parsed                                    │
+│                                                                             │
+│  2. GenericSwitchState.single_press() called                 ✅ WORKING    │
+│     └─> press() + release() queues 2 events (InitialPress + ShortRelease) │
+│                                                                             │
+│  3. AggregatedEventSource.take_pending_events()              ✅ WORKING    │
+│     └─> Returns 2 events from GenericSwitchState                           │
+│                                                                             │
+│  4. DynamicHandler.as_event_source() returns Some            ✅ WORKING    │
+│     └─> Logs: "[EVENTS] as_event_source returned Some, collecting..."      │
+│                                                                             │
+│  5. collect_pending_events() collects 2 events               ✅ WORKING    │
+│     └─> Logs: "[EVENTS] collected 2 events from source"                    │
+│                                                                             │
+│  6. end_reply() receives 2 events for encoding               ✅ WORKING    │
+│     └─> Logs: "[EVENTS] end_reply encoding 2 events"                       │
+│                                                                             │
+│  7. EventReportIB TLV encoding                               ❓ UNVERIFIED │
+│     └─> Events encoded into WriteBuf, but bytes not inspected              │
+│                                                                             │
+│  8. ReportData sent to Home Assistant                        ❓ UNVERIFIED │
+│     └─> Network transmission not confirmed                                 │
+│                                                                             │
+│  9. Home Assistant receives and processes events             ❌ NOT WORKING│
+│     └─> Buttons show "Unknown", activity log empty                         │
+│                                                                             │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Debug Log Evidence (2026-01-16 07:51)
+
+```
+[07:51:07.623Z] [Matter] Button Center: single press event emitted
+... 18x end_reply encoding 0 events (intermediate attribute chunks) ...
+[07:51:07.786Z] [EVENTS] as_event_source returned Some, collecting...
+[07:51:07.786Z] [EVENTS] collected 2 events from source
+[07:51:07.786Z] [EVENTS] collect_pending_events returned 2 events
+[07:51:07.786Z] [EVENTS] end_reply encoding 2 events
+```
+
+**Observation:** The 18 "encoding 0 events" messages are from intermediate chunks for ATTRIBUTES. Events are correctly included in the final chunk (2 events).
+
+### Verified Correct
+
+| Component | Status | Evidence |
+|-----------|--------|----------|
+| TLV Tag: EventReports | ✅ Tag 2 | `ReportDataRespTag::EventReports = 2` in rs-matter |
+| TLV Tag: EventDataIB fields | ✅ Tags 0-7 | Path=0, EventNumber=1, Priority=2, Timestamps=3-6, Data=7 |
+| Event Collection Pipeline | ✅ Working | Logs confirm 2 events collected and passed to `end_reply()` |
+| Cluster ID | ✅ 0x003B | `CLUSTER_ID: u32 = 0x003B` in generic_switch.rs |
+| Event IDs | ✅ Correct | InitialPress=0x01, ShortRelease=0x03 from rs-matter |
+| Endpoint IDs | ✅ 5, 6, 7 | Button Plus=5, Minus=6, Center=7 (fit in u8) |
+| Payload Encoding | ✅ Using rs-matter | `encode_initial_press()`, `encode_short_release()` |
+
+### Unverified / Suspected Issues
+
+| Area | Status | Description |
+|------|--------|-------------|
+| Event payload TLV re-tagging | ❓ Suspect | Pre-encoded payload is re-tagged from anonymous to context tag 7. May produce invalid TLV. |
+| Event subscription from HA | ❓ Unknown | Not verified if HA subscribes to events (vs only attributes) |
+| ReportData wire transmission | ❓ Unknown | Events encoded but not confirmed sent over network |
+| EventReportIB structure | ❓ Unknown | May not match what HA/python-matter-server expects |
+
+### Debugging Options
+
+#### Option A: Quick Fixes First (Recommended Starting Point)
+
+**Goal:** Reduce noise and verify basic assumptions before deep debugging.
+
+**Steps:**
+
+1. **Reduce Log Noise**
+
+   **File:** `rs-matter/rs-matter/src/dm.rs` line ~1129
+
+   Change:
+   ```rust
+   info!("[EVENTS] end_reply encoding {} events", events.len());
+   ```
+   To:
+   ```rust
+   if !events.is_empty() {
+       info!("[EVENTS] end_reply encoding {} events", events.len());
+   }
+   ```
+
+2. **Verify Event Subscription**
+
+   Add logging to check if HA requests events in subscriptions:
+
+   **File:** `rs-matter/rs-matter/src/dm.rs` (in subscription handling)
+   ```rust
+   if let Some(event_requests) = self.req.event_requests()? {
+       info!("[EVENTS] Subscription has event request paths");
+       for path in event_requests {
+           info!("[EVENTS]   - endpoint={:?}, cluster={:?}, event={:?}",
+               path.endpoint, path.cluster, path.event);
+       }
+   } else {
+       warn!("[EVENTS] Subscription has NO event requests - only attributes!");
+   }
+   ```
+
+   **Why:** If HA only subscribes to attributes (not events), the events would be collected but never reported. This is a quick check that could identify the root cause.
+
+**Effort:** ~30 minutes
+**Risk:** Low - only adds/modifies logging
+
+---
+
+#### Option B: Add Hex Dump Logging
+
+**Goal:** See exactly what TLV bytes are being encoded for events.
+
+**Steps:**
+
+1. **Log Event Details Before Encoding**
+
+   **File:** `rs-matter/rs-matter/src/dm.rs` (in `end_reply()` loop, after line 1186)
+   ```rust
+   log::info!("[EVENTS] Encoding event #{}: endpoint={}, cluster=0x{:04X}, event_id=0x{:02X}, payload_len={}",
+       event.event_number, event.endpoint_id, event.cluster_id, event.event_id, event.payload.len());
+   log::info!("[EVENTS]   payload bytes: {:02X?}", event.payload.as_slice());
+   ```
+
+2. **Log WriteBuf After Each Event**
+
+   **File:** `rs-matter/rs-matter/src/dm.rs` (after `EventReportIB::with_data(event_data).to_tlv(...)`)
+   ```rust
+   log::info!("[EVENTS]   buffer position after encoding: {}", wb.get_tail());
+   ```
+
+3. **Log Final EventReports Array**
+
+   **File:** `rs-matter/rs-matter/src/dm.rs` (after `wb.end_container()` for EventReports)
+   ```rust
+   // Log last N bytes of buffer to see encoded events
+   let tail = wb.get_tail();
+   let start = tail.saturating_sub(100);
+   log::info!("[EVENTS] EventReports TLV (last {} bytes): {:02X?}",
+       tail - start, &wb.as_slice()[start..tail]);
+   ```
+
+**Effort:** ~1 hour
+**Risk:** Low - only adds logging, but output is verbose
+
+---
+
+#### Option C: Compare with Native W100 via Wireshark
+
+**Goal:** Capture and compare Matter traffic from working native W100 vs our bridge.
+
+**Prerequisites:**
+- Wireshark with Matter dissector
+- Access to capture traffic on the network between HA and both devices
+
+**Steps:**
+
+1. **Setup Wireshark Capture**
+   - Filter: `matter` or UDP port 5540
+   - Start capture on the network interface
+
+2. **Capture Native W100 Button Press**
+   - Press button on native Thread/Matter W100 (works correctly)
+   - Find the ReportData message containing EventReports
+   - Export the TLV bytes
+
+3. **Capture Bridge W100 Button Press**
+   - Press button on Zigbee W100 (goes through our bridge)
+   - Find the ReportData message containing EventReports
+   - Export the TLV bytes
+
+4. **Compare TLV Structure**
+   - Use a TLV parser to decode both
+   - Identify differences in structure, tags, or values
+
+**Effort:** ~2-3 hours (requires Wireshark setup)
+**Risk:** None - purely observational
+
+---
+
+#### Option D: Test with chip-tool
+
+**Goal:** Use Matter's reference implementation to test event delivery.
+
+**Steps:**
+
+1. **Install chip-tool**
+   ```bash
+   nix-shell -p chip-tool
+   ```
+
+2. **Commission the bridge to chip-tool**
+   ```bash
+   chip-tool pairing onnetwork-long <node-id> <setup-code>
+   ```
+
+3. **Subscribe to GenericSwitch events**
+   ```bash
+   chip-tool genericswitch subscribe-event initial-press <min-interval> <max-interval> <node-id> <endpoint-id>
+   ```
+
+4. **Press W100 button and observe chip-tool output**
+
+   If chip-tool receives events, the issue is in HA/python-matter-server.
+   If chip-tool doesn't receive events, the issue is in our encoding.
+
+**Effort:** ~1-2 hours
+**Risk:** Low - independent testing
+
+---
+
+### Payload Re-tagging Deep Dive
+
+The pre-encoded event payload goes through re-tagging in `EventDataIB::to_tlv()`:
+
+**File:** `rs-matter/rs-matter/src/im/event.rs` lines 266-281
+
+```rust
+// Data payload (tag 7) - pre-encoded TLV with re-tagging
+if let Some(data) = self.data {
+    if !data.is_empty() {
+        // The payload is a pre-encoded TLV element with anonymous tag.
+        // Parse the control byte to extract the value type.
+        let control = TLVControl::parse(data[0])?;
+
+        // Write context tag 7 with the parsed value type
+        tw.raw_value(
+            &TLVTag::Context(EventDataTag::Data as u8),
+            control.value_type,
+            &[],
+        )?;
+
+        // Write the rest of the payload (skip the anonymous control byte)
+        tw.write_raw_data(data[1..].iter().copied())?;
+    }
+}
+```
+
+**Payload from `encode_initial_press(1)`:**
+```
+Hex:  0x15  0x24  0x00  0x01  0x18
+       │     │     │     │     └── End container
+       │     │     │     └── Value: 1 (position)
+       │     │     └── Context tag 0
+       │     └── Control byte for u8 with context tag
+       └── Start struct (anonymous tag)
+```
+
+**Re-tagging Process:**
+1. `TLVControl::parse(0x15)` extracts: element type = struct (0x15)
+2. `tw.raw_value(Context(7), struct_type, &[])` writes: context tag 7 + struct control byte
+3. `tw.write_raw_data(data[1..])` writes: `0x24 0x00 0x01 0x18`
+
+**Potential Issue:** The `raw_value` function may not correctly combine the context tag with the struct element type. Need to verify the output bytes match this expected format:
+```
+Expected:  [context-tag-7-struct-control]  0x24  0x00  0x01  0x18
+```
+
+### Next Steps
+
+1. Start with **Option A** (Quick Fixes) to reduce noise and verify event subscription
+2. If subscription is confirmed working, proceed to **Option B** (Hex Dump Logging)
+3. If TLV appears correct, try **Option D** (chip-tool) to isolate HA vs encoding issue
+4. If needed, use **Option C** (Wireshark) for definitive comparison
+
+---
+
+### Test Results (2026-01-16 08:13)
+
+**Debugging logs were added to rs-matter fork and tested.**
+
+#### Key Findings
+
+| Finding | Status | Evidence |
+|---------|--------|----------|
+| Event subscription from HA | ✅ WORKING | `Subscription has event request: endpoint=None, cluster=None, event=None` (wildcard = all events) |
+| Event collection | ✅ WORKING | `collected 2 events from source` |
+| Event encoding | ✅ WORKING | `end_reply encoding 2 events` with full TLV hex dump |
+| Events reaching HA | ❌ NOT WORKING | Buttons still show "Unknown" |
+
+#### Button Endpoints
+
+```
+Button Plus:   endpoint=17
+Button Minus:  endpoint=18
+Button Center: endpoint=19
+```
+
+#### Captured Event Encoding (Button Center - single_center)
+
+```
+[2026-01-16T08:13:08.422Z] [MQTT] Tim-Thermometer button action: single_center
+[2026-01-16T08:13:08.422Z] [Matter] Button Center: single press event emitted
+[2026-01-16T08:13:08.422Z] [EVENTS] collected 2 events from source
+[2026-01-16T08:13:08.422Z] [EVENTS] collect_pending_events returned 2 events
+[2026-01-16T08:13:08.422Z] [EVENTS] Subscription has event request: endpoint=None, cluster=None, event=None
+[2026-01-16T08:13:08.422Z] [EVENTS] end_reply encoding 2 events
+[2026-01-16T08:13:08.422Z] [EVENTS] Encoding event #1: endpoint=19, cluster=0x003B, event_id=0x01
+[2026-01-16T08:13:08.422Z] [EVENTS]   payload (5 bytes): [15, 24, 00, 01, 18]
+[2026-01-16T08:13:08.422Z] [EVENTS] Encoding event #2: endpoint=19, cluster=0x003B, event_id=0x03
+[2026-01-16T08:13:08.422Z] [EVENTS]   payload (5 bytes): [15, 24, 00, 01, 18]
+[2026-01-16T08:13:08.422Z] [EVENTS] EventReports TLV (68 bytes): [36, 02, 15, 35, 01, 37, 00, 24, 01, 13, 24, 02, 3B, 24, 03, 01, 18, 24, 01, 01, 24, 02, 01, 25, 04, 25, 49, 35, 07, 24, 00, 01, 18, 18, 18, 15, 35, 01, 37, 00, 24, 01, 13, 24, 02, 3B, 24, 03, 03, 18, 24, 01, 02, 24, 02, 01, 24, 06, 00, 35, 07, 24, 00, 01, 18, 18, 18, 18]
+```
+
+#### Captured Event Encoding (Button Plus - single_plus)
+
+```
+[2026-01-16T08:13:30.909Z] [MQTT] Tim-Thermometer button action: single_plus
+[2026-01-16T08:13:30.909Z] [Matter] Button Plus: single press event emitted
+[2026-01-16T08:13:31.031Z] [EVENTS] collected 2 events from source
+[2026-01-16T08:13:31.031Z] [EVENTS] collect_pending_events returned 2 events
+[2026-01-16T08:13:31.031Z] [EVENTS] Subscription has event request: endpoint=None, cluster=None, event=None
+[2026-01-16T08:13:31.032Z] [EVENTS] end_reply encoding 2 events
+[2026-01-16T08:13:31.032Z] [EVENTS] Encoding event #1: endpoint=17, cluster=0x003B, event_id=0x01
+[2026-01-16T08:13:31.032Z] [EVENTS]   payload (5 bytes): [15, 24, 00, 01, 18]
+[2026-01-16T08:13:31.032Z] [EVENTS] Encoding event #2: endpoint=17, cluster=0x003B, event_id=0x03
+[2026-01-16T08:13:31.032Z] [EVENTS]   payload (5 bytes): [15, 24, 00, 01, 18]
+[2026-01-16T08:13:31.032Z] [EVENTS] EventReports TLV (68 bytes): [36, 02, 15, 35, 01, 37, 00, 24, 01, 11, 24, 02, 3B, 24, 03, 01, 18, 24, 01, 01, 24, 02, 01, 25, 04, A0, A1, 35, 07, 24, 00, 01, 18, 18, 18, 15, 35, 01, 37, 00, 24, 01, 11, 24, 02, 3B, 24, 03, 03, 18, 24, 01, 02, 24, 02, 01, 24, 06, 00, 35, 07, 24, 00, 01, 18, 18, 18, 18]
+```
+
+#### TLV Hex Dump Analysis
+
+The EventReports TLV (68 bytes) for Button Center single press:
+```
+36 02              -- Context tag 2, start array (EventReports)
+15                 -- Start struct (anonymous) - EventReportIB #1
+  35 01            -- Context tag 1, start struct (EventDataIB)
+    37 00          -- Context tag 0, start struct (EventPath)
+      24 01 13     -- Context tag 1, u8: 0x13 (19 = endpoint)
+      24 02 3B     -- Context tag 2, u8: 0x3B (59 = GenericSwitch cluster low byte)
+      24 03 01     -- Context tag 3, u8: 0x01 (event_id = InitialPress)
+    18             -- End struct (EventPath)
+    24 01 01       -- Context tag 1, u8: 0x01 (event_number = 1)
+    24 02 01       -- Context tag 2, u8: 0x01 (priority = Info)
+    25 04 25 49    -- Context tag 4, u16: 0x4925 (system_timestamp_ms low bits)
+    35 07          -- Context tag 7, start struct (data payload)
+      24 00 01     -- Context tag 0, u8: 0x01 (NewPosition = 1)
+    18             -- End struct (data payload)
+  18               -- End struct (EventDataIB)
+18                 -- End struct (EventReportIB #1)
+15                 -- Start struct (anonymous) - EventReportIB #2
+  35 01            -- Context tag 1, start struct (EventDataIB)
+    37 00          -- Context tag 0, start struct (EventPath)
+      24 01 13     -- Context tag 2, u8: 0x13 (19 = endpoint)
+      24 02 3B     -- Context tag 2, u8: 0x3B (cluster)
+      24 03 03     -- Context tag 3, u8: 0x03 (event_id = ShortRelease)
+    18             -- End struct (EventPath)
+    24 01 02       -- Context tag 1, u8: 0x02 (event_number = 2)
+    24 02 01       -- Context tag 2, u8: 0x01 (priority = Info)
+    24 06 00       -- Context tag 6, u8: 0x00 (delta_system_timestamp = 0)
+    35 07          -- Context tag 7, start struct (data payload)
+      24 00 01     -- Context tag 0, u8: 0x01 (PreviousPosition = 1)
+    18             -- End struct (data payload)
+  18               -- End struct (EventDataIB)
+18                 -- End struct (EventReportIB #2)
+18                 -- End array (EventReports)
+```
+
+#### Potential Issues Identified
+
+1. **Cluster ID encoding**: The cluster ID `0x003B` is being encoded as single byte `0x3B` (context tag 2, u8). Per Matter spec, cluster IDs are 32-bit. This might need to be encoded as u32 instead of u8.
+
+2. **Event path structure**: Need to verify the EventPathIB structure matches Matter spec exactly.
+
+3. **System timestamp**: The timestamp encoding might be wrong - using u16 (tag 25) but spec might require u64.
+
+#### Remaining Investigation
+
+The TLV IS being encoded and sent, but HA doesn't process it. Next steps:
+
+1. **Compare with working device**: Capture TLV from native Aqara W100 via Wireshark
+2. **Test with chip-tool**: See if chip-tool can receive the events
+3. **Check python-matter-server logs**: See if it receives but fails to parse the events
+4. **Verify TLV structure**: The cluster ID and timestamp encodings may be incorrect
+
+---
+
+### Cleanup TODO
+
+> **IMPORTANT:** Once events are working, remove the debug logging added to rs-matter fork:
+>
+> **File:** `rs-matter/rs-matter/src/dm.rs`
+> - Lines ~921-923: Remove `[EVENTS] collect_pending_events` log
+> - Lines ~931-932: Remove `[EVENTS] Subscription has event request` log
+> - Lines ~944-946: Remove `[EVENTS] Filtered events` log
+> - Lines ~950-952: Remove `[EVENTS] Subscription has NO event requests` warning
+> - Lines ~1143: Remove `[EVENTS] end_reply encoding` log
+> - Lines ~1150-1155: Remove `[EVENTS] Encoding event` and payload logs
+> - Lines ~1217-1220: Remove `[EVENTS] EventReports TLV` hex dump log
+>
+> **File:** `rs-matter/rs-matter/src/dm/types/reply.rs`
+> - Remove any `[EVENTS] as_event_source` and `[EVENTS] collected N events` logs
+
+---
+
+### Full Test Log (2026-01-16 08:12-08:13)
+
+<details>
+<summary>Click to expand full log output</summary>
+
+```
+make run
+RUST_LOG=info cargo run --bin virtual-matter-bridge
+   Compiling rs-matter v0.1.1 (/home/tim/Coding/public_repos/rs-matter/rs-matter)
+   Compiling virtual-matter-bridge v0.1.0 (/home/tim/Coding/public_repos/virtual_matter_bridge)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.24s
+     Running `target/debug/virtual-matter-bridge`
+[2026-01-16T08:12:49.532Z INFO  virtual_matter_bridge] Starting Virtual Matter Bridge
+[2026-01-16T08:12:49.532Z INFO  virtual_matter_bridge] Configuration loaded:
+[2026-01-16T08:12:49.532Z INFO  virtual_matter_bridge]   Device Name: Virtual Doorbell
+[2026-01-16T08:12:49.532Z INFO  virtual_matter_bridge]   RTSP URL: rtsp://username:password@192.168.1.100:554/h264Preview_01_main
+[2026-01-16T08:12:49.532Z INFO  virtual_matter_bridge]   Vendor ID: 0xFFF1
+[2026-01-16T08:12:49.532Z INFO  virtual_matter_bridge]   Product ID: 0x8001
+[2026-01-16T08:12:49.532Z INFO  virtual_matter_bridge]   Discriminator: 3840
+[2026-01-16T08:12:49.532Z INFO  virtual_matter_bridge::input::camera::input] Initializing camera input...
+[2026-01-16T08:12:49.532Z INFO  virtual_matter_bridge::input::camera::rtsp_client] Connecting to RTSP server: rtsp://username:password@192.168.1.100:554/h264Preview_01_main
+[2026-01-16T08:12:49.532Z INFO  virtual_matter_bridge::input::camera::rtsp_client] Connected to RTSP server. Stream: 1920x1080 @ 30fps, codec: H264
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::input::camera::input] Camera input initialized successfully
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge] Virtual Matter Bridge is running
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge]   - Camera input ready
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge]   - 6 virtual devices configured
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge]   - Press Ctrl+C to exit
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge] Matter stack started on dedicated thread
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::input::mqtt::integration] [MQTT] Connecting to 10.0.0.2:1883
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack] Initializing Matter stack...
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::input::mqtt::client] Starting MQTT event loop
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack] Built Matter node with 20 endpoints (6 virtual devices)
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::netif] Auto-detected network interface: enp16s0
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack] Using interface 'enp16s0' (index 2) with 10.0.0.3 and 2a02:908:df57:3f20:dac3:7f65:a500:48f4
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack] Matter UDP socket bound to [2a02:908:df57:3f20:dac3:7f65:a500:48f4]:5540
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack] No schema hash found, storing current (0x773c0e6bb0cc80af)
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack] Opening commissioning window for 900 seconds...
+[2026-01-16T08:12:49.533Z INFO  rs_matter::sc::pake] PASE Basic Commissioning Window opened
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack] Matter device ready for commissioning
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack]   Discriminator: 3840
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack]   Passcode: 20202021
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack] Auto-commission enabled: ws://10.0.0.2:5580/ws
+[2026-01-16T08:12:49.533Z WARN  virtual_matter_bridge::matter::stack] VideoDoorbellCamera endpoint 13 registered but camera handlers not yet wired
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack] [Matter] GenericSwitch endpoint 17 registered for 'Button Plus'
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack] [Matter] GenericSwitch endpoint 18 registered for 'Button Minus'
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack] [Matter] GenericSwitch endpoint 19 registered for 'Button Center'
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack] Matter stack running. Waiting for controller connections...
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::matter::stack] mDNS socket bound to [::]:5353
+[2026-01-16T08:12:49.533Z INFO  rs_matter::transport] Running Matter transport
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::input::mqtt::client] [MQTT] Connected to broker
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::input::mqtt::integration] [MQTT] Connection established, subscribing to topics
+[2026-01-16T08:12:49.533Z INFO  virtual_matter_bridge::commissioning] [Commission] Waiting for Matter stack to initialize...
+[2026-01-16T08:12:49.533Z INFO  rs_matter::respond] Responder: Creating 4 handlers
+[2026-01-16T08:12:49.533Z INFO  rs_matter::respond] Busy Responder: Creating 4 handlers
+[2026-01-16T08:12:49.635Z INFO  virtual_matter_bridge::input::mqtt::integration] [MQTT] Requested initial state for Tim-Thermometer
+[2026-01-16T08:12:49.635Z INFO  virtual_matter_bridge::input::mqtt::integration] [MQTT] Integration started with 1 W100 device(s)
+[2026-01-16T08:12:54.535Z INFO  virtual_matter_bridge::commissioning] [Commission] Connecting to python-matter-server at ws://10.0.0.2:5580/ws
+[2026-01-16T08:12:54.536Z INFO  virtual_matter_bridge::commissioning] [Commission] Connected to python-matter-server
+[2026-01-16T08:12:54.536Z INFO  virtual_matter_bridge::commissioning] [Commission] Commissioning with code 34970112332 (network_only)
+[2026-01-16T08:12:54.536Z INFO  virtual_matter_bridge::commissioning] [Commission] Waiting for commissioning response...
+[2026-01-16T08:12:55.669Z INFO  rs_matter::dm::types::reply] [EVENTS] as_event_source returned Some, collecting...
+[2026-01-16T08:12:55.669Z INFO  rs_matter::dm::types::reply] [EVENTS] collected 0 events from source
+[2026-01-16T08:12:55.674Z INFO  rs_matter::dm::types::reply] [EVENTS] as_event_source returned Some, collecting...
+[2026-01-16T08:12:55.674Z INFO  rs_matter::dm::types::reply] [EVENTS] collected 0 events from source
+[2026-01-16T08:12:55.684Z INFO  rs_matter::dm::clusters::noc] Got Cert Chain Request
+[2026-01-16T08:12:55.687Z INFO  rs_matter::dm::clusters::noc] Got Cert Chain Request
+[2026-01-16T08:12:55.691Z INFO  rs_matter::dm::clusters::noc] Got Attestation Request
+[2026-01-16T08:12:55.747Z INFO  rs_matter::dm::clusters::noc] Got CSR Request
+[2026-01-16T08:12:55.787Z INFO  rs_matter::dm::clusters::noc] Got Add Trusted Root Cert Request
+[2026-01-16T08:12:55.789Z INFO  rs_matter::dm::clusters::noc] Got Add NOC Request
+[2026-01-16T08:12:55.795Z INFO  rs_matter::failsafe] Added operational fabric with local index 1
+[2026-01-16T08:12:56.826Z INFO  rs_matter::sc::pake] PASE Commissioning Window closed
+[2026-01-16T08:12:56.990Z INFO  rs_matter::dm::types::reply] [EVENTS] as_event_source returned Some, collecting...
+[2026-01-16T08:12:56.990Z INFO  rs_matter::dm::types::reply] [EVENTS] collected 0 events from source
+[2026-01-16T08:12:57.459Z INFO  rs_matter::dm::clusters::noc] Got Update Fabric Label Request: Ok("Home")
+[2026-01-16T08:12:57.672Z INFO  rs_matter::dm::types::reply] [EVENTS] as_event_source returned Some, collecting...
+[2026-01-16T08:12:57.672Z INFO  rs_matter::dm::types::reply] [EVENTS] collected 0 events from source
+[2026-01-16T08:12:57.672Z INFO  rs_matter::dm] [EVENTS] Subscription has event request: endpoint=None, cluster=None, event=None
+[2026-01-16T08:12:57.686Z INFO  virtual_matter_bridge::commissioning] [Commission] Successfully commissioned to python-matter-server!
+[2026-01-16T08:12:57.686Z INFO  virtual_matter_bridge::matter::stack] Auto-commission completed successfully
+[2026-01-16T08:12:59.534Z INFO  virtual_matter_bridge] [Simulation] Door sensor toggled to: false
+[2026-01-16T08:12:59.682Z INFO  rs_matter::dm::types::reply] [EVENTS] as_event_source returned Some, collecting...
+[2026-01-16T08:12:59.682Z INFO  rs_matter::dm::types::reply] [EVENTS] collected 0 events from source
+[2026-01-16T08:12:59.682Z INFO  rs_matter::dm] [EVENTS] Subscription has event request: endpoint=None, cluster=None, event=None
+[2026-01-16T08:13:04.535Z INFO  virtual_matter_bridge] [Simulation] Motion sensor toggled to: true
+[2026-01-16T08:13:04.694Z INFO  rs_matter::dm::types::reply] [EVENTS] as_event_source returned Some, collecting...
+[2026-01-16T08:13:04.694Z INFO  rs_matter::dm::types::reply] [EVENTS] collected 0 events from source
+[2026-01-16T08:13:04.694Z INFO  rs_matter::dm] [EVENTS] Subscription has event request: endpoint=None, cluster=None, event=None
+[2026-01-16T08:13:08.258Z INFO  virtual_matter_bridge::input::mqtt::integration] [MQTT] Tim-Thermometer temperature updated: 22.0°C
+[2026-01-16T08:13:08.258Z INFO  virtual_matter_bridge::input::mqtt::integration] [MQTT] Tim-Thermometer humidity updated: 57.2%
+[2026-01-16T08:13:08.258Z INFO  virtual_matter_bridge::input::mqtt::integration] [MQTT] Tim-Thermometer button action: single_center
+[2026-01-16T08:13:08.258Z INFO  virtual_matter_bridge::input::mqtt::integration] [Matter] Button Center: single press event emitted
+[2026-01-16T08:13:08.422Z INFO  rs_matter::dm::types::reply] [EVENTS] as_event_source returned Some, collecting...
+[2026-01-16T08:13:08.422Z INFO  rs_matter::dm::types::reply] [EVENTS] collected 2 events from source
+[2026-01-16T08:13:08.422Z INFO  rs_matter::dm] [EVENTS] collect_pending_events returned 2 events
+[2026-01-16T08:13:08.422Z INFO  rs_matter::dm] [EVENTS] Subscription has event request: endpoint=None, cluster=None, event=None
+[2026-01-16T08:13:08.422Z INFO  rs_matter::dm] [EVENTS] end_reply encoding 2 events
+[2026-01-16T08:13:08.422Z INFO  rs_matter::dm] [EVENTS] Encoding event #1: endpoint=19, cluster=0x003B, event_id=0x01
+[2026-01-16T08:13:08.422Z INFO  rs_matter::dm] [EVENTS]   payload (5 bytes): [15, 24, 00, 01, 18]
+[2026-01-16T08:13:08.422Z INFO  rs_matter::dm] [EVENTS] Encoding event #2: endpoint=19, cluster=0x003B, event_id=0x03
+[2026-01-16T08:13:08.422Z INFO  rs_matter::dm] [EVENTS]   payload (5 bytes): [15, 24, 00, 01, 18]
+[2026-01-16T08:13:08.422Z INFO  rs_matter::dm] [EVENTS] EventReports TLV (68 bytes): [36, 02, 15, 35, 01, 37, 00, 24, 01, 13, 24, 02, 3B, 24, 03, 01, 18, 24, 01, 01, 24, 02, 01, 25, 04, 25, 49, 35, 07, 24, 00, 01, 18, 18, 18, 15, 35, 01, 37, 00, 24, 01, 13, 24, 02, 3B, 24, 03, 03, 18, 24, 01, 02, 24, 02, 01, 24, 06, 00, 35, 07, 24, 00, 01, 18, 18, 18, 18]
+[2026-01-16T08:13:14.535Z INFO  virtual_matter_bridge] [Simulation] Door sensor toggled to: true
+[2026-01-16T08:13:14.692Z INFO  rs_matter::dm::types::reply] [EVENTS] as_event_source returned Some, collecting...
+[2026-01-16T08:13:14.692Z INFO  rs_matter::dm::types::reply] [EVENTS] collected 0 events from source
+[2026-01-16T08:13:14.692Z INFO  rs_matter::dm] [EVENTS] Subscription has event request: endpoint=None, cluster=None, event=None
+[2026-01-16T08:13:19.537Z INFO  virtual_matter_bridge] [Simulation] Motion sensor toggled to: false
+[2026-01-16T08:13:19.686Z INFO  rs_matter::dm::types::reply] [EVENTS] as_event_source returned Some, collecting...
+[2026-01-16T08:13:19.686Z INFO  rs_matter::dm::types::reply] [EVENTS] collected 0 events from source
+[2026-01-16T08:13:19.686Z INFO  rs_matter::dm] [EVENTS] Subscription has event request: endpoint=None, cluster=None, event=None
+[2026-01-16T08:13:29.537Z INFO  virtual_matter_bridge] [Simulation] Door sensor toggled to: false
+[2026-01-16T08:13:29.637Z INFO  rs_matter::dm::types::reply] [EVENTS] as_event_source returned Some, collecting...
+[2026-01-16T08:13:29.638Z INFO  rs_matter::dm::types::reply] [EVENTS] collected 0 events from source
+[2026-01-16T08:13:29.638Z INFO  rs_matter::dm] [EVENTS] Subscription has event request: endpoint=None, cluster=None, event=None
+[2026-01-16T08:13:30.909Z INFO  virtual_matter_bridge::input::mqtt::integration] [MQTT] Tim-Thermometer button action: single_plus
+[2026-01-16T08:13:30.909Z INFO  virtual_matter_bridge::input::mqtt::integration] [Matter] Button Plus: single press event emitted
+[2026-01-16T08:13:31.031Z INFO  rs_matter::dm::types::reply] [EVENTS] as_event_source returned Some, collecting...
+[2026-01-16T08:13:31.031Z INFO  rs_matter::dm::types::reply] [EVENTS] collected 2 events from source
+[2026-01-16T08:13:31.031Z INFO  rs_matter::dm] [EVENTS] collect_pending_events returned 2 events
+[2026-01-16T08:13:31.031Z INFO  rs_matter::dm] [EVENTS] Subscription has event request: endpoint=None, cluster=None, event=None
+[2026-01-16T08:13:31.032Z INFO  rs_matter::dm] [EVENTS] end_reply encoding 2 events
+[2026-01-16T08:13:31.032Z INFO  rs_matter::dm] [EVENTS] Encoding event #1: endpoint=17, cluster=0x003B, event_id=0x01
+[2026-01-16T08:13:31.032Z INFO  rs_matter::dm] [EVENTS]   payload (5 bytes): [15, 24, 00, 01, 18]
+[2026-01-16T08:13:31.032Z INFO  rs_matter::dm] [EVENTS] Encoding event #2: endpoint=17, cluster=0x003B, event_id=0x03
+[2026-01-16T08:13:31.032Z INFO  rs_matter::dm] [EVENTS]   payload (5 bytes): [15, 24, 00, 01, 18]
+[2026-01-16T08:13:31.032Z INFO  rs_matter::dm] [EVENTS] EventReports TLV (68 bytes): [36, 02, 15, 35, 01, 37, 00, 24, 01, 11, 24, 02, 3B, 24, 03, 01, 18, 24, 01, 01, 24, 02, 01, 25, 04, A0, A1, 35, 07, 24, 00, 01, 18, 18, 18, 15, 35, 01, 37, 00, 24, 01, 11, 24, 02, 3B, 24, 03, 03, 18, 24, 01, 02, 24, 02, 01, 24, 06, 00, 35, 07, 24, 00, 01, 18, 18, 18, 18]
+^C[2026-01-16T08:13:34.419Z INFO  virtual_matter_bridge] Received shutdown signal
+[2026-01-16T08:13:34.419Z INFO  virtual_matter_bridge::input::camera::input] Shutting down camera input...
+[2026-01-16T08:13:34.419Z INFO  virtual_matter_bridge::input::camera::rtsp_client] Disconnected from RTSP server
+[2026-01-16T08:13:34.419Z INFO  virtual_matter_bridge::input::camera::webrtc_bridge] Bridge shutdown complete
+[2026-01-16T08:13:34.419Z INFO  virtual_matter_bridge::input::camera::input] Camera input shutdown complete
+[2026-01-16T08:13:34.419Z INFO  virtual_matter_bridge] Virtual Matter Bridge stopped
+```
+
+</details>
