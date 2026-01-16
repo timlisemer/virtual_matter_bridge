@@ -590,13 +590,17 @@ Comparing our implementation against a native Thread/Matter W100 ("Küche Thermo
 | Serial Number | 54EF441001422B32 | Not exposed | ❌ Missing |
 | Identify | 5 endpoints | Not implemented | ❌ Missing |
 
-### Status Summary
+### Status Summary (Updated 2026-01-16)
 
 1. **Device Name/Vendor**: ✅ **IMPLEMENTED** - `BridgedDeviceBasicInformation` cluster now exposes `VendorName`, `ProductName`, `NodeLabel`, and other attributes.
 
-2. **Button Events**: ⛔ **BLOCKED** - W100 button actions ARE parsed from MQTT and logged, but **rs-matter does NOT support Matter events** (listed as "next steps" in rs-matter roadmap). Cannot expose as GenericSwitch without event support.
+2. **Temperature/Humidity Sensors**: ✅ **WORKING** - Values update live in Home Assistant.
 
-3. **Battery**: ❌ **NOT STARTED** - zigbee2mqtt publishes battery data, but no `PowerSource` cluster (0x002F) implementation exists yet.
+3. **Button Events**: ⚠️ **NOT WORKING** - rs-matter fork has event infrastructure, buttons appear in HA as "Unknown", app logs "event emitted" but events never reach HA. Official Aqara W100 via native Matter works correctly.
+
+4. **HA Activity Log**: ❌ **BROKEN** - Neither button events nor sensor changes appear in activity log.
+
+5. **Battery**: ❌ **NOT STARTED** - zigbee2mqtt publishes battery data, but no `PowerSource` cluster (0x002F) implementation exists yet.
 
 ### Implementation Status
 
@@ -614,20 +618,20 @@ All attributes now implemented in `src/matter/clusters/bridged_device_basic_info
 | SerialNumber | 0x000F | string | IEEE address | ✅ |
 | Reachable | 0x0011 | bool | true | ✅ |
 
-#### Part B: GenericSwitch Cluster for Buttons - ⛔ BLOCKED
+#### Part B: GenericSwitch Cluster for Buttons - ⚠️ EVENTS NOT REACHING HA
 
-**Blocker:** rs-matter does NOT support Matter events (required for GenericSwitch).
+**Status (2026-01-16):** rs-matter fork has event infrastructure implemented. Buttons visible in HA but events don't reach it.
 
-Button actions ARE parsed and logged, but cannot be exposed to Matter until rs-matter adds event support.
+Button actions ARE parsed, events ARE queued, app logs "event emitted", but Home Assistant never receives the events.
 
 **Current Endpoint Structure:**
 ```
 Tim Thermometer (Parent Device)
-├── EP3: Temperature Sensor     ✅ Working
-├── EP4: Humidity Sensor        ✅ Working
-├── EP5: Button (Plus)          ⛔ Blocked (needs events)
-├── EP6: Button (Minus)         ⛔ Blocked (needs events)
-└── EP7: Button (Center)        ⛔ Blocked (needs events)
+├── EP3: Temperature Sensor     ✅ Working (live updates)
+├── EP4: Humidity Sensor        ✅ Working (live updates)
+├── EP5: Button (Plus)          ⚠️ Visible, events not reaching HA
+├── EP6: Button (Minus)         ⚠️ Visible, events not reaching HA
+└── EP7: Button (Center)        ⚠️ Visible, events not reaching HA
 ```
 
 ### Current Success Criteria
@@ -635,10 +639,12 @@ Tim Thermometer (Parent Device)
 | Criteria | Status |
 |----------|--------|
 | Device info: "Climate Sensor W100" by "Aqara" | ✅ Working |
-| Temperature sensor | ✅ Working |
-| Humidity sensor | ✅ Working |
-| Button events in Home Assistant | ⛔ Blocked |
-| Button actions logged to console | ✅ Working |
+| Temperature sensor | ✅ Working (live updates) |
+| Humidity sensor | ✅ Working (live updates) |
+| Button entities visible in HA | ✅ Working |
+| Button events logged by app | ✅ Working |
+| Button events reach Home Assistant | ❌ NOT WORKING |
+| HA Activity log shows events | ❌ NOT WORKING |
 
 ---
 
@@ -686,12 +692,12 @@ VirtualDevice::new("Tim Thermometer")
 
 ---
 
-## Phase 2: GenericSwitch Cluster (FOR BUTTON EVENTS) - ✅ INTEGRATION COMPLETE (2026-01-14)
+## Phase 2: GenericSwitch Cluster (FOR BUTTON EVENTS) - ⚠️ EVENTS NOT REACHING HA (2026-01-16)
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                          ║
-║  ✅ INTEGRATION COMPLETE - UNTESTED                                                      ║
+║  ⚠️ INTEGRATION COMPLETE - EVENTS NOT REACHING HOME ASSISTANT                           ║
 ║                                                                                          ║
 ║  The rs-matter fork (github.com/timlisemer/rs-matter) provides native event support.    ║
 ║  virtual_matter_bridge now uses the fork's EventSource trait directly.                  ║
@@ -704,14 +710,23 @@ VirtualDevice::new("Tim Thermometer")
 ║  - AsyncHandler trait implementation wires events to Matter subscription reports        ║
 ║  - W100 button integration: Plus, Minus, Center endpoints                               ║
 ║  - MQTT action → GenericSwitch event mapping in integration.rs                          ║
+║  - ChainedHandler.as_event_source() fix to walk handler chain                           ║
 ║                                                                                          ║
-║  REMOVED (was temporary shim):                                                           ║
-║  - src/matter/events/ directory (mod.rs, data.rs, path.rs)                              ║
+║  CURRENT STATUS (2026-01-16):                                                            ║
+║  ✅ Temperature sensor: Updates live in Home Assistant                                  ║
+║  ✅ Humidity sensor: Updates live in Home Assistant                                     ║
+║  ✅ 3 Button entities visible in HA (show "Unknown" initially - expected)               ║
+║  ✅ App logs: "[Matter] Button Center: single press event emitted"                      ║
+║  ❌ Buttons NEVER change from "Unknown" to "Pressed once" in HA                         ║
+║  ❌ HA Activity log only shows registration events, not actual button presses           ║
+║  ❌ HA Activity log doesn't show sensor changes either (should show both)               ║
 ║                                                                                          ║
-║  TESTING REQUIRED:                                                                       ║
-║  - Commission bridge to Home Assistant                                                   ║
-║  - Verify 3 button entities appear (Plus, Minus, Center)                                ║
-║  - Press W100 button and confirm event appears in HA                                    ║
+║  REFERENCE: Official Aqara W100 via native Thread/Matter WORKS correctly:               ║
+║  - Buttons show "Pressed once" with timestamp after pressing                            ║
+║  - Activity log shows each button press                                                 ║
+║                                                                                          ║
+║  ROOT CAUSE: Unknown - events are being queued and supposedly emitted, but              ║
+║  not reaching Home Assistant. Likely issue in rs-matter fork event delivery.            ║
 ║                                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════╝
 ```
@@ -1037,17 +1052,18 @@ This section documents the complete technical approach to implementing Matter ev
 >
 > The documentation below serves as both historical reference and implementation guide.
 
-### Problem Statement (SOLVED ✅)
+### Problem Statement (⚠️ PARTIALLY SOLVED - EVENTS NOT REACHING HA)
 
 rs-matter (as of January 2025) does **not support Matter events**. This is tracked in [rs-matter issue #36](https://github.com/project-chip/rs-matter/issues/36), open since March 2023.
 
-**Original blocker** (now resolved): Button presses on W100 were:
+**Current status** (2026-01-16): Button presses on W100:
 1. Received via MQTT ✅
 2. Parsed and mapped to GenericSwitch events ✅
 3. Queued in `GenericSwitchState` ✅
-4. ~~**Never sent to Matter controllers** ❌~~ → **Now sent via EventReports** ✅
+4. App logs "event emitted" ✅
+5. **Events NOT reaching Home Assistant** ❌
 
-The events previously sat in a queue with no code path to include them in Matter subscription reports. This has been fixed in the fork.
+The rs-matter fork has event infrastructure implemented, but events are still not reaching Home Assistant. The official Aqara W100 via native Thread/Matter works correctly, proving this is an implementation issue in our fork.
 
 ### Solution Overview
 
