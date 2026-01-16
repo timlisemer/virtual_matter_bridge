@@ -1,4 +1,4 @@
-.PHONY: check run remove test status
+.PHONY: check run debug remove test status
 
 # Linting and code quality checks
 check:
@@ -11,6 +11,10 @@ check:
 # Subsequent runs: Bridge auto-reconnects to python-matter-server
 run:
 	RUST_LOG=info cargo run --bin virtual-matter-bridge
+
+# Run with debug logging for troubleshooting
+debug:
+	RUST_LOG=debug cargo run --bin virtual-matter-bridge
 
 # Remove a commissioned node from python-matter-server
 # Usage: make remove NODE_ID=123
