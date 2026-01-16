@@ -49,27 +49,27 @@ pub const CLUSTER: Cluster<'static> = Cluster {
         Attribute::new(
             TimeSyncAttribute::UtcTime as _,
             Access::RV,
-            rs_matter::dm::Quality::A
+            rs_matter::dm::Quality::NONE
         ),
         Attribute::new(
             TimeSyncAttribute::Granularity as _,
             Access::RV,
-            rs_matter::dm::Quality::A
+            rs_matter::dm::Quality::NONE
         ),
         Attribute::new(
             TimeSyncAttribute::TimeSource as _,
             Access::RV,
-            rs_matter::dm::Quality::A
+            rs_matter::dm::Quality::NONE
         ),
         Attribute::new(
             TimeSyncAttribute::DstOffset as _,
             Access::RV,
-            rs_matter::dm::Quality::A
+            rs_matter::dm::Quality::A // DstOffset is actually a list
         ),
         Attribute::new(
             TimeSyncAttribute::LocalTime as _,
             Access::RV,
-            rs_matter::dm::Quality::A
+            rs_matter::dm::Quality::NONE
         ),
     ),
     commands: &[],
@@ -120,7 +120,12 @@ impl TimeSyncHandler {
                     tw.u8(tag, 0)?;
                 }
                 TimeSyncAttribute::DstOffset => {
-                    // No DST offsets configured
+                    // No DST offsets configured - empty list
+                    // For list reads with list_index, return ConstraintError (empty list)
+                    if attr.list_index.as_ref().is_some_and(|li| li.is_some()) {
+                        return Err(ErrorCode::ConstraintError.into());
+                    }
+                    // Otherwise write empty array
                     tw.start_array(tag)?;
                     tw.end_container()?;
                 }
