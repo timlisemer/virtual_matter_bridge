@@ -244,10 +244,14 @@ impl GenericSwitchState {
         });
     }
 
-    /// Record a single press (InitialPress + ShortRelease).
+    /// Record a single press sequence.
     pub fn single_press(&self) {
         self.press();
         self.release();
+        self.push_event(GenericSwitchPendingEvent::MultiPressComplete {
+            previous_position: 1,
+            total_number_of_presses_counted: 1,
+        });
     }
 
     /// Record a double press (MultiPressComplete with count=2).
@@ -419,6 +423,28 @@ mod tests {
             vec![GenericSwitchPendingEvent::LongRelease {
                 previous_position: 1
             }]
+        );
+    }
+
+    #[test]
+    fn single_press_completes_multi_press_sequence_with_count_one() {
+        let state = GenericSwitchState::new();
+
+        state.single_press();
+
+        assert_eq!(state.current_position(), 0);
+        assert_eq!(
+            state.take_pending_events(),
+            vec![
+                GenericSwitchPendingEvent::InitialPress { new_position: 1 },
+                GenericSwitchPendingEvent::ShortRelease {
+                    previous_position: 1
+                },
+                GenericSwitchPendingEvent::MultiPressComplete {
+                    previous_position: 1,
+                    total_number_of_presses_counted: 1,
+                },
+            ]
         );
     }
 

@@ -532,6 +532,10 @@ mod tests {
                 GenericSwitchPendingEvent::ShortRelease {
                     previous_position: 1,
                 },
+                GenericSwitchPendingEvent::MultiPressComplete {
+                    previous_position: 1,
+                    total_number_of_presses_counted: 1,
+                },
             ]
         );
     }
@@ -549,6 +553,10 @@ mod tests {
                 GenericSwitchPendingEvent::InitialPress { new_position: 1 },
                 GenericSwitchPendingEvent::ShortRelease {
                     previous_position: 1,
+                },
+                GenericSwitchPendingEvent::MultiPressComplete {
+                    previous_position: 1,
+                    total_number_of_presses_counted: 1,
                 },
             ]
         );
@@ -568,6 +576,10 @@ mod tests {
                 GenericSwitchPendingEvent::ShortRelease {
                     previous_position: 1,
                 },
+                GenericSwitchPendingEvent::MultiPressComplete {
+                    previous_position: 1,
+                    total_number_of_presses_counted: 1,
+                },
             ]
         );
     }
@@ -586,9 +598,17 @@ mod tests {
                 GenericSwitchPendingEvent::ShortRelease {
                     previous_position: 1,
                 },
+                GenericSwitchPendingEvent::MultiPressComplete {
+                    previous_position: 1,
+                    total_number_of_presses_counted: 1,
+                },
                 GenericSwitchPendingEvent::InitialPress { new_position: 1 },
                 GenericSwitchPendingEvent::ShortRelease {
                     previous_position: 1,
+                },
+                GenericSwitchPendingEvent::MultiPressComplete {
+                    previous_position: 1,
+                    total_number_of_presses_counted: 1,
                 },
             ]
         );
@@ -636,6 +656,10 @@ mod tests {
                 GenericSwitchPendingEvent::InitialPress { new_position: 1 },
                 GenericSwitchPendingEvent::ShortRelease {
                     previous_position: 1,
+                },
+                GenericSwitchPendingEvent::MultiPressComplete {
+                    previous_position: 1,
+                    total_number_of_presses_counted: 1,
                 },
             ]
         );
