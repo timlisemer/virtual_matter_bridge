@@ -17,6 +17,7 @@ use nix::sys::socket::{AddressFamily, SockaddrLike};
 use rs_matter::dm::clusters::gen_diag::{InterfaceTypeEnum, NetifDiag, NetifInfo};
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::error::Error;
+use rs_matter::utils::sync::DynBase;
 
 /// Environment variable to override the network interface
 const MATTER_INTERFACE_ENV: &str = "MATTER_INTERFACE";
@@ -245,3 +246,5 @@ impl NetChangeNotif for FilteredNetifs {
         core::future::pending().await
     }
 }
+
+impl DynBase for FilteredNetifs {}

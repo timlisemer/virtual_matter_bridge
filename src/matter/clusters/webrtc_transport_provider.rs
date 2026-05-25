@@ -13,7 +13,7 @@ use strum::FromRepr;
 
 use rs_matter::dm::{
     Access, Attribute, Cluster, Command, Dataver, Handler, InvokeContext, InvokeReply,
-    NonBlockingHandler, Quality, ReadContext, ReadReply, Reply, WriteContext,
+    MatchContext, NonBlockingHandler, Quality, ReadContext, ReadReply, Reply, WriteContext,
 };
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::{TLVTag, TLVWrite};
@@ -456,8 +456,10 @@ pub const CLUSTER: Cluster<'static> = Cluster {
         Command::new(WebRtcCommand::ProvideICECandidates as _, None, Access::WO),
         Command::new(WebRtcCommand::EndSession as _, None, Access::WO),
     ),
+    events: &[],
     with_attrs: with!(all),
     with_cmds: with!(all),
+    with_events: with!(all),
 };
 
 /// Handler that bridges the WebRtcTransportProviderCluster to rs-matter
@@ -751,6 +753,10 @@ impl Handler for WebRtcTransportProviderHandler {
 
     fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
         self.invoke_impl(ctx, reply)
+    }
+
+    fn bump_dataver(&self, _ctx: impl MatchContext) {
+        self.dataver.changed();
     }
 }
 

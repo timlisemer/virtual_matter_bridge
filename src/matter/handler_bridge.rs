@@ -3,11 +3,11 @@
 //! These bridges wrap an `EndpointHandler` and provide the interface needed
 //! by Matter cluster handlers (BooleanStateHandler, OccupancySensingHandler, OnOffHooks).
 
-use super::endpoints::endpoints_helpers::{ClusterNotifier, NotifiableSensor, Sensor};
+use super::endpoints::endpoints_helpers::{
+    ClusterNotifier, EndpointChangeTracker, NotifiableSensor, Sensor,
+};
 use super::endpoints::handler::EndpointHandler;
-use parking_lot::RwLock;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Bridge for sensor endpoints (ContactSensor, OccupancySensor).
 ///
@@ -20,8 +20,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// - Notifier is wired up to push changes to Matter subscriptions
 pub struct SensorBridge {
     handler: Arc<dyn EndpointHandler>,
-    version: AtomicU32,
-    notifier: RwLock<Option<ClusterNotifier>>,
+    changes: EndpointChangeTracker,
 }
 
 impl SensorBridge {
@@ -29,8 +28,7 @@ impl SensorBridge {
     pub fn new(handler: Arc<dyn EndpointHandler>) -> Arc<Self> {
         let bridge = Arc::new(Self {
             handler: handler.clone(),
-            version: AtomicU32::new(0),
-            notifier: RwLock::new(None),
+            changes: EndpointChangeTracker::new(),
         });
 
         // Wire up the pusher so the handler can push state changes to Matter
@@ -51,22 +49,19 @@ impl SensorBridge {
 
     /// Called when the handler pushes a state change.
     fn on_state_changed(&self) {
-        self.version.fetch_add(1, Ordering::SeqCst);
-        if let Some(notifier) = self.notifier.read().as_ref() {
-            notifier.notify();
-        }
+        self.changes.mark_changed();
     }
 }
 
 impl Sensor for SensorBridge {
     fn version(&self) -> u32 {
-        self.version.load(Ordering::SeqCst)
+        self.changes.version()
     }
 }
 
 impl NotifiableSensor for SensorBridge {
     fn set_notifier(&self, notifier: ClusterNotifier) {
-        *self.notifier.write() = Some(notifier);
+        self.changes.set_notifier(notifier);
     }
 }
 
@@ -81,8 +76,7 @@ impl NotifiableSensor for SensorBridge {
 /// - Notifier pushes changes to Matter subscriptions
 pub struct SwitchBridge {
     handler: Arc<dyn EndpointHandler>,
-    version: AtomicU32,
-    notifier: RwLock<Option<ClusterNotifier>>,
+    changes: EndpointChangeTracker,
 }
 
 impl SwitchBridge {
@@ -90,8 +84,7 @@ impl SwitchBridge {
     pub fn new(handler: Arc<dyn EndpointHandler>) -> Arc<Self> {
         let bridge = Arc::new(Self {
             handler: handler.clone(),
-            version: AtomicU32::new(0),
-            notifier: RwLock::new(None),
+            changes: EndpointChangeTracker::new(),
         });
 
         // Wire up the pusher so the handler can push state changes to Matter
@@ -115,10 +108,7 @@ impl SwitchBridge {
     /// This forwards the command to the handler and updates version/notifier.
     pub fn set(&self, value: bool) {
         self.handler.on_command(value);
-        self.version.fetch_add(1, Ordering::SeqCst);
-        if let Some(notifier) = self.notifier.read().as_ref() {
-            notifier.notify();
-        }
+        self.changes.mark_changed();
     }
 
     /// Toggle the switch state and return the new value.
@@ -130,21 +120,18 @@ impl SwitchBridge {
 
     /// Called when the handler pushes a state change from external source.
     fn on_state_changed(&self) {
-        self.version.fetch_add(1, Ordering::SeqCst);
-        if let Some(notifier) = self.notifier.read().as_ref() {
-            notifier.notify();
-        }
+        self.changes.mark_changed();
     }
 }
 
 impl Sensor for SwitchBridge {
     fn version(&self) -> u32 {
-        self.version.load(Ordering::SeqCst)
+        self.changes.version()
     }
 }
 
 impl NotifiableSensor for SwitchBridge {
     fn set_notifier(&self, notifier: ClusterNotifier) {
-        *self.notifier.write() = Some(notifier);
+        self.changes.set_notifier(notifier);
     }
 }

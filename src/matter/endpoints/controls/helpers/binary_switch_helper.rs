@@ -6,9 +6,10 @@
 //! Supports live Matter subscription updates - when the value changes,
 //! the notification is pushed instantly to Home Assistant.
 
-use crate::matter::endpoints::endpoints_helpers::{ClusterNotifier, NotifiableSensor, Sensor};
-use parking_lot::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use crate::matter::endpoints::endpoints_helpers::{
+    ClusterNotifier, EndpointChangeTracker, NotifiableSensor, Sensor,
+};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Thread-safe binary switch state.
 ///
@@ -19,8 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 /// is incremented each time the value changes via `set()` or `toggle()`.
 pub struct BinarySwitchHelper {
     state: AtomicBool,
-    version: AtomicU32,
-    notifier: RwLock<Option<ClusterNotifier>>,
+    changes: EndpointChangeTracker,
 }
 
 impl BinarySwitchHelper {
@@ -28,8 +28,7 @@ impl BinarySwitchHelper {
     pub fn new(initial: bool) -> Self {
         Self {
             state: AtomicBool::new(initial),
-            version: AtomicU32::new(0),
-            notifier: RwLock::new(None),
+            changes: EndpointChangeTracker::new(),
         }
     }
 
@@ -45,10 +44,7 @@ impl BinarySwitchHelper {
     pub fn set(&self, value: bool) {
         let old = self.state.swap(value, Ordering::SeqCst);
         if old != value {
-            self.version.fetch_add(1, Ordering::SeqCst);
-            if let Some(notifier) = self.notifier.read().as_ref() {
-                notifier.notify();
-            }
+            self.changes.mark_changed();
         }
     }
 
@@ -58,23 +54,20 @@ impl BinarySwitchHelper {
     /// Matter subscribers (e.g., Home Assistant).
     pub fn toggle(&self) -> bool {
         let old = self.state.fetch_xor(true, Ordering::SeqCst);
-        self.version.fetch_add(1, Ordering::SeqCst);
-        if let Some(notifier) = self.notifier.read().as_ref() {
-            notifier.notify();
-        }
+        self.changes.mark_changed();
         !old
     }
 }
 
 impl NotifiableSensor for BinarySwitchHelper {
     fn set_notifier(&self, notifier: ClusterNotifier) {
-        *self.notifier.write() = Some(notifier);
+        self.changes.set_notifier(notifier);
     }
 }
 
 impl Sensor for BinarySwitchHelper {
     fn version(&self) -> u32 {
-        self.version.load(Ordering::SeqCst)
+        self.changes.version()
     }
 }
 

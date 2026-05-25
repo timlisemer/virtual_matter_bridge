@@ -443,7 +443,7 @@ New `MqttConfig` in `src/config.rs`:
 - `new(friendly_name)` - Create handler for device
 - `with_mqtt_client(client)` - Set MQTT client for publishing
 - `with_action_channel(tx)` - Set channel for button events
-- `process_message(topic, payload)` - Process incoming MQTT message
+- `process_message(topic, payload, retain)` - Process incoming MQTT message
 - `get_temperature()` / `get_humidity()` - Read sensor values
 - `set_external_temperature(f32)` - Set display value
 - `set_external_humidity(f32)` - Set display humidity
@@ -583,9 +583,9 @@ Comparing our implementation against a native Thread/Matter W100 ("Küche Thermo
 | Vendor | "by Aqara" | "by Aqara" | ✅ Working |
 | Temperature | 20.5°C | 21.5°C | ✅ Working |
 | Humidity | 45.31% | 50.86% | ✅ Working |
-| Button (3) - Plus | Event entity | Logged only | Migration target |
-| Button (4) - Minus | Event entity | Logged only | Migration target |
-| Button (5) - Center | Event entity | Logged only | Migration target |
+| Button (3) - Plus | Event entity | GenericSwitch events | Implemented, pending HA runtime verification |
+| Button (4) - Minus | Event entity | GenericSwitch events | Implemented, pending HA runtime verification |
+| Button (5) - Center | Event entity | GenericSwitch events | Implemented, pending HA runtime verification |
 | Battery | 100% | Not exposed | ❌ Missing |
 | Battery Type | CR2450 | Not exposed | ❌ Missing |
 | Battery Voltage | 3V | Not exposed | ❌ Missing |
@@ -598,7 +598,7 @@ Comparing our implementation against a native Thread/Matter W100 ("Küche Thermo
 
 1. **Device Name/Vendor**: ✅ **IMPLEMENTED** - `BridgedDeviceBasicInformation` cluster now exposes `VendorName`, `ProductName`, `NodeLabel`, and other attributes.
 
-2. **Button Events**: **Migration target** - W100 button actions are parsed from MQTT and logged. The bridge now needs to be updated to current upstream `rs-matter` event APIs so those actions can be exposed as Matter GenericSwitch-style events.
+2. **Button Events**: ✅ **IMPLEMENTED** - W100 button actions are parsed from MQTT state and `/action` messages, routed to the matching GenericSwitch endpoint, and emitted through upstream `rs-matter` events.
 
 3. **Battery**: ❌ **NOT STARTED** - zigbee2mqtt publishes battery data, but no `PowerSource` cluster (0x002F) implementation exists yet.
 
@@ -618,20 +618,20 @@ All attributes now implemented in `src/matter/clusters/bridged_device_basic_info
 | SerialNumber | 0x000F | string | IEEE address | ✅ |
 | Reachable | 0x0011 | bool | true | ✅ |
 
-#### Part B: GenericSwitch Cluster for Buttons - Migration Target
+#### Part B: GenericSwitch Cluster for Buttons - ✅ COMPLETE
 
-**Current direction:** use current upstream `rs-matter` event support. The old blocker was upstream event support; the new work is adapting this repo to the upstream event APIs documented in [Upstream rs-matter Migration Goal](UPSTREAM_RS_MATTER_MIGRATION.md).
+The bridge uses current upstream `rs-matter` event support for W100 button events. The old fork-era event shim has been removed.
 
-Button actions are parsed and logged. They still need to be connected to the current upstream `rs-matter` event emission model.
+Button actions are parsed from both MQTT input forms and emitted as GenericSwitch events:
 
 **Current Endpoint Structure:**
 ```
 Tim Thermometer (Parent Device)
 ├── EP3: Temperature Sensor     ✅ Working
 ├── EP4: Humidity Sensor        ✅ Working
-├── EP5: Button (Plus)          Migration target
-├── EP6: Button (Minus)         Migration target
-└── EP7: Button (Center)        Migration target
+├── EP5: Button (Plus)          ✅ GenericSwitch events
+├── EP6: Button (Minus)         ✅ GenericSwitch events
+└── EP7: Button (Center)        ✅ GenericSwitch events
 ```
 
 ### Current Success Criteria
@@ -641,7 +641,7 @@ Tim Thermometer (Parent Device)
 | Device info: "Climate Sensor W100" by "Aqara" | ✅ Working |
 | Temperature sensor | ✅ Working |
 | Humidity sensor | ✅ Working |
-| Button events in Home Assistant | Migration target |
+| Button events in Home Assistant | Implemented through GenericSwitch events; pending HA runtime verification |
 | Button actions logged to console | ✅ Working |
 
 ---
@@ -690,16 +690,16 @@ VirtualDevice::new("Tim Thermometer")
 
 ---
 
-## Phase 2: GenericSwitch Cluster (FOR BUTTON EVENTS) - Migration Target
+## Phase 2: GenericSwitch Cluster (FOR BUTTON EVENTS) - ✅ COMPLETE
 
-The bridge has W100 button intent and endpoint design documented here, but the implementation must be updated for current upstream `rs-matter`. The migration goal is documented in [Upstream rs-matter Migration Goal](UPSTREAM_RS_MATTER_MIGRATION.md).
+The bridge exposes W100 Plus, Minus, and Center buttons as GenericSwitch endpoints and emits upstream `rs-matter` events for button actions.
 
-Required outcome:
+Implemented outcome:
 
 - W100 Plus, Minus, and Center actions remain parsed from MQTT.
 - The bridge exposes button endpoints through Matter.
 - Button actions are emitted through current upstream `rs-matter` event support.
-- Home Assistant can use the button events as automation triggers.
+- Home Assistant automation triggers need runtime verification with a controller that exposes GenericSwitch event entities.
 
 This is a PLATFORM-WIDE improvement. The `GenericSwitchHandler` is REUSABLE for ANY device with buttons, not just W100.
 
@@ -725,54 +725,15 @@ This is a PLATFORM-WIDE improvement. The `GenericSwitchHandler` is REUSABLE for 
 | Event | ID | Description |
 |-------|-----|-------------|
 | InitialPress | 0x01 | Button pressed down |
+| LongPress | 0x02 | Hold threshold reached |
 | ShortRelease | 0x03 | Button released after short press |
+| LongRelease | 0x04 | Button released after hold |
+| MultiPressOngoing | 0x05 | Multi-press sequence in progress |
 | MultiPressComplete | 0x06 | Multi-press sequence completed |
 
-### GenericSwitchHandler Struct (REUSABLE)
+### GenericSwitch Implementation
 
-```rust
-/// Handler for GenericSwitch cluster.
-/// REUSABLE for ANY device with buttons - not just W100.
-pub struct GenericSwitchHandler {
-    dataver: Dataver,
-    /// Current position (0 = released, 1 = pressed)
-    current_position: AtomicU8,
-    /// Version counter for change detection
-    version: AtomicU32,
-    /// Number of positions (always 2 for momentary)
-    num_positions: u8,
-    /// Maximum multi-press count
-    multi_press_max: u8,
-}
-
-impl GenericSwitchHandler {
-    pub fn new(dataver: Dataver) -> Self {
-        Self {
-            dataver,
-            current_position: AtomicU8::new(0),
-            version: AtomicU32::new(0),
-            num_positions: 2,
-            multi_press_max: 2,
-        }
-    }
-
-    /// Called when button is pressed.
-    /// TODO: Emit InitialPress through current upstream rs-matter events.
-    pub fn on_press(&self) {
-        self.current_position.store(1, Ordering::SeqCst);
-        self.version.fetch_add(1, Ordering::SeqCst);
-        self.dataver.changed();
-    }
-
-    /// Called when button is released.
-    /// TODO: Emit ShortRelease/MultiPressComplete through current upstream rs-matter events.
-    pub fn on_release(&self, press_type: ButtonPress) {
-        self.current_position.store(0, Ordering::SeqCst);
-        self.version.fetch_add(1, Ordering::SeqCst);
-        self.dataver.changed();
-    }
-}
-```
+`GenericSwitchState` stores the current button position and queues pending events. `GenericSwitchHandler` serves the cluster attributes, while the Matter stack drains pending events and calls `DataModel::emit_event` with upstream GenericSwitch event payloads.
 
 ### Button Mapping for W100
 
@@ -784,28 +745,31 @@ impl GenericSwitchHandler {
 | `double_plus` | MultiPressComplete(2) | Button 3 |
 | `double_minus` | MultiPressComplete(2) | Button 4 |
 | `double_center` | MultiPressComplete(2) | Button 5 |
-| `hold_plus` | InitialPress | Button 3 |
-| `hold_minus` | InitialPress | Button 4 |
-| `hold_center` | InitialPress | Button 5 |
+| `hold_plus` | InitialPress + LongPress | Button 3 |
+| `hold_minus` | InitialPress + LongPress | Button 4 |
+| `hold_center` | InitialPress + LongPress | Button 5 |
+| `release_plus` | LongRelease | Button 3 |
+| `release_minus` | LongRelease | Button 4 |
+| `release_center` | LongRelease | Button 5 |
 
-### Files to Create/Modify
+### Files Implemented
 
 | File | Changes |
 |------|---------|
-| `src/matter/clusters/generic_switch.rs` | **NEW** - GenericSwitchHandler |
-| `src/matter/clusters/mod.rs` | Export generic_switch module |
-| `src/matter/device_types.rs` | Add `DEV_TYPE_GENERIC_SWITCH` (0x000F), add `GenericSwitch` to `VirtualDeviceType` |
-| `src/matter/virtual_device.rs` | Add `EndpointKind::GenericSwitch`, add `generic_switch()` factory |
-| `src/matter/stack.rs` | Wire `GenericSwitchHandler` in `DynamicHandler` |
-| `src/input/mqtt/integration.rs` | Connect `W100Action` to `GenericSwitchHandler` methods |
-| `src/main.rs` | Add 3 button endpoints to W100 device |
+| `src/matter/clusters/generic_switch.rs` | GenericSwitch handler, state queue, event payload writer, tests |
+| `src/matter/clusters/mod.rs` | Exports GenericSwitch handler/state |
+| `src/matter/device_types.rs` | GenericSwitch device type |
+| `src/matter/virtual_device.rs` | GenericSwitch endpoint kind and factory |
+| `src/matter/stack.rs` | GenericSwitch dynamic handler and upstream event forwarding |
+| `src/input/mqtt/integration.rs` | W100 action mapping to GenericSwitch state, including state-topic actions |
+| `src/main.rs` | Three W100 button endpoints |
 
 ### Usage Example (W100 with Buttons)
 
 ```rust
-let button_plus = Arc::new(GenericSwitchHandler::new(Dataver::new_rand(rand)));
-let button_minus = Arc::new(GenericSwitchHandler::new(Dataver::new_rand(rand)));
-let button_center = Arc::new(GenericSwitchHandler::new(Dataver::new_rand(rand)));
+let button_plus = Arc::new(GenericSwitchState::new());
+let button_minus = Arc::new(GenericSwitchState::new());
+let button_center = Arc::new(GenericSwitchState::new());
 
 VirtualDevice::new(VirtualDeviceType::TemperatureSensor, "Tim Thermometer")
     .with_device_info(
@@ -929,17 +893,17 @@ New environment variables for the bridge:
 
 ---
 
-## New Clusters Required
+## Cluster Support Status
 
-The current bridge implementation has:
+The bridge implementation has:
 - BooleanState (contact sensors)
 - OccupancySensing (motion sensors)
 - OnOff (switches)
-
-New clusters needed for W100:
 - **TemperatureMeasurement** (0x0402) - temperature sensor readings
 - **RelativeHumidityMeasurement** (0x0405) - humidity readings
-- **Switch** (0x003B) - button press events (GenericSwitch device type)
+- **GenericSwitch** (0x003B) - W100 button press events
+
+Additional clusters that may be useful later:
 - **PowerSource** (0x002F) - battery level (optional)
 - **Thermostat** (0x0201) - for external display setpoint (bidirectional)
 
@@ -973,7 +937,7 @@ New clusters needed for W100:
 
 ## Open Questions
 
-1. **Matter Generic Switch**: Which current upstream `rs-matter` APIs should this bridge use for GenericSwitch metadata and event emission?
+1. **Matter Generic Switch**: Implemented with the upstream event emitter path in `src/matter/stack.rs` and GenericSwitch metadata/event payloads in `src/matter/clusters/generic_switch.rs`.
 
 2. **Thermostat cluster**: Is Thermostat (0x0201) the right cluster for bidirectional display control, or should we use a simpler approach?
 

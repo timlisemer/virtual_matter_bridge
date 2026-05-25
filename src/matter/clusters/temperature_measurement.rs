@@ -5,9 +5,10 @@
 //!
 //! For example: 21.5°C is reported as 2150.
 
+use super::sync_dataver_with_sensor;
 use rs_matter::dm::{
-    Access, Attribute, Cluster, Dataver, Handler, NonBlockingHandler, Quality, ReadContext,
-    ReadReply, Reply, WriteContext,
+    Access, Attribute, Cluster, Dataver, Handler, MatchContext, NonBlockingHandler, Quality,
+    ReadContext, ReadReply, Reply, WriteContext,
 };
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::TLVWrite;
@@ -15,6 +16,9 @@ use rs_matter::{attribute_enum, attributes, with};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI16, AtomicU32, Ordering};
 use strum::FromRepr;
+
+use crate::matter::endpoints::endpoints_helpers::Sensor;
+use crate::matter::endpoints::{ClusterNotifier, EndpointChangeTracker, NotifiableSensor};
 
 /// Matter Cluster ID for TemperatureMeasurement
 pub const CLUSTER_ID: u32 = 0x0402;
@@ -66,16 +70,17 @@ pub const CLUSTER: Cluster<'static> = Cluster {
         ),
     ),
     commands: &[],
+    events: &[],
     with_attrs: with!(all),
     with_cmds: with!(all),
+    with_events: with!(all),
 };
 
 /// Temperature sensor that can be updated from external sources.
 pub struct TemperatureSensor {
     /// Temperature in centidegrees Celsius (°C * 100)
     value: AtomicI16,
-    /// Version counter for change detection
-    version: AtomicU32,
+    changes: EndpointChangeTracker,
 }
 
 impl TemperatureSensor {
@@ -86,7 +91,7 @@ impl TemperatureSensor {
     pub fn new(initial_celsius: f32) -> Self {
         Self {
             value: AtomicI16::new((initial_celsius * 100.0) as i16),
-            version: AtomicU32::new(0),
+            changes: EndpointChangeTracker::new(),
         }
     }
 
@@ -103,13 +108,22 @@ impl TemperatureSensor {
     /// Set the temperature in degrees Celsius.
     pub fn set_celsius(&self, celsius: f32) {
         let centidegrees = (celsius * 100.0) as i16;
-        self.value.store(centidegrees, Ordering::SeqCst);
-        self.version.fetch_add(1, Ordering::SeqCst);
+        let old = self.value.swap(centidegrees, Ordering::SeqCst);
+        if old != centidegrees {
+            self.changes.mark_changed();
+        }
     }
+}
 
-    /// Get the current version (incremented on each change).
-    pub fn version(&self) -> u32 {
-        self.version.load(Ordering::SeqCst)
+impl Sensor for TemperatureSensor {
+    fn version(&self) -> u32 {
+        self.changes.version()
+    }
+}
+
+impl NotifiableSensor for TemperatureSensor {
+    fn set_notifier(&self, notifier: ClusterNotifier) {
+        self.changes.set_notifier(notifier);
     }
 }
 
@@ -141,19 +155,8 @@ impl TemperatureMeasurementHandler {
         }
     }
 
-    /// Sync dataver with sensor version for subscription updates.
-    fn sync_dataver(&self) {
-        let sensor_version = self.sensor.version();
-        let last = self.last_sensor_version.load(Ordering::SeqCst);
-        if sensor_version != last {
-            self.last_sensor_version
-                .store(sensor_version, Ordering::SeqCst);
-            self.dataver.changed();
-        }
-    }
-
     fn read_impl(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        self.sync_dataver();
+        sync_dataver_with_sensor(&*self.sensor, &self.last_sensor_version, &self.dataver);
 
         let attr = ctx.attr();
 
@@ -204,6 +207,31 @@ impl Handler for TemperatureMeasurementHandler {
     fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
         self.write_impl(ctx)
     }
+
+    fn bump_dataver(&self, _ctx: impl MatchContext) {
+        self.dataver.changed();
+        self.last_sensor_version
+            .store(self.sensor.version(), Ordering::SeqCst);
+    }
 }
 
 impl NonBlockingHandler for TemperatureMeasurementHandler {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_celsius_only_increments_version_when_raw_value_changes() {
+        let sensor = TemperatureSensor::new(21.5);
+
+        sensor.set_celsius(21.5);
+        assert_eq!(sensor.version(), 0);
+
+        sensor.set_celsius(21.6);
+        assert_eq!(sensor.version(), 1);
+
+        sensor.set_celsius(21.6);
+        assert_eq!(sensor.version(), 1);
+    }
+}

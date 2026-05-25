@@ -1,9 +1,10 @@
-.PHONY: check run remove test status
+.PHONY: check run remove status
 
 # Linting and code quality checks
 check:
 	cargo check
 	cargo fmt
+	cargo test
 	cargo clippy -- -D warnings
 
 # Run the Matter bridge
@@ -16,10 +17,6 @@ run:
 # Usage: make remove NODE_ID=123
 remove:
 	cargo run --bin dev-commission -- remove $(NODE_ID)
-
-# Run all tests
-test:
-	cargo test
 
 # Show commissioned nodes in python-matter-server
 status:

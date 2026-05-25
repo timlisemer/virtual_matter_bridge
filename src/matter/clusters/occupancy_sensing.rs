@@ -9,8 +9,8 @@
 use super::super::endpoints::sensors::OccupancySensor;
 use super::sync_dataver_with_sensor;
 use rs_matter::dm::{
-    Access, Attribute, Cluster, Dataver, Handler, NonBlockingHandler, ReadContext, ReadReply,
-    Reply, WriteContext,
+    Access, Attribute, Cluster, Dataver, Handler, MatchContext, NonBlockingHandler, ReadContext,
+    ReadReply, Reply, WriteContext,
 };
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::TLVWrite;
@@ -72,8 +72,10 @@ pub const CLUSTER: Cluster<'static> = Cluster {
         ),
     ),
     commands: &[],
+    events: &[],
     with_attrs: with!(all),
     with_cmds: with!(all),
+    with_events: with!(all),
 };
 
 /// Handler that serves a read-only OccupancySensing cluster.
@@ -154,6 +156,10 @@ impl Handler for OccupancySensingHandler {
 
     fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
         self.write_impl(ctx)
+    }
+
+    fn bump_dataver(&self, _ctx: impl MatchContext) {
+        self.dataver.changed();
     }
 }
 

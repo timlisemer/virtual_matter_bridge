@@ -5,8 +5,8 @@
 
 use super::helpers::BinarySwitchHelper;
 use rs_matter::dm::Cluster;
-use rs_matter::dm::clusters::decl::on_off as on_off_cluster;
-use rs_matter::dm::clusters::on_off::{EffectVariantEnum, OnOffHooks, StartUpOnOffEnum};
+use rs_matter::dm::clusters::app::on_off as on_off_cluster;
+use rs_matter::dm::clusters::app::on_off::{EffectVariantEnum, OnOffHooks, StartUpOnOffEnum};
 use rs_matter::error::Error;
 use rs_matter::tlv::Nullable;
 use rs_matter::with;

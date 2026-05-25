@@ -12,5 +12,7 @@ pub mod handler;
 pub mod sensors;
 
 // Re-export key types for convenience
-pub use endpoints_helpers::{ClusterNotifier, NotifiableSensor};
+pub use endpoints_helpers::{
+    ClusterChangeQueue, ClusterNotifier, EndpointChangeTracker, NotifiableSensor,
+};
 pub use handler::EndpointHandler;

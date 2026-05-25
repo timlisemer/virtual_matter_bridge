@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 pub struct MqttMessage {
     pub topic: String,
     pub payload: String,
+    pub retain: bool,
 }
 
 /// MQTT client for zigbee2mqtt communication.
@@ -86,7 +87,11 @@ impl MqttClient {
 
                             debug!("Received MQTT message on {}: {}", topic, payload);
 
-                            let msg = MqttMessage { topic, payload };
+                            let msg = MqttMessage {
+                                topic,
+                                payload,
+                                retain: publish.retain,
+                            };
                             if tx.send(msg).await.is_err() {
                                 error!("MQTT message channel closed");
                                 break;

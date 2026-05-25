@@ -22,7 +22,7 @@ The bridge currently exposes:
 - **Video Doorbell** (Endpoint 9+): Video doorbell with camera (bridged, stub)
 - **W100 Climate Sensor** (Endpoint 10+): Temperature, humidity, and 3 button endpoints via MQTT/zigbee2mqtt (bridged)
 
-Note: Endpoint numbers are dynamic based on device configuration. Video doorbell camera handlers are stub implementations awaiting Matter 1.5 controller support. GenericSwitch button events are infrastructure-complete but awaiting rs-matter native event support.
+Note: Endpoint numbers are dynamic based on device configuration. Video doorbell camera handlers are stub implementations awaiting Matter 1.5 controller support. GenericSwitch button events are emitted through upstream rs-matter event support.
 
 ## Architecture
 
@@ -57,7 +57,7 @@ Note: Endpoint numbers are dynamic based on device configuration. Video doorbell
 | Cluster                     | ID       | Status         | Description                                                           |
 | --------------------------- | -------- | -------------- | --------------------------------------------------------------------- |
 | OnOff                       | `0x0006` | ✅ Implemented | On/Off control for switches and lights                                |
-| GenericSwitch               | `0x003B` | ⏳ Infra-ready | Button events (awaiting rs-matter event support, see [#36](https://github.com/project-chip/rs-matter/issues/36)) |
+| GenericSwitch               | `0x003B` | ✅ Implemented | Button press, release, hold, and multi-press events                  |
 | BooleanState                | `0x0045` | ✅ Implemented | Binary sensor state (contact sensors)                                 |
 | TemperatureMeasurement      | `0x0402` | ✅ Implemented | Temperature sensor readings                                           |
 | RelativeHumidityMeasurement | `0x0405` | ✅ Implemented | Humidity sensor readings                                              |
@@ -85,7 +85,7 @@ Note: Endpoint numbers are dynamic based on device configuration. Video doorbell
   - Multi-admin commissioning (phone + Home Assistant)
 - [x] **Cluster Handlers**
   - OnOff (0x0006) - functional (switches and lights)
-  - GenericSwitch (0x003B) - infrastructure ready (awaiting rs-matter event support)
+  - GenericSwitch (0x003B) - functional button events
   - BooleanState (0x0045) - functional (contact sensors)
   - TemperatureMeasurement (0x0402) - functional (temperature sensors)
   - RelativeHumidityMeasurement (0x0405) - functional (humidity sensors)
@@ -111,7 +111,7 @@ Home Assistant now shows entities for:
 - **Video Doorbell** (video doorbell, bridged, stub)
 - **W100 Climate Sensor** (temperature, humidity, and 3 buttons via MQTT/zigbee2mqtt, bridged)
 
-Camera clusters (AV Stream, WebRTC) are stub implementations awaiting Matter 1.5 controller support. GenericSwitch button events have infrastructure in place but require rs-matter to implement native event support ([issue #36](https://github.com/project-chip/rs-matter/issues/36)).
+Camera clusters (AV Stream, WebRTC) are stub implementations awaiting Matter 1.5 controller support. GenericSwitch button endpoints emit upstream Matter events for W100 MQTT actions.
 
 ---
 
@@ -171,7 +171,7 @@ Camera clusters (AV Stream, WebRTC) are stub implementations awaiting Matter 1.5
 - [x] Occupancy sensor (OccupancySensing cluster 0x0406)
 - [x] Temperature sensor (TemperatureMeasurement cluster 0x0402)
 - [x] Humidity sensor (RelativeHumidityMeasurement cluster 0x0405)
-- [x] GenericSwitch for buttons (0x003B) - infrastructure ready, awaiting rs-matter events
+- [x] GenericSwitch for buttons (0x003B) - upstream Matter events
 - [ ] Dimmable light/switch (LevelControl cluster)
 - [ ] Thermostat (if needed)
 
@@ -452,14 +452,11 @@ The network interface implementation:
 ## Building
 
 ```bash
-# Check code quality (check, fmt, clippy)
+# Check code quality (check, fmt, test, clippy)
 make check
 
 # Run the bridge
 make run
-
-# Run tests
-make test
 
 # Build release binary (when needed)
 cargo build --release
@@ -475,9 +472,6 @@ make check
 
 # Run the bridge
 make run
-
-# Run tests
-make test
 ```
 
 #### First-Time Setup
@@ -498,9 +492,8 @@ make test
 
 | Command | Description |
 |---------|-------------|
-| `make check` | Run cargo check, fmt, and clippy |
+| `make check` | Run cargo check, fmt, tests, and clippy |
 | `make run` | Start the Matter bridge |
-| `make test` | Run all tests |
 | `make status` | Show commissioned nodes |
 | `make remove NODE_ID=X` | Remove a node from python-matter-server |
 

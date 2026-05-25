@@ -4,7 +4,10 @@
 //! system so updates are pushed to controllers (like Home Assistant) instantly.
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
+use embassy_sync::channel::Channel;
+
+pub type ClusterChange = (u16, u32);
+pub type ClusterChangeQueue = Channel<CriticalSectionRawMutex, ClusterChange, 64>;
 
 /// Notifies Matter subscriptions when endpoint values change.
 ///
@@ -20,7 +23,7 @@ use embassy_sync::signal::Signal;
 /// }
 /// ```
 pub struct ClusterNotifier {
-    signal: &'static Signal<CriticalSectionRawMutex, ()>,
+    queue: &'static ClusterChangeQueue,
     endpoint_id: u16,
     cluster_id: u32,
 }
@@ -29,16 +32,12 @@ impl ClusterNotifier {
     /// Create a new notifier for a specific cluster.
     ///
     /// # Arguments
-    /// * `signal` - Static signal that wakes the subscription processor
+    /// * `queue` - Static queue that wakes the subscription processor
     /// * `endpoint_id` - Matter endpoint ID for this cluster
     /// * `cluster_id` - Matter cluster ID
-    pub fn new(
-        signal: &'static Signal<CriticalSectionRawMutex, ()>,
-        endpoint_id: u16,
-        cluster_id: u32,
-    ) -> Self {
+    pub fn new(queue: &'static ClusterChangeQueue, endpoint_id: u16, cluster_id: u32) -> Self {
         Self {
-            signal,
+            queue,
             endpoint_id,
             cluster_id,
         }
@@ -59,6 +58,6 @@ impl ClusterNotifier {
     /// Wakes the Matter subscription processor to push updates immediately.
     /// This is a non-blocking operation.
     pub fn notify(&self) {
-        self.signal.signal(());
+        let _ = self.queue.try_send((self.endpoint_id, self.cluster_id));
     }
 }

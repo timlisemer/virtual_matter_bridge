@@ -1,7 +1,7 @@
 use super::clusters::{
     BooleanStateHandler, BridgedDeviceInfo, BridgedHandler, GenericSwitchHandler,
-    OccupancySensingHandler, RelativeHumidityHandler, TemperatureMeasurementHandler,
-    TimeSyncHandler,
+    GenericSwitchState, OccupancySensingHandler, RelativeHumidityHandler,
+    TemperatureMeasurementHandler,
 };
 use super::device_info::DEV_INFO;
 use super::device_types::{
@@ -15,28 +15,32 @@ use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
 use super::virtual_device::{EndpointKind, VirtualDevice, compute_schema_hash};
 use embassy_futures::select::{select, select4};
-use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use log::{error, info};
 use nix::ifaddrs::getifaddrs;
 use nix::net::if_::if_nametoindex;
 use nix::sys::socket::{AddressFamily, SockaddrLike};
+use rs_matter::crypto::{Crypto, default_crypto};
 use rs_matter::dm::IMBuffer;
+use rs_matter::dm::clusters::app::on_off::{self, OnOffHooks};
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _, PartsMatcher};
-use rs_matter::dm::clusters::on_off::{self, OnOffHooks};
-use rs_matter::dm::devices;
-use rs_matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM};
+use rs_matter::dm::clusters::net_comm::SharedNetworks;
+use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM};
 use rs_matter::dm::endpoints;
-use rs_matter::dm::subscriptions::DefaultSubscriptions;
+use rs_matter::dm::events::Events;
+use rs_matter::dm::networks::eth::EthNetwork;
+use rs_matter::dm::subscriptions::Subscriptions;
 use rs_matter::dm::{
-    Async, Cluster, Context, DataModel, Dataver, DeviceType, EmptyHandler, Endpoint, EpClMatcher,
-    Handler, InvokeContext, InvokeReply, Matcher, Node, NonBlockingHandler, ReadContext, ReadReply,
-    Reply, WriteContext,
+    Async, AttrChangeNotifier, Cluster, DataModel, Dataver, DeviceType, Endpoint, EpClMatcher,
+    EventEmitter, Handler, InvokeContext, InvokeReply, MatchContext, Matcher, Node,
+    NonBlockingHandler, ReadContext, ReadReply, Reply, WriteContext,
 };
 use rs_matter::error::Error;
+use rs_matter::im::EventPriority;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::pairing::qr::QrTextType;
-use rs_matter::persist::{NO_NETWORKS, Psm};
+use rs_matter::persist::{FileKvBlobStore, SharedKvBlobStore};
 use rs_matter::respond::DefaultResponder;
 use rs_matter::transport::network::mdns::builtin::{BuiltinMdnsResponder, Host};
 use rs_matter::transport::network::mdns::{
@@ -45,7 +49,8 @@ use rs_matter::transport::network::mdns::{
 use rs_matter::utils::init::InitMaybeUninit;
 use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::storage::pooled::PooledBuffers;
-use rs_matter::{MATTER_PORT, Matter, clusters, devices};
+use rs_matter::utils::sync::DynBase;
+use rs_matter::{MATTER_PORT, Matter, clusters, devices, root_endpoint};
 use socket2::{Domain, Protocol, Socket, Type};
 use static_cell::StaticCell;
 use std::collections::HashMap;
@@ -60,20 +65,24 @@ use std::sync::{Arc, OnceLock};
 use super::clusters::{
     boolean_state, generic_switch, occupancy_sensing, relative_humidity, temperature_measurement,
 };
-use super::endpoints::{ClusterNotifier, NotifiableSensor};
+use super::endpoints::{ClusterChangeQueue, ClusterNotifier, NotifiableSensor};
 use crate::config::MatterConfig;
 
 /// Static cells for Matter resources (required for 'static lifetime)
 static MATTER: StaticCell<Matter> = StaticCell::new();
-static BUFFERS: StaticCell<PooledBuffers<10, NoopRawMutex, IMBuffer>> = StaticCell::new();
-static SUBSCRIPTIONS: StaticCell<DefaultSubscriptions> = StaticCell::new();
-static PSM: StaticCell<Psm<4096>> = StaticCell::new();
+static BUFFERS: StaticCell<PooledBuffers<10, IMBuffer>> = StaticCell::new();
+static SUBSCRIPTIONS: StaticCell<Subscriptions> = StaticCell::new();
+static EVENTS: StaticCell<Events<1024>> = StaticCell::new();
+static KV_BUF: StaticCell<[u8; 4096]> = StaticCell::new();
 /// Signal for sensor change notifications (wakes subscription processor)
 /// Uses CriticalSectionRawMutex because sensors are updated from different threads
-static SENSOR_NOTIFY: StaticCell<Signal<CriticalSectionRawMutex, ()>> = StaticCell::new();
+static SENSOR_NOTIFY: StaticCell<ClusterChangeQueue> = StaticCell::new();
+static GENERIC_SWITCH_NOTIFY: StaticCell<Signal<CriticalSectionRawMutex, ()>> = StaticCell::new();
 
 /// Static hostname storage for mDNS (needs 'static lifetime for Host struct)
 static HOSTNAME: OnceLock<String> = OnceLock::new();
+
+const ROOT_ENDPOINT: Endpoint<'static> = root_endpoint!(eth);
 
 /// Dynamic PartsMatcher that handles all parent-child relationships.
 /// Built from VirtualDevice configurations at runtime.
@@ -133,6 +142,8 @@ impl PartsMatcher for DynamicPartsMatcher {
         }
     }
 }
+
+impl DynBase for DynamicPartsMatcher {}
 
 /// Handler entry for dynamic routing.
 enum DynamicHandlerEntry {
@@ -385,23 +396,43 @@ impl Handler for DynamicHandler {
             Err(rs_matter::error::ErrorCode::ClusterNotFound.into())
         }
     }
+
+    fn bump_dataver(&self, ctx: impl MatchContext) {
+        let ep = ctx.endpt();
+        let cl = ctx.cluster();
+
+        for ((entry_ep, entry_cl), entry) in &self.handlers {
+            let ep_matches = ep.is_none_or(|ep| ep == *entry_ep);
+            let cl_matches = cl.is_none_or(|cl| cl == *entry_cl);
+
+            if ep_matches && cl_matches {
+                match entry {
+                    DynamicHandlerEntry::BooleanState { dataver, .. }
+                    | DynamicHandlerEntry::OccupancySensing { dataver, .. }
+                    | DynamicHandlerEntry::OnOff { dataver, .. }
+                    | DynamicHandlerEntry::DeviceOnOff { dataver, .. }
+                    | DynamicHandlerEntry::DescWithParts { dataver, .. }
+                    | DynamicHandlerEntry::Desc { dataver } => {
+                        dataver.changed();
+                    }
+                    DynamicHandlerEntry::Bridged { handler } => handler.bump_dataver(&ctx),
+                    DynamicHandlerEntry::Temperature { handler } => handler.bump_dataver(&ctx),
+                    DynamicHandlerEntry::Humidity { handler } => handler.bump_dataver(&ctx),
+                    DynamicHandlerEntry::GenericSwitch { handler } => handler.bump_dataver(&ctx),
+                }
+            }
+        }
+    }
 }
 
 impl NonBlockingHandler for DynamicHandler {}
 
 impl Matcher for DynamicHandler {
-    fn matches(&self, ctx: impl Context) -> bool {
-        let (ep, cl) = if let Some(read_ctx) = ctx.as_read_ctx() {
-            (read_ctx.attr().endpoint_id, read_ctx.attr().cluster_id)
-        } else if let Some(write_ctx) = ctx.as_write_ctx() {
-            (write_ctx.attr().endpoint_id, write_ctx.attr().cluster_id)
-        } else if let Some(invoke_ctx) = ctx.as_invoke_ctx() {
-            (invoke_ctx.cmd().endpoint_id, invoke_ctx.cmd().cluster_id)
-        } else {
-            return false;
-        };
-
-        self.handlers.contains_key(&(ep, cl))
+    fn matches(&self, ctx: impl MatchContext) -> bool {
+        self.handlers.iter().any(|((ep, cl), _)| {
+            ctx.endpt().is_none_or(|ctx_ep| ctx_ep == *ep)
+                && ctx.cluster().is_none_or(|ctx_cl| ctx_cl == *cl)
+        })
     }
 }
 
@@ -568,8 +599,6 @@ fn write_device_onoff(
     switch: &DeviceSwitch,
     ctx: impl WriteContext,
 ) -> Result<(), Error> {
-    use rs_matter::dm::clusters::on_off::OnOffHooks;
-
     let attr = ctx.attr();
 
     match attr.attr_id {
@@ -740,8 +769,14 @@ fn check_schema_and_maybe_reset(
     }
 }
 
-/// Root endpoint cluster list with Time Synchronization added
-const ROOT_CLUSTERS: &[Cluster<'static>] = clusters!(eth; TimeSyncHandler::CLUSTER);
+fn register_cluster_notifier<T: NotifiableSensor + ?Sized>(
+    target: &T,
+    queue: &'static ClusterChangeQueue,
+    endpoint_id: u16,
+    cluster_id: u32,
+) {
+    target.set_notifier(ClusterNotifier::new(queue, endpoint_id, cluster_id));
+}
 
 /// Cached network interface filter (lazily initialized)
 static NETIFS: OnceLock<FilteredNetifs> = OnceLock::new();
@@ -790,25 +825,21 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
     let mut next_id: u16 = 3; // Start after Root(0), Doorbell(1), Aggregator(2)
 
     // Endpoint 0: Root node
-    endpoints_vec.push(Endpoint {
-        id: endpoints::ROOT_ENDPOINT_ID,
-        device_types: devices!(devices::DEV_TYPE_ROOT_NODE),
-        clusters: ROOT_CLUSTERS,
-    });
+    endpoints_vec.push(ROOT_ENDPOINT);
 
     // Endpoint 1: Bridge master on/off control
-    endpoints_vec.push(Endpoint {
-        id: 1,
-        device_types: devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT),
-        clusters: clusters!(desc::DescHandler::CLUSTER, Switch::CLUSTER),
-    });
+    endpoints_vec.push(Endpoint::new(
+        1,
+        devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT),
+        clusters!(desc::DescHandler::CLUSTER, Switch::CLUSTER),
+    ));
 
     // Endpoint 2: Aggregator (bridge root - will use DynamicPartsMatcher)
-    endpoints_vec.push(Endpoint {
-        id: 2,
-        device_types: devices!(DEV_TYPE_AGGREGATOR),
-        clusters: clusters!(desc::DescHandler::CLUSTER),
-    });
+    endpoints_vec.push(Endpoint::new(
+        2,
+        devices!(DEV_TYPE_AGGREGATOR),
+        clusters!(desc::DescHandler::CLUSTER),
+    ));
 
     // Add virtual devices dynamically
     for device in virtual_devices {
@@ -820,15 +851,15 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
             leak_slice(&[DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_BRIDGED_NODE]);
 
         // Parent endpoint (bridged node with OnOff cluster for device-level control)
-        endpoints_vec.push(Endpoint {
-            id: parent_id,
-            device_types: parent_device_types,
-            clusters: clusters!(
+        endpoints_vec.push(Endpoint::new(
+            parent_id,
+            parent_device_types,
+            clusters!(
                 desc::DescHandler::CLUSTER,
                 BridgedHandler::CLUSTER,
                 DeviceSwitch::CLUSTER
             ),
-        });
+        ));
 
         // Add child endpoints
         let mut child_ids = Vec::new();
@@ -905,11 +936,7 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
                     ),
                 };
 
-            endpoints_vec.push(Endpoint {
-                id: child_id,
-                device_types,
-                clusters,
-            });
+            endpoints_vec.push(Endpoint::new(child_id, device_types, clusters));
         }
 
         parts_matcher.add_virtual_device(parent_id, child_ids.clone());
@@ -921,7 +948,6 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
 
     // Leak to get 'static lifetime
     let node = leak(Node {
-        id: 0,
         endpoints: leak_slice(&endpoints_vec),
     });
 
@@ -966,15 +992,11 @@ pub async fn run_matter_stack(
         &DEV_INFO,
         TEST_DEV_COMM,
         &TEST_DEV_ATT,
-        rs_matter::utils::epoch::sys_epoch,
-        rs_matter::utils::rand::sys_rand,
         MATTER_PORT,
     ));
-    // Use shared reference going forward (avoid moving the &mut)
-    let matter: &'static Matter = &*matter;
 
-    // Initialize transport buffers
-    matter.initialize_transport_buffers()?;
+    let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
+    let mut rand = crypto.rand()?;
 
     // Detect network interface and get addresses BEFORE socket creation
     let interface_name = get_interface_name();
@@ -1036,7 +1058,7 @@ pub async fn run_matter_stack(
     })?;
     info!("Matter UDP socket bound to {:?}", bind_addr);
 
-    // Initialize Psm (Persistent State Manager) and load existing state
+    // Initialize key-value persistence and load existing state
     let persist_path = get_persist_path();
     let schema_path = get_schema_path();
 
@@ -1049,24 +1071,289 @@ pub async fn run_matter_stack(
     // Check if schema changed and reset persistence if needed
     let schema_reset = check_schema_and_maybe_reset(&virtual_devices, &persist_path, &schema_path);
 
-    let psm = PSM.uninit().init_with(Psm::init());
-    // Only load if persistence file exists (may have been deleted by schema check)
+    let kv_buf = KV_BUF.uninit().init_with([0; 4096]);
+    let events = EVENTS.uninit().init_with(Events::init());
+    let mut kv = FileKvBlobStore::new(persist_path.clone());
+
     if persist_path.exists() {
-        if let Err(e) = psm.load(&persist_path, matter, NO_NETWORKS) {
+        let load_result = async {
+            matter.load_persist(&mut kv, &mut kv_buf[..]).await?;
+            events.load_persist(&mut kv, &mut kv_buf[..]).await
+        }
+        .await;
+
+        if let Err(e) = load_result {
             error!(
                 "Failed to load persisted state from {:?}: {:?}",
                 persist_path, e
             );
-            // Delete corrupt persistence file so device can be re-commissioned cleanly
+            if let Err(reset_err) = matter.reset_persist(&mut kv, &mut kv_buf[..]).await {
+                error!("Failed to reset Matter persisted state: {:?}", reset_err);
+            }
+            events.reset();
             if let Err(del_err) = fs::remove_file(&persist_path) {
                 error!("Failed to delete corrupt persistence file: {}", del_err);
             } else {
                 info!("Deleted corrupt persistence file, device will need re-commissioning");
             }
+            kv = FileKvBlobStore::new(persist_path.clone());
         }
     } else if schema_reset {
         info!("Persistence file deleted due to schema change, starting fresh");
     }
+
+    // Use shared reference going forward (avoid moving the &mut)
+    let matter: &'static Matter = &*matter;
+
+    // Initialize pooled buffers in static memory
+    let buffers = BUFFERS.uninit().init_with(PooledBuffers::init(0));
+
+    // Initialize subscriptions manager in static memory
+    let subscriptions = SUBSCRIPTIONS.uninit().init_with(Subscriptions::init());
+
+    // Initialize sensor notification signal
+    let sensor_notify_ref = SENSOR_NOTIFY.uninit().init_with(ClusterChangeQueue::new());
+    let generic_switch_notify = GENERIC_SWITCH_NOTIFY.uninit().init_with(Signal::new());
+    let generic_switch_notify_ref: &'static Signal<CriticalSectionRawMutex, ()> =
+        generic_switch_notify;
+
+    // Create DynamicHandler for virtual device endpoints (EP3+)
+    let mut dynamic_handler = DynamicHandler::new();
+
+    // Collect parent DeviceSwitches for virtual_bridge_onoff cascade
+    let mut parent_device_switches: Vec<Arc<DeviceSwitch>> = Vec::new();
+    let mut generic_switch_states: Vec<Arc<GenericSwitchState>> = Vec::new();
+
+    for (device_idx, device) in virtual_devices.iter().enumerate() {
+        let mapping = &built_node.mappings[device_idx];
+        let parent_id = mapping.parent_id;
+
+        // Create the parent DeviceSwitch for this virtual device
+        let device_switch = Arc::new(DeviceSwitch::new(true));
+        parent_device_switches.push(device_switch.clone());
+
+        // Add descriptor handler for parent (with parts matcher for children)
+        dynamic_handler.add_desc_with_parts(
+            parent_id,
+            Dataver::new_rand(&mut rand),
+            built_node.parts_matcher,
+        );
+
+        // Add bridged device info handler for parent (always reachable)
+        // Use device_info if provided, otherwise create from label
+        let parent_device_info = device
+            .device_info
+            .clone()
+            .unwrap_or_else(|| BridgedDeviceInfo::new(device.label));
+        dynamic_handler.add_bridged(
+            parent_id,
+            BridgedHandler::new_always_reachable(Dataver::new_rand(&mut rand), parent_device_info),
+        );
+
+        // Add OnOff handler for parent (device-level switch)
+        dynamic_handler.add_device_onoff(
+            parent_id,
+            Dataver::new_rand(&mut rand),
+            device_switch.clone(),
+        );
+
+        // Create handlers for each child endpoint
+        for (child_idx, ep_config) in device.endpoints.iter().enumerate() {
+            let child_id = mapping.child_ids[child_idx];
+
+            // Create reachable flag for this child (controlled by parent DeviceSwitch)
+            let child_reachable = Arc::new(AtomicBool::new(true));
+            device_switch.add_child_reachable(child_reachable.clone());
+
+            // Add descriptor handler for child (no parts)
+            dynamic_handler.add_desc(child_id, Dataver::new_rand(&mut rand));
+
+            // Add bridged device info handler for child (with dynamic reachable)
+            // Child endpoints use label only (device info is on parent)
+            dynamic_handler.add_bridged(
+                child_id,
+                BridgedHandler::new_with_name(
+                    Dataver::new_rand(&mut rand),
+                    ep_config.label,
+                    child_reachable,
+                ),
+            );
+
+            match ep_config.kind {
+                EndpointKind::ContactSensor => {
+                    let bridge = SensorBridge::new(ep_config.handler.clone());
+                    register_cluster_notifier(
+                        bridge.as_ref(),
+                        sensor_notify_ref,
+                        child_id,
+                        boolean_state::CLUSTER_ID,
+                    );
+                    dynamic_handler.add_boolean_state(
+                        child_id,
+                        Dataver::new_rand(&mut rand),
+                        bridge,
+                    );
+                }
+                EndpointKind::OccupancySensor => {
+                    let bridge = SensorBridge::new(ep_config.handler.clone());
+                    register_cluster_notifier(
+                        bridge.as_ref(),
+                        sensor_notify_ref,
+                        child_id,
+                        occupancy_sensing::CLUSTER_ID,
+                    );
+                    dynamic_handler.add_occupancy_sensing(
+                        child_id,
+                        Dataver::new_rand(&mut rand),
+                        bridge,
+                    );
+                }
+                EndpointKind::Switch | EndpointKind::LightSwitch => {
+                    let bridge = SwitchBridge::new(ep_config.handler.clone());
+                    register_cluster_notifier(
+                        bridge.as_ref(),
+                        sensor_notify_ref,
+                        child_id,
+                        Switch::CLUSTER.id,
+                    );
+                    // Add child switch to parent's cascade list
+                    device_switch.add_child_switch(bridge.clone());
+                    dynamic_handler.add_onoff(child_id, Dataver::new_rand(&mut rand), bridge);
+                }
+                EndpointKind::VideoDoorbellCamera => {
+                    // TODO: Camera handlers are async and need different handling than DynamicHandler.
+                    // For now, VideoDoorbellCamera endpoints are registered but handlers are not wired.
+                    // This requires extending DynamicHandler to support async handlers or
+                    // building a separate async handler chain for camera endpoints.
+                    log::warn!(
+                        "VideoDoorbellCamera endpoint {} registered but camera handlers not yet wired",
+                        child_id
+                    );
+                }
+                EndpointKind::TemperatureSensor => {
+                    // Use sensor from EndpointConfig (created by caller)
+                    if let Some(sensor) = &ep_config.temperature_sensor {
+                        register_cluster_notifier(
+                            sensor.as_ref(),
+                            sensor_notify_ref,
+                            child_id,
+                            temperature_measurement::CLUSTER_ID,
+                        );
+                        let handler = TemperatureMeasurementHandler::new(
+                            Dataver::new_rand(&mut rand),
+                            sensor.clone(),
+                        );
+                        dynamic_handler.add_temperature(child_id, handler);
+                    } else {
+                        log::warn!(
+                            "TemperatureSensor endpoint {} missing sensor in config",
+                            child_id
+                        );
+                    }
+                }
+                EndpointKind::HumiditySensor => {
+                    // Use sensor from EndpointConfig (created by caller)
+                    if let Some(sensor) = &ep_config.humidity_sensor {
+                        register_cluster_notifier(
+                            sensor.as_ref(),
+                            sensor_notify_ref,
+                            child_id,
+                            relative_humidity::CLUSTER_ID,
+                        );
+                        let handler = RelativeHumidityHandler::new(
+                            Dataver::new_rand(&mut rand),
+                            sensor.clone(),
+                        );
+                        dynamic_handler.add_humidity(child_id, handler);
+                    } else {
+                        log::warn!(
+                            "HumiditySensor endpoint {} missing sensor in config",
+                            child_id
+                        );
+                    }
+                }
+                EndpointKind::GenericSwitch => {
+                    // Use state from EndpointConfig (created by caller)
+                    if let Some(state) = &ep_config.generic_switch_state {
+                        // Set endpoint ID so events know where they came from
+                        state.set_endpoint_id(child_id);
+                        state.set_event_notifier(generic_switch_notify_ref);
+                        generic_switch_states.push(state.clone());
+                        let handler =
+                            GenericSwitchHandler::new(Dataver::new_rand(&mut rand), state.clone());
+                        dynamic_handler.add_generic_switch(child_id, handler);
+                        info!(
+                            "[Matter] GenericSwitch endpoint {} registered for '{}'",
+                            child_id, ep_config.label
+                        );
+                    } else {
+                        log::warn!(
+                            "GenericSwitch endpoint {} missing state in config",
+                            child_id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Wire up virtual_bridge_onoff to cascade to all parent DeviceSwitches
+    for device_switch in &parent_device_switches {
+        virtual_bridge_onoff.add_cascade_target(device_switch.clone());
+    }
+
+    // Create OnOff handler for bridge master on/off (endpoint 1)
+    let virtual_bridge_onoff_handler = on_off::OnOffHandler::new_standalone(
+        Dataver::new_rand(&mut rand),
+        1,
+        virtual_bridge_onoff.as_ref(),
+    );
+
+    let eth_sys_handler = endpoints::EthSysHandlerBuilder::new()
+        .netif_diag(get_netifs())
+        .build(&mut rand);
+
+    // Build the handler chain with dynamic handler for virtual devices
+    let handler = (
+        built_node.node,
+        eth_sys_handler
+            // === Endpoint 1: Bridge master on/off control ===
+            .chain(
+                EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
+                Async(desc::DescHandler::new(Dataver::new_rand(&mut rand)).adapt()),
+            )
+            .chain(
+                EpClMatcher::new(Some(1), Some(Switch::CLUSTER.id)),
+                virtual_bridge_onoff_handler.adapt(),
+            )
+            // === Endpoint 2: Aggregator ===
+            .chain(
+                EpClMatcher::new(Some(2), Some(desc::DescHandler::CLUSTER.id)),
+                Async(
+                    desc::DescHandler::new_matching(
+                        Dataver::new_rand(&mut rand),
+                        built_node.parts_matcher,
+                    )
+                    .adapt(),
+                ),
+            )
+            // === Endpoint 3+: Virtual Devices (dynamic) ===
+            .chain(
+                &dynamic_handler, // Only matches (ep, cl) pairs we have handlers for
+                Async(&dynamic_handler),
+            ),
+    );
+
+    let dm = DataModel::new(
+        matter,
+        &crypto,
+        buffers,
+        subscriptions,
+        events,
+        handler,
+        SharedKvBlobStore::new(kv, &mut kv_buf[..]),
+        SharedNetworks::new(EthNetwork::new_default()),
+    );
 
     // Only open commissioning window if device is not already commissioned
     const COMM_WINDOW_TIMEOUT_SECS: u16 = 900;
@@ -1078,16 +1365,17 @@ pub async fn run_matter_stack(
             "Opening commissioning window for {} seconds...",
             COMM_WINDOW_TIMEOUT_SECS
         );
-        matter.open_basic_comm_window(COMM_WINDOW_TIMEOUT_SECS)?;
+        dm.open_basic_comm_window(COMM_WINDOW_TIMEOUT_SECS)?;
 
         info!("Matter device ready for commissioning");
         info!("  Discriminator: {}", TEST_DEV_COMM.discriminator);
-        info!("  Passcode: {}", TEST_DEV_COMM.password);
+        info!(
+            "  Passcode: {}",
+            u32::from_le_bytes(*TEST_DEV_COMM.password.access())
+        );
 
-        // Try auto-commission if server URL is configured
         if let Some(ref server_url) = config.server_url {
             info!("Auto-commission enabled: {}", server_url);
-            // Run auto-commission in a separate thread (prints pairing code on failure)
             let url = server_url.clone();
             let discriminator = config.discriminator;
             let passcode = config.passcode;
@@ -1095,7 +1383,6 @@ pub async fn run_matter_stack(
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
-                    // If schema was reset, clean up old nodes from controller first
                     if schema_reset {
                         info!("Schema changed, cleaning up old nodes from controller");
                         if let Err(e) =
@@ -1122,7 +1409,6 @@ pub async fn run_matter_stack(
                 })
             });
         } else {
-            // No server URL configured - show QR code for manual commissioning
             if let Err(e) = matter.print_standard_qr_text(DiscoveryCapabilities::IP) {
                 error!("Failed to print QR text: {:?}", e);
             }
@@ -1135,254 +1421,6 @@ pub async fn run_matter_stack(
         }
     }
 
-    // Initialize pooled buffers in static memory
-    let buffers = BUFFERS.uninit().init_with(PooledBuffers::init(0));
-
-    // Initialize subscriptions manager in static memory
-    let subscriptions = SUBSCRIPTIONS
-        .uninit()
-        .init_with(DefaultSubscriptions::init());
-
-    // Initialize sensor notification signal
-    let sensor_notify = SENSOR_NOTIFY.uninit().init_with(Signal::new());
-    let sensor_notify_ref: &'static Signal<CriticalSectionRawMutex, ()> = sensor_notify;
-
-    // Create DynamicHandler for virtual device endpoints (EP3+)
-    let mut dynamic_handler = DynamicHandler::new();
-
-    // Collect cluster change notifications for sensor forwarding
-    let mut notification_endpoints: Vec<(u16, u32)> = Vec::new();
-
-    // Collect parent DeviceSwitches for virtual_bridge_onoff cascade
-    let mut parent_device_switches: Vec<Arc<DeviceSwitch>> = Vec::new();
-
-    for (device_idx, device) in virtual_devices.iter().enumerate() {
-        let mapping = &built_node.mappings[device_idx];
-        let parent_id = mapping.parent_id;
-
-        // Create the parent DeviceSwitch for this virtual device
-        let device_switch = Arc::new(DeviceSwitch::new(true));
-        parent_device_switches.push(device_switch.clone());
-
-        // Add descriptor handler for parent (with parts matcher for children)
-        dynamic_handler.add_desc_with_parts(
-            parent_id,
-            Dataver::new_rand(matter.rand()),
-            built_node.parts_matcher,
-        );
-
-        // Add bridged device info handler for parent (always reachable)
-        // Use device_info if provided, otherwise create from label
-        let parent_device_info = device
-            .device_info
-            .clone()
-            .unwrap_or_else(|| BridgedDeviceInfo::new(device.label));
-        dynamic_handler.add_bridged(
-            parent_id,
-            BridgedHandler::new_always_reachable(
-                Dataver::new_rand(matter.rand()),
-                parent_device_info,
-            ),
-        );
-
-        // Add OnOff handler for parent (device-level switch)
-        dynamic_handler.add_device_onoff(
-            parent_id,
-            Dataver::new_rand(matter.rand()),
-            device_switch.clone(),
-        );
-
-        // Create handlers for each child endpoint
-        for (child_idx, ep_config) in device.endpoints.iter().enumerate() {
-            let child_id = mapping.child_ids[child_idx];
-
-            // Create reachable flag for this child (controlled by parent DeviceSwitch)
-            let child_reachable = Arc::new(AtomicBool::new(true));
-            device_switch.add_child_reachable(child_reachable.clone());
-
-            // Add descriptor handler for child (no parts)
-            dynamic_handler.add_desc(child_id, Dataver::new_rand(matter.rand()));
-
-            // Add bridged device info handler for child (with dynamic reachable)
-            // Child endpoints use label only (device info is on parent)
-            dynamic_handler.add_bridged(
-                child_id,
-                BridgedHandler::new_with_name(
-                    Dataver::new_rand(matter.rand()),
-                    ep_config.label,
-                    child_reachable,
-                ),
-            );
-
-            match ep_config.kind {
-                EndpointKind::ContactSensor => {
-                    let bridge = SensorBridge::new(ep_config.handler.clone());
-                    bridge.set_notifier(ClusterNotifier::new(
-                        sensor_notify_ref,
-                        child_id,
-                        boolean_state::CLUSTER_ID,
-                    ));
-                    notification_endpoints.push((child_id, boolean_state::CLUSTER_ID));
-                    dynamic_handler.add_boolean_state(
-                        child_id,
-                        Dataver::new_rand(matter.rand()),
-                        bridge,
-                    );
-                }
-                EndpointKind::OccupancySensor => {
-                    let bridge = SensorBridge::new(ep_config.handler.clone());
-                    bridge.set_notifier(ClusterNotifier::new(
-                        sensor_notify_ref,
-                        child_id,
-                        occupancy_sensing::CLUSTER_ID,
-                    ));
-                    notification_endpoints.push((child_id, occupancy_sensing::CLUSTER_ID));
-                    dynamic_handler.add_occupancy_sensing(
-                        child_id,
-                        Dataver::new_rand(matter.rand()),
-                        bridge,
-                    );
-                }
-                EndpointKind::Switch | EndpointKind::LightSwitch => {
-                    let bridge = SwitchBridge::new(ep_config.handler.clone());
-                    // Set notifier for switch subscription updates
-                    bridge.set_notifier(ClusterNotifier::new(
-                        sensor_notify_ref,
-                        child_id,
-                        Switch::CLUSTER.id,
-                    ));
-                    notification_endpoints.push((child_id, Switch::CLUSTER.id));
-                    // Add child switch to parent's cascade list
-                    device_switch.add_child_switch(bridge.clone());
-                    dynamic_handler.add_onoff(child_id, Dataver::new_rand(matter.rand()), bridge);
-                }
-                EndpointKind::VideoDoorbellCamera => {
-                    // TODO: Camera handlers are async and need different handling than DynamicHandler.
-                    // For now, VideoDoorbellCamera endpoints are registered but handlers are not wired.
-                    // This requires extending DynamicHandler to support async handlers or
-                    // building a separate async handler chain for camera endpoints.
-                    log::warn!(
-                        "VideoDoorbellCamera endpoint {} registered but camera handlers not yet wired",
-                        child_id
-                    );
-                }
-                EndpointKind::TemperatureSensor => {
-                    // Use sensor from EndpointConfig (created by caller)
-                    if let Some(sensor) = &ep_config.temperature_sensor {
-                        let handler = TemperatureMeasurementHandler::new(
-                            Dataver::new_rand(matter.rand()),
-                            sensor.clone(),
-                        );
-                        dynamic_handler.add_temperature(child_id, handler);
-                    } else {
-                        log::warn!(
-                            "TemperatureSensor endpoint {} missing sensor in config",
-                            child_id
-                        );
-                    }
-                }
-                EndpointKind::HumiditySensor => {
-                    // Use sensor from EndpointConfig (created by caller)
-                    if let Some(sensor) = &ep_config.humidity_sensor {
-                        let handler = RelativeHumidityHandler::new(
-                            Dataver::new_rand(matter.rand()),
-                            sensor.clone(),
-                        );
-                        dynamic_handler.add_humidity(child_id, handler);
-                    } else {
-                        log::warn!(
-                            "HumiditySensor endpoint {} missing sensor in config",
-                            child_id
-                        );
-                    }
-                }
-                EndpointKind::GenericSwitch => {
-                    // Use state from EndpointConfig (created by caller)
-                    if let Some(state) = &ep_config.generic_switch_state {
-                        // Set endpoint ID so events know where they came from
-                        state.set_endpoint_id(child_id);
-                        let handler = GenericSwitchHandler::new(
-                            Dataver::new_rand(matter.rand()),
-                            state.clone(),
-                        );
-                        dynamic_handler.add_generic_switch(child_id, handler);
-                        info!(
-                            "[Matter] GenericSwitch endpoint {} registered for '{}'",
-                            child_id, ep_config.label
-                        );
-                    } else {
-                        log::warn!(
-                            "GenericSwitch endpoint {} missing state in config",
-                            child_id
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // Wire up virtual_bridge_onoff to cascade to all parent DeviceSwitches
-    for device_switch in &parent_device_switches {
-        virtual_bridge_onoff.add_cascade_target(device_switch.clone());
-    }
-
-    // Create time sync handler for root endpoint
-    let time_sync_handler = TimeSyncHandler::new(Dataver::new_rand(matter.rand()));
-
-    // Create OnOff handler for bridge master on/off (endpoint 1)
-    let virtual_bridge_onoff_handler = on_off::OnOffHandler::new_standalone(
-        Dataver::new_rand(matter.rand()),
-        1,
-        virtual_bridge_onoff.as_ref(),
-    );
-
-    // Build the handler chain with dynamic handler for virtual devices
-    let handler = (
-        built_node.node,
-        endpoints::with_eth(
-            &(),
-            get_netifs(),
-            matter.rand(),
-            endpoints::with_sys(
-                &false,
-                matter.rand(),
-                EmptyHandler
-                    // === Endpoint 0: Root ===
-                    .chain(
-                        EpClMatcher::new(Some(0), Some(TimeSyncHandler::CLUSTER.id)),
-                        Async(&time_sync_handler),
-                    )
-                    // === Endpoint 1: Bridge master on/off control ===
-                    .chain(
-                        EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
-                        Async(desc::DescHandler::new(Dataver::new_rand(matter.rand())).adapt()),
-                    )
-                    .chain(
-                        EpClMatcher::new(Some(1), Some(Switch::CLUSTER.id)),
-                        on_off::HandlerAsyncAdaptor(&virtual_bridge_onoff_handler),
-                    )
-                    // === Endpoint 2: Aggregator ===
-                    .chain(
-                        EpClMatcher::new(Some(2), Some(desc::DescHandler::CLUSTER.id)),
-                        Async(
-                            desc::DescHandler::new_matching(
-                                Dataver::new_rand(matter.rand()),
-                                built_node.parts_matcher,
-                            )
-                            .adapt(),
-                        ),
-                    )
-                    // === Endpoint 3+: Virtual Devices (dynamic) ===
-                    .chain(
-                        &dynamic_handler, // Only matches (ep, cl) pairs we have handlers for
-                        Async(&dynamic_handler),
-                    ),
-            ),
-        ),
-    );
-
-    let dm = DataModel::new(matter, buffers, subscriptions, handler);
-
     // Create the responder
     let responder = DefaultResponder::new(&dm);
 
@@ -1390,7 +1428,8 @@ pub async fn run_matter_stack(
 
     // Run Matter transport with logging wrapper
     let logging_socket = LoggingUdpSocket::new(&socket);
-    let mut transport = pin!(matter.run(&logging_socket, &logging_socket));
+    let mut transport =
+        pin!(matter.run(&crypto, &logging_socket, &logging_socket, &logging_socket));
 
     // Create mDNS socket
     let mdns_socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).map_err(|e| {
@@ -1447,42 +1486,57 @@ pub async fn run_matter_stack(
         HOSTNAME.get_or_init(|| gethostname::gethostname().to_string_lossy().into_owned());
 
     let host = Host {
-        id: 0,
         hostname,
-        ip: ipv4_addrs[0].octets().into(),
-        ipv6: ipv6_addr.octets().into(),
+        ip: ipv4_addrs[0],
+        ipv6: ipv6_addr,
     };
 
-    let mdns_responder = BuiltinMdnsResponder::new(matter);
+    let mut mdns_responder = BuiltinMdnsResponder::new();
     let mut mdns = pin!(mdns_responder.run(
         &mdns_socket,
         &mdns_socket,
         &host,
         Some(ipv4_addrs[0].octets().into()),
         Some(interface_index),
+        matter,
+        &crypto,
     ));
 
     let mut respond = pin!(responder.run::<4, 4>());
     let mut dm_job = pin!(dm.run());
 
-    let persist_path_clone = persist_path.clone();
-    let matter_ref = matter;
-    let mut persist = pin!(async move {
-        loop {
-            matter_ref.wait_persist().await;
-            if let Err(e) = psm.store(&persist_path_clone, matter_ref, NO_NETWORKS) {
-                error!("Failed to store persisted state: {:?}", e);
-            }
-        }
-    });
-
     // Sensor notification forwarding task
     let mut sensor_forward = pin!(async {
         loop {
-            sensor_notify_ref.wait().await;
-            // Notify all registered sensor endpoints
-            for (endpoint_id, cluster_id) in &notification_endpoints {
-                subscriptions.notify_cluster_changed(*endpoint_id, *cluster_id);
+            let (endpoint_id, cluster_id) = sensor_notify_ref.receive().await;
+            dm.notify_cluster_changed(endpoint_id, cluster_id);
+        }
+    });
+
+    let mut generic_switch_forward = pin!(async {
+        loop {
+            generic_switch_notify_ref.wait().await;
+            for state in &generic_switch_states {
+                let endpoint_id = state.endpoint_id();
+                if endpoint_id == 0 {
+                    continue;
+                }
+
+                for event in state.take_pending_events() {
+                    let event_id = event.event_id();
+                    if let Err(e) = dm.emit_event(
+                        endpoint_id,
+                        generic_switch::CLUSTER_ID,
+                        event_id,
+                        EventPriority::Info,
+                        |mut tw| generic_switch::write_event_data(&mut tw, event),
+                    ) {
+                        error!(
+                            "Failed to emit GenericSwitch event 0x{:02x} on endpoint {}: {:?}",
+                            event_id, endpoint_id, e
+                        );
+                    }
+                }
             }
         }
     });
@@ -1491,7 +1545,7 @@ pub async fn run_matter_stack(
         &mut transport,
         &mut mdns,
         select(&mut respond, &mut dm_job).coalesce(),
-        select(&mut persist, &mut sensor_forward).coalesce(),
+        select(&mut sensor_forward, &mut generic_switch_forward).coalesce(),
     )
     .coalesce()
     .await;

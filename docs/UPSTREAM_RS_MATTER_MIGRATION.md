@@ -1,6 +1,6 @@
 # Upstream rs-matter Migration Goal
 
-This repository was reset to `0c39a04fa45c6192487427459b8abfb6a98e1c5e` and should now be moved forward against current upstream `rs-matter`.
+This repository was reset to `0c39a04fa45c6192487427459b8abfb6a98e1c5e` and migrated forward against current upstream `rs-matter`.
 
 ## Current Status
 
@@ -16,16 +16,17 @@ The `Cargo.lock` commit this repo last knew about is:
 project-chip/rs-matter@93d9274be10f646bf7d1ec0ed666e3bece857d81
 ```
 
-That commit is the baseline for "old upstream rs-matter" in this repo. The new goal is to update the bridge for newer upstream `rs-matter` API and behavior after that commit.
+That commit is the baseline for "old upstream rs-matter" in this repo. The bridge has been updated for newer upstream `rs-matter` API and behavior after that commit.
 
-The repo does not currently pass checks. Running the agent-framework check MCP on `/home/tim/Coding/public_repos/virtual_matter_bridge` reports 25 `cargo check` errors. The failures are mostly `rs-matter` API drift:
+The repo now passes the agent-framework check MCP on `/home/tim/Coding/public_repos/virtual_matter_bridge`, including `cargo check` and `cargo clippy -- -D warnings`. The migration addressed the previous `rs-matter` API drift:
 
 - removed or moved imports such as `dev_att::DataType`, `DevAttDataFetcher`, `clusters::on_off`, `DefaultSubscriptions`, `Psm`, `NO_NETWORKS`, `Context`, `sys_epoch`, and `utils::rand`
 - changed endpoint/root handler builder APIs such as `endpoints::with_eth` and `endpoints::with_sys`
 - new trait requirements such as `Handler::bump_dataver`
 - new `DynBase` requirements for types such as `FilteredNetifs` and `DynamicPartsMatcher`
+- upstream event storage, metadata, and `DataModel::emit_event` wiring for GenericSwitch events
 
-These failures are expected migration work, not the goal itself.
+These items are historical migration context, not current blockers.
 
 ## Why This Goal Exists
 
@@ -63,13 +64,13 @@ Upstream `rs-matter` has caught up on the important protocol machinery:
 - generated event metadata/builders from IDL
 - `EventEmitter` APIs for emitting events from data model code
 
-The bridge should therefore use upstream `rs-matter` instead of carrying a fork. The remaining work is to adapt this repository to upstream's current APIs and model the W100 buttons on top of upstream event emission.
+The bridge now uses upstream `rs-matter` instead of carrying a fork. W100 buttons are modeled on top of upstream GenericSwitch event emission.
 
-## Migration Direction
+## Migration Outcome
 
-Future sessions should focus on making `virtual_matter_bridge` compile and run against current upstream `rs-matter`.
+The migration made `virtual_matter_bridge` compile and run against current upstream `rs-matter`.
 
-Likely work areas:
+Completed work areas:
 
 1. Update imports and stack setup to current upstream `rs-matter`.
 2. Update custom handlers for new trait requirements such as `bump_dataver`.
@@ -78,4 +79,4 @@ Likely work areas:
 5. Preserve the W100 MQTT behavior: temperature, humidity, state request on startup, and button action parsing.
 6. Verify button actions can be delivered as Matter GenericSwitch-style events to Home Assistant.
 
-The migration should treat `project-chip/rs-matter@93d9274be10f646bf7d1ec0ed666e3bece857d81` as the last known upstream baseline and current upstream `main` as the target.
+The migration treats `project-chip/rs-matter@93d9274be10f646bf7d1ec0ed666e3bece857d81` as the last known upstream baseline and current upstream `main` as the target.

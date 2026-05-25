@@ -18,7 +18,6 @@ pub mod generic_switch;
 pub mod occupancy_sensing;
 pub mod relative_humidity;
 pub mod temperature_measurement;
-pub mod time_sync;
 pub mod webrtc_transport_provider;
 
 // Re-export for convenience
@@ -28,7 +27,6 @@ pub use generic_switch::{GenericSwitchHandler, GenericSwitchState};
 pub use occupancy_sensing::OccupancySensingHandler;
 pub use relative_humidity::{HumiditySensor, RelativeHumidityHandler};
 pub use temperature_measurement::{TemperatureMeasurementHandler, TemperatureSensor};
-pub use time_sync::TimeSyncHandler;
 // TODO: Re-export when handlers are wired in stack.rs
 // pub use camera_av_stream_mgmt::CameraAvStreamMgmtHandler;
 // pub use webrtc_transport_provider::WebRtcTransportProviderHandler;

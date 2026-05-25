@@ -3,13 +3,13 @@
 //! This module provides a wrapper around the async UDP socket that logs
 //! all incoming and outgoing packets for debugging commissioning issues.
 
-use std::net::UdpSocket;
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 
 use async_io::Async;
 use log::{debug, error, trace};
 
 use rs_matter::error::{Error, ErrorCode};
-use rs_matter::transport::network::{Address, NetworkReceive, NetworkSend};
+use rs_matter::transport::network::{Address, NetworkMulticast, NetworkReceive, NetworkSend};
 
 /// A wrapper around an async UDP socket that logs all packets.
 pub struct LoggingUdpSocket<'a> {
@@ -110,5 +110,31 @@ impl NetworkReceive for &LoggingUdpSocket<'_> {
 
         let (len, addr) = result?;
         Ok((len, Address::Udp(addr)))
+    }
+}
+
+impl NetworkMulticast for &LoggingUdpSocket<'_> {
+    async fn join(&mut self, addr: IpAddr) -> Result<(), Error> {
+        match addr {
+            IpAddr::V6(addr) => self.inner.get_ref().join_multicast_v6(&addr, 0)?,
+            IpAddr::V4(addr) => self
+                .inner
+                .get_ref()
+                .join_multicast_v4(&addr, &Ipv4Addr::UNSPECIFIED)?,
+        }
+
+        Ok(())
+    }
+
+    async fn leave(&mut self, addr: IpAddr) -> Result<(), Error> {
+        match addr {
+            IpAddr::V6(addr) => self.inner.get_ref().leave_multicast_v6(&addr, 0)?,
+            IpAddr::V4(addr) => self
+                .inner
+                .get_ref()
+                .leave_multicast_v4(&addr, &Ipv4Addr::UNSPECIFIED)?,
+        }
+
+        Ok(())
     }
 }

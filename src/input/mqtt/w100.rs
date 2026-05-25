@@ -32,16 +32,16 @@ impl From<&str> for W100Action {
         match s {
             "single_plus" => W100Action::SinglePlus,
             "single_minus" => W100Action::SingleMinus,
-            "single_center" => W100Action::SingleCenter,
+            "single_center" | "single" => W100Action::SingleCenter,
             "double_plus" => W100Action::DoublePlus,
             "double_minus" => W100Action::DoubleMinus,
-            "double_center" => W100Action::DoubleCenter,
+            "double_center" | "double" => W100Action::DoubleCenter,
             "hold_plus" => W100Action::HoldPlus,
             "hold_minus" => W100Action::HoldMinus,
-            "hold_center" => W100Action::HoldCenter,
+            "hold_center" | "hold" => W100Action::HoldCenter,
             "release_plus" => W100Action::ReleasePlus,
             "release_minus" => W100Action::ReleaseMinus,
-            "release_center" => W100Action::ReleaseCenter,
+            "release_center" | "release" => W100Action::ReleaseCenter,
             other => W100Action::Unknown(other.to_string()),
         }
     }
