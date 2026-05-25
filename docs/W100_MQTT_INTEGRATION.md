@@ -2,6 +2,10 @@
 
 This document describes the integration of the Aqara W100 Climate Sensor into the Virtual Matter Bridge via MQTT, translating zigbee2mqtt data into Matter devices for Home Assistant.
 
+## Current rs-matter Goal
+
+The current goal is to migrate this bridge to current upstream `rs-matter` and use upstream event support for W100 button events. See [Upstream rs-matter Migration Goal](UPSTREAM_RS_MATTER_MIGRATION.md) for the status, baseline commit, and migration direction.
+
 ## Goal
 
 **Instead of**: Home Assistant ← MQTT ← zigbee2mqtt ← W100
@@ -579,9 +583,9 @@ Comparing our implementation against a native Thread/Matter W100 ("Küche Thermo
 | Vendor | "by Aqara" | "by Aqara" | ✅ Working |
 | Temperature | 20.5°C | 21.5°C | ✅ Working |
 | Humidity | 45.31% | 50.86% | ✅ Working |
-| Button (3) - Plus | Event entity | Logged only | ⛔ Blocked |
-| Button (4) - Minus | Event entity | Logged only | ⛔ Blocked |
-| Button (5) - Center | Event entity | Logged only | ⛔ Blocked |
+| Button (3) - Plus | Event entity | Logged only | Migration target |
+| Button (4) - Minus | Event entity | Logged only | Migration target |
+| Button (5) - Center | Event entity | Logged only | Migration target |
 | Battery | 100% | Not exposed | ❌ Missing |
 | Battery Type | CR2450 | Not exposed | ❌ Missing |
 | Battery Voltage | 3V | Not exposed | ❌ Missing |
@@ -594,7 +598,7 @@ Comparing our implementation against a native Thread/Matter W100 ("Küche Thermo
 
 1. **Device Name/Vendor**: ✅ **IMPLEMENTED** - `BridgedDeviceBasicInformation` cluster now exposes `VendorName`, `ProductName`, `NodeLabel`, and other attributes.
 
-2. **Button Events**: ⛔ **BLOCKED** - W100 button actions ARE parsed from MQTT and logged, but **rs-matter does NOT support Matter events** (listed as "next steps" in rs-matter roadmap). Cannot expose as GenericSwitch without event support.
+2. **Button Events**: **Migration target** - W100 button actions are parsed from MQTT and logged. The bridge now needs to be updated to current upstream `rs-matter` event APIs so those actions can be exposed as Matter GenericSwitch-style events.
 
 3. **Battery**: ❌ **NOT STARTED** - zigbee2mqtt publishes battery data, but no `PowerSource` cluster (0x002F) implementation exists yet.
 
@@ -614,20 +618,20 @@ All attributes now implemented in `src/matter/clusters/bridged_device_basic_info
 | SerialNumber | 0x000F | string | IEEE address | ✅ |
 | Reachable | 0x0011 | bool | true | ✅ |
 
-#### Part B: GenericSwitch Cluster for Buttons - ⛔ BLOCKED
+#### Part B: GenericSwitch Cluster for Buttons - Migration Target
 
-**Blocker:** rs-matter does NOT support Matter events (required for GenericSwitch).
+**Current direction:** use current upstream `rs-matter` event support. The old blocker was upstream event support; the new work is adapting this repo to the upstream event APIs documented in [Upstream rs-matter Migration Goal](UPSTREAM_RS_MATTER_MIGRATION.md).
 
-Button actions ARE parsed and logged, but cannot be exposed to Matter until rs-matter adds event support.
+Button actions are parsed and logged. They still need to be connected to the current upstream `rs-matter` event emission model.
 
 **Current Endpoint Structure:**
 ```
 Tim Thermometer (Parent Device)
 ├── EP3: Temperature Sensor     ✅ Working
 ├── EP4: Humidity Sensor        ✅ Working
-├── EP5: Button (Plus)          ⛔ Blocked (needs events)
-├── EP6: Button (Minus)         ⛔ Blocked (needs events)
-└── EP7: Button (Center)        ⛔ Blocked (needs events)
+├── EP5: Button (Plus)          Migration target
+├── EP6: Button (Minus)         Migration target
+└── EP7: Button (Center)        Migration target
 ```
 
 ### Current Success Criteria
@@ -637,7 +641,7 @@ Tim Thermometer (Parent Device)
 | Device info: "Climate Sensor W100" by "Aqara" | ✅ Working |
 | Temperature sensor | ✅ Working |
 | Humidity sensor | ✅ Working |
-| Button events in Home Assistant | ⛔ Blocked |
+| Button events in Home Assistant | Migration target |
 | Button actions logged to console | ✅ Working |
 
 ---
@@ -686,31 +690,16 @@ VirtualDevice::new("Tim Thermometer")
 
 ---
 
-## Phase 2: GenericSwitch Cluster (FOR BUTTON EVENTS) - ✅ INFRASTRUCTURE COMPLETE (2026-01-14)
+## Phase 2: GenericSwitch Cluster (FOR BUTTON EVENTS) - Migration Target
 
-```
-╔══════════════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                          ║
-║  ✅ INFRASTRUCTURE IMPLEMENTED - AWAITING rs-matter EVENT SUPPORT                        ║
-║                                                                                          ║
-║  We implemented a temporary Matter events shim to prepare for when rs-matter adds       ║
-║  native event support (Issue #36, open since March 2023).                               ║
-║                                                                                          ║
-║  IMPLEMENTED:                                                                            ║
-║  - Event TLV structures: EventPath, EventDataIB, EventPriority (src/matter/events/)    ║
-║  - GenericSwitch cluster handler (src/matter/clusters/generic_switch.rs)                ║
-║  - GenericSwitchState with event queue (press, release, double_press, hold)            ║
-║  - DEV_TYPE_GENERIC_SWITCH (0x000F) device type                                         ║
-║  - EndpointKind::GenericSwitch and factory method                                       ║
-║  - W100 button integration: Plus, Minus, Center endpoints                               ║
-║  - MQTT action → GenericSwitch event mapping in integration.rs                          ║
-║                                                                                          ║
-║  AWAITING:                                                                               ║
-║  - rs-matter native event support (events are queued but not yet reported to Matter)    ║
-║  - Once rs-matter adds events, replace shim with native implementation                  ║
-║                                                                                          ║
-╚══════════════════════════════════════════════════════════════════════════════════════════╝
-```
+The bridge has W100 button intent and endpoint design documented here, but the implementation must be updated for current upstream `rs-matter`. The migration goal is documented in [Upstream rs-matter Migration Goal](UPSTREAM_RS_MATTER_MIGRATION.md).
+
+Required outcome:
+
+- W100 Plus, Minus, and Center actions remain parsed from MQTT.
+- The bridge exposes button endpoints through Matter.
+- Button actions are emitted through current upstream `rs-matter` event support.
+- Home Assistant can use the button events as automation triggers.
 
 This is a PLATFORM-WIDE improvement. The `GenericSwitchHandler` is REUSABLE for ANY device with buttons, not just W100.
 
@@ -731,7 +720,7 @@ This is a PLATFORM-WIDE improvement. The `GenericSwitchHandler` is REUSABLE for 
 | CurrentPosition | 0x0001 | u8 | 0 = released, 1 = pressed |
 | MultiPressMax | 0x0002 | u8 | Max multi-press count (2 for double-press) |
 
-### Events (REQUIRE rs-matter SUPPORT - UNVERIFIED)
+### Events
 
 | Event | ID | Description |
 |-------|-----|-------------|
@@ -768,7 +757,7 @@ impl GenericSwitchHandler {
     }
 
     /// Called when button is pressed.
-    /// TODO: Emit InitialPress event when rs-matter supports events.
+    /// TODO: Emit InitialPress through current upstream rs-matter events.
     pub fn on_press(&self) {
         self.current_position.store(1, Ordering::SeqCst);
         self.version.fetch_add(1, Ordering::SeqCst);
@@ -776,7 +765,7 @@ impl GenericSwitchHandler {
     }
 
     /// Called when button is released.
-    /// TODO: Emit ShortRelease/MultiPressComplete event when rs-matter supports events.
+    /// TODO: Emit ShortRelease/MultiPressComplete through current upstream rs-matter events.
     pub fn on_release(&self, press_type: ButtonPress) {
         self.current_position.store(0, Ordering::SeqCst);
         self.version.fetch_add(1, Ordering::SeqCst);
@@ -984,7 +973,7 @@ New clusters needed for W100:
 
 ## Open Questions
 
-1. **Matter Generic Switch**: Does rs-matter support GenericSwitch device type and Switch cluster for button events?
+1. **Matter Generic Switch**: Which current upstream `rs-matter` APIs should this bridge use for GenericSwitch metadata and event emission?
 
 2. **Thermostat cluster**: Is Thermostat (0x0201) the right cluster for bidirectional display control, or should we use a simpler approach?
 
