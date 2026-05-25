@@ -35,7 +35,7 @@ The Virtual Matter Bridge connects to the MQTT broker, subscribes to zigbee2mqtt
 
 ## Device: Aqara W100 Climate Sensor
 
-- **Zigbee2mqtt name**: `Tim-Thermometer`
+- **Zigbee2mqtt name**: `Büro-Thermometer`
 - **Model**: TH-S04D / X0028HPT89
 - **Connection**: Zigbee (via zigbee2mqtt)
 - **Native Matter**: Yes (Thread), but with limited functionality
@@ -75,7 +75,7 @@ The W100 natively supports Matter-over-Thread, but the **middle display line can
 
 ### State Topic (Device → Bridge)
 
-**Topic**: `zigbee2mqtt/Tim-Thermometer`
+**Topic**: `zigbee2mqtt/Büro-Thermometer`
 
 **Actual payload observed** (2026-01-11):
 ```json
@@ -125,7 +125,7 @@ The W100 natively supports Matter-over-Thread, but the **middle display line can
 
 ### Action Topic (Button Events)
 
-**Topic**: `zigbee2mqtt/Tim-Thermometer/action`
+**Topic**: `zigbee2mqtt/Büro-Thermometer/action`
 
 Actions are also included in the main state topic as `"action": "<value>"`.
 
@@ -146,7 +146,7 @@ Actions are also included in the main state topic as `"action": "<value>"`.
 
 ### Set Topic (Bridge → Device)
 
-**Topic**: `zigbee2mqtt/Tim-Thermometer/set`
+**Topic**: `zigbee2mqtt/Büro-Thermometer/set`
 
 To display external temperature on middle line:
 ```json
@@ -200,10 +200,10 @@ The W100 will be placed in "Büro" (office) room.
 **Commands**:
 ```bash
 # Subscribe to all W100 topics
-nix-shell -p mosquitto --run "mosquitto_sub -h 10.0.0.2 -t 'zigbee2mqtt/Tim-Thermometer/#' -v"
+nix-shell -p mosquitto --run "mosquitto_sub -h 10.0.0.2 -t 'zigbee2mqtt/Büro-Thermometer/#' -v"
 
 # Test setting external display
-nix-shell -p mosquitto --run "mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Tim-Thermometer/set' -m '{\"sensor\":\"external\",\"external_temperature\":22.5}'"
+nix-shell -p mosquitto --run "mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Büro-Thermometer/set' -m '{\"sensor\":\"external\",\"external_temperature\":22.5}'"
 ```
 
 **Success criteria**: See temperature/humidity JSON on state topic, button actions on action topic.
@@ -301,7 +301,7 @@ nix-shell -p mosquitto --run "mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Tim-Ther
 
 - Bridge state: `{"state":"online"}`
 - W100 IEEE address: `0x54ef441001421fb0`
-- Friendly name: `Tim-Thermometer`
+- Friendly name: `Büro-Thermometer`
 - zigbee2mqtt version: 2.6.3
 
 ### W100 State Publishing
@@ -324,7 +324,7 @@ nix-shell -p mosquitto --run "mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Tim-Ther
 
 **Enable external display and set values:**
 ```bash
-mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Tim-Thermometer/set' \
+mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Büro-Thermometer/set' \
   -m '{"sensor":"external","external_temperature":25.5,"external_humidity":75}'
 ```
 
@@ -339,7 +339,7 @@ mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Tim-Thermometer/set' \
 
 **Disable external display (return to internal):**
 ```bash
-mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Tim-Thermometer/set' \
+mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Büro-Thermometer/set' \
   -m '{"sensor":"internal"}'
 ```
 
@@ -372,7 +372,7 @@ Button presses publish to **two locations**:
 
 **Example `/action` topic message:**
 ```
-zigbee2mqtt/Tim-Thermometer/action single_center
+zigbee2mqtt/Büro-Thermometer/action single_center
 ```
 
 **Example state topic with action:**
@@ -495,7 +495,7 @@ Scope 3 complete. Ready for **Scope 4: Matter Translation**.
 
 ### Matter Device Structure
 
-The W100 is exposed as a single parent device "Tim Thermometer" with two child endpoints:
+The W100 is exposed as a single parent device "Büro Thermometer" with two child endpoints:
 - Temperature sensor (TemperatureMeasurement cluster 0x0402)
 - Humidity sensor (RelativeHumidityMeasurement cluster 0x0405)
 
@@ -537,14 +537,14 @@ The sensors use atomic values (`AtomicI16`, `AtomicU16`) with version counters f
 
 Once the W100 published (via button press or threshold change), values updated correctly:
 ```
-[MQTT] Tim-Thermometer temperature updated: 21.5°C
-[MQTT] Tim-Thermometer humidity updated: 47.5%
+[MQTT] Büro-Thermometer temperature updated: 21.5°C
+[MQTT] Büro-Thermometer humidity updated: 47.5%
 ```
 Home Assistant reflected these values immediately.
 
 ### Improvement: Request State on Startup
 
-To avoid showing stale defaults on bridge startup, request W100 state immediately after subscribing by publishing to `zigbee2mqtt/Tim-Thermometer/get`.
+To avoid showing stale defaults on bridge startup, request W100 state immediately after subscribing by publishing to `zigbee2mqtt/Büro-Thermometer/get`.
 
 **Implementation** (in `integration.rs` after subscribing):
 ```rust
@@ -559,10 +559,10 @@ for device in &self.w100_devices {
 
 ```bash
 # Monitor W100 topics
-nix-shell -p mosquitto --run "mosquitto_sub -h 10.0.0.2 -t 'zigbee2mqtt/Tim-Thermometer/#' -v"
+nix-shell -p mosquitto --run "mosquitto_sub -h 10.0.0.2 -t 'zigbee2mqtt/Büro-Thermometer/#' -v"
 
 # Force state publish manually
-nix-shell -p mosquitto --run "mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Tim-Thermometer/get' -m '{\"state\":\"\"}'"
+nix-shell -p mosquitto --run "mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Büro-Thermometer/get' -m '{\"state\":\"\"}'"
 ```
 
 ### Status
@@ -612,7 +612,7 @@ All attributes now implemented in `src/matter/clusters/bridged_device_basic_info
 |-----------|-----|------|----------------|--------|
 | VendorName | 0x0001 | string | "Aqara" | ✅ |
 | ProductName | 0x0003 | string | "Climate Sensor W100" | ✅ |
-| NodeLabel | 0x0005 | string | "Tim Thermometer" | ✅ |
+| NodeLabel | 0x0005 | string | "Büro Thermometer" | ✅ |
 | HardwareVersion | 0x0007 | u16 | From zigbee2mqtt | ✅ |
 | SoftwareVersion | 0x0009 | u32 | From zigbee2mqtt | ✅ |
 | SerialNumber | 0x000F | string | IEEE address | ✅ |
@@ -626,7 +626,7 @@ Button actions are parsed from both MQTT input forms and emitted as GenericSwitc
 
 **Current Endpoint Structure:**
 ```
-Tim Thermometer (Parent Device)
+Büro Thermometer (Parent Device)
 ├── EP3: Temperature Sensor     ✅ Working
 ├── EP4: Humidity Sensor        ✅ Working
 ├── EP5: Button (Plus)          ✅ GenericSwitch events
@@ -676,9 +676,9 @@ This was a PLATFORM-WIDE improvement. The `BridgedDeviceInfo` struct is REUSABLE
 **Current W100 Setup (main.rs:168-181):**
 
 ```rust
-VirtualDevice::new("Tim Thermometer")
+VirtualDevice::new("Büro Thermometer")
     .with_device_info(
-        BridgedDeviceInfo::new("Tim Thermometer")
+        BridgedDeviceInfo::new("Büro Thermometer")
             .with_vendor("Aqara")
             .with_product("Climate Sensor W100"),
     )
@@ -771,9 +771,9 @@ let button_plus = Arc::new(GenericSwitchState::new());
 let button_minus = Arc::new(GenericSwitchState::new());
 let button_center = Arc::new(GenericSwitchState::new());
 
-VirtualDevice::new(VirtualDeviceType::TemperatureSensor, "Tim Thermometer")
+VirtualDevice::new(VirtualDeviceType::TemperatureSensor, "Büro Thermometer")
     .with_device_info(
-        BridgedDeviceInfo::new("Tim Thermometer")
+        BridgedDeviceInfo::new("Büro Thermometer")
             .with_vendor("Aqara")
             .with_product("Climate Sensor W100")
     )
@@ -804,10 +804,10 @@ src/input/mqtt/
 
 - Connect to `mqtt://10.0.0.2:1883` (no auth)
 - Subscribe to topics:
-  - `zigbee2mqtt/Tim-Thermometer` (state)
-  - `zigbee2mqtt/Tim-Thermometer/action` (button events)
+  - `zigbee2mqtt/Büro-Thermometer` (state)
+  - `zigbee2mqtt/Büro-Thermometer/action` (button events)
 - Publish to:
-  - `zigbee2mqtt/Tim-Thermometer/set` (control display)
+  - `zigbee2mqtt/Büro-Thermometer/set` (control display)
 
 #### Recommended Crate
 
@@ -916,12 +916,12 @@ Additional clusters that may be useful later:
 1. Use `nix-shell -p mosquitto` to get MQTT client tools
 2. Subscribe to W100 topics:
    ```bash
-   mosquitto_sub -h 10.0.0.2 -t 'zigbee2mqtt/Tim-Thermometer/#' -v
+   mosquitto_sub -h 10.0.0.2 -t 'zigbee2mqtt/Büro-Thermometer/#' -v
    ```
 3. Verify button presses appear as `action` payloads
 4. Test publishing to set topic:
    ```bash
-   mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Tim-Thermometer/set' \
+   mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Büro-Thermometer/set' \
      -m '{"sensor":"external","external_temperature":22.5}'
    ```
 

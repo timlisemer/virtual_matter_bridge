@@ -15,6 +15,8 @@ use tokio::sync::mpsc;
 use virtual_matter_bridge::config::Config;
 use virtual_matter_bridge::input::mqtt::{MqttClient, W100Action, W100Device};
 
+const W100_ZIGBEE2MQTT_FRIENDLY_NAME: &str = "Büro-Thermometer";
+
 #[tokio::main]
 async fn main() {
     // Load .env file before anything else
@@ -39,7 +41,7 @@ async fn main() {
     // Create W100 device handler
     let (action_tx, mut action_rx) = mpsc::channel::<W100Action>(32);
     let w100 = Arc::new(
-        W100Device::new("Tim-Thermometer")
+        W100Device::new(W100_ZIGBEE2MQTT_FRIENDLY_NAME)
             .with_mqtt_client(async_client.clone())
             .with_action_channel(action_tx),
     );

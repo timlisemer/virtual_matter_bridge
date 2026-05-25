@@ -4,7 +4,7 @@ use crate::config::MqttConfig;
 use log::{debug, error, info, warn};
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 /// Message received from MQTT broker.
 #[derive(Debug, Clone)]
@@ -59,10 +59,9 @@ impl MqttClient {
     pub async fn run(
         mut self,
         tx: mpsc::Sender<MqttMessage>,
-        connected_tx: Option<oneshot::Sender<()>>,
+        connected_tx: Option<mpsc::Sender<()>>,
     ) {
         info!("Starting MQTT event loop");
-        let mut connected_tx = connected_tx;
 
         loop {
             match self.event_loop.poll().await {
@@ -70,9 +69,12 @@ impl MqttClient {
                     match &event {
                         Event::Incoming(Packet::ConnAck(_)) => {
                             info!("[MQTT] Connected to broker");
-                            // Signal that we're connected
-                            if let Some(tx) = connected_tx.take() {
-                                let _ = tx.send(());
+                            // Signal every connection, including reconnects, so callers can
+                            // restore subscriptions after the broker closes a session.
+                            if let Some(tx) = &connected_tx
+                                && tx.send(()).await.is_err()
+                            {
+                                warn!("MQTT connection signal channel closed");
                             }
                         }
                         Event::Incoming(Packet::Publish(publish)) => {

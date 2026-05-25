@@ -104,7 +104,7 @@ impl W100Device {
     /// Create a new W100 device handler.
     ///
     /// # Arguments
-    /// * `friendly_name` - The device's friendly name in zigbee2mqtt (e.g., "Tim-Thermometer")
+    /// * `friendly_name` - The device's friendly name in zigbee2mqtt (e.g., "Büro-Thermometer")
     pub fn new(friendly_name: impl Into<String>) -> Self {
         Self {
             friendly_name: friendly_name.into(),
@@ -345,5 +345,26 @@ impl W100Device {
 
         info!("Set W100 to internal sensor mode");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn umlaut_friendly_name_builds_mqtt_topics() {
+        let device = W100Device::new("Büro-Thermometer");
+
+        assert_eq!(device.state_topic(), "zigbee2mqtt/Büro-Thermometer");
+        assert_eq!(device.action_topic(), "zigbee2mqtt/Büro-Thermometer/action");
+        assert_eq!(device.set_topic(), "zigbee2mqtt/Büro-Thermometer/set");
+        assert_eq!(
+            device.subscribe_topics(),
+            vec![
+                "zigbee2mqtt/Büro-Thermometer".to_string(),
+                "zigbee2mqtt/Büro-Thermometer/action".to_string(),
+            ]
+        );
     }
 }

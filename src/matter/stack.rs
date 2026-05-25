@@ -1,6 +1,6 @@
 use super::clusters::{
     BooleanStateHandler, BridgedDeviceInfo, BridgedHandler, GenericSwitchHandler,
-    GenericSwitchState, OccupancySensingHandler, RelativeHumidityHandler,
+    GenericSwitchState, IcdManagementHandler, OccupancySensingHandler, RelativeHumidityHandler,
     TemperatureMeasurementHandler,
 };
 use super::device_info::DEV_INFO;
@@ -82,7 +82,11 @@ static GENERIC_SWITCH_NOTIFY: StaticCell<Signal<CriticalSectionRawMutex, ()>> = 
 /// Static hostname storage for mDNS (needs 'static lifetime for Host struct)
 static HOSTNAME: OnceLock<String> = OnceLock::new();
 
-const ROOT_ENDPOINT: Endpoint<'static> = root_endpoint!(eth);
+const ROOT_ENDPOINT_BASE: Endpoint<'static> = root_endpoint!(eth);
+const ROOT_ENDPOINT: Endpoint<'static> = Endpoint {
+    clusters: clusters!(eth; IcdManagementHandler::CLUSTER),
+    ..ROOT_ENDPOINT_BASE
+};
 
 /// Dynamic PartsMatcher that handles all parent-child relationships.
 /// Built from VirtualDevice configurations at runtime.
@@ -1312,11 +1316,20 @@ pub async fn run_matter_stack(
     let eth_sys_handler = endpoints::EthSysHandlerBuilder::new()
         .netif_diag(get_netifs())
         .build(&mut rand);
+    let icd_management_handler = IcdManagementHandler::new(Dataver::new_rand(&mut rand));
 
     // Build the handler chain with dynamic handler for virtual devices
     let handler = (
         built_node.node,
         eth_sys_handler
+            .chain(
+                EpClMatcher::new(Some(0), Some(IcdManagementHandler::CLUSTER.id)),
+                Async(
+                    rs_matter::dm::clusters::decl::icd_management::HandlerAdaptor(
+                        icd_management_handler,
+                    ),
+                ),
+            )
             // === Endpoint 1: Bridge master on/off control ===
             .chain(
                 EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
@@ -1556,4 +1569,21 @@ pub async fn run_matter_stack(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_endpoint_keeps_standard_clusters_when_adding_icd_management() {
+        let cluster_ids: Vec<u32> = ROOT_ENDPOINT
+            .clusters
+            .iter()
+            .map(|cluster| cluster.id)
+            .collect();
+
+        assert!(cluster_ids.contains(&desc::DescHandler::CLUSTER.id));
+        assert!(cluster_ids.contains(&IcdManagementHandler::CLUSTER.id));
+    }
 }

@@ -59,6 +59,7 @@ Note: Endpoint numbers are dynamic based on device configuration. Video doorbell
 | OnOff                       | `0x0006` | ✅ Implemented | On/Off control for switches and lights                                |
 | GenericSwitch               | `0x003B` | ✅ Implemented | Button press, release, hold, and multi-press events                  |
 | BooleanState                | `0x0045` | ✅ Implemented | Binary sensor state (contact sensors)                                 |
+| ICD Management              | `0x0046` | ✅ Minimal     | Root endpoint compatibility reads for always-on bridge commissioning  |
 | TemperatureMeasurement      | `0x0402` | ✅ Implemented | Temperature sensor readings                                           |
 | RelativeHumidityMeasurement | `0x0405` | ✅ Implemented | Humidity sensor readings                                              |
 | OccupancySensing            | `0x0406` | ✅ Implemented | Occupancy/motion detection                                            |
@@ -87,6 +88,7 @@ Note: Endpoint numbers are dynamic based on device configuration. Video doorbell
   - OnOff (0x0006) - functional (switches and lights)
   - GenericSwitch (0x003B) - functional button events
   - BooleanState (0x0045) - functional (contact sensors)
+  - ICD Management (0x0046) - minimal read-only root endpoint compatibility
   - TemperatureMeasurement (0x0402) - functional (temperature sensors)
   - RelativeHumidityMeasurement (0x0405) - functional (humidity sensors)
   - OccupancySensing (0x0406) - functional (occupancy sensors)
@@ -347,7 +349,7 @@ We initially investigated the ICD (Intermittently Connected Device) Management c
 
 **Finding: ICD Check-In is for sleepy devices, not session recovery**
 
-The ICD Check-In Protocol is designed for battery-powered devices that sleep and wake periodically. It is NOT the mechanism for session recovery after restart of always-on (hardwired) devices. Home Assistant does not use ICD Check-In for normal devices.
+The ICD Check-In Protocol is designed for battery-powered devices that sleep and wake periodically. It is NOT the mechanism for session recovery after restart of always-on (hardwired) devices. Home Assistant does not use ICD Check-In for normal devices. The root endpoint still exposes minimal read-only ICD Management metadata for controller compatibility; that is not Check-In Protocol support.
 
 **Root Cause Analysis**
 
@@ -396,7 +398,7 @@ The recovery time includes:
 #### Conclusions
 
 1. **Session recovery works as designed** - No code changes needed for basic functionality
-2. **ICD Check-In is unnecessary** for always-on (hardwired) devices
+2. **ICD Check-In remains unnecessary** for always-on (hardwired) devices
 3. **User experience improved** with logging to indicate recovery is in progress
 4. **The MRP error is expected** - It indicates the system correctly handling stale state
 
@@ -406,7 +408,7 @@ Based on these findings:
 
 1. **Informative logging added** - Device logs when waiting for controllers and when recovery completes
 2. **Session recovery is automatic** - Controllers handle it via MRP timeout + CASE re-establishment
-3. **No ICD cluster needed** - This bridge is hardwired/always-on, not battery-powered
+3. **Minimal ICD Management compatibility** - This bridge is hardwired/always-on, so it does not implement ICD Check-In behavior, but it exposes read-only root endpoint ICD Management metadata for controller compatibility
 
 ### Previous Issues (Resolved)
 

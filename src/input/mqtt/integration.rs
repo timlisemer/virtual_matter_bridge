@@ -9,17 +9,17 @@ use crate::config::MqttConfig;
 use crate::matter::clusters::{GenericSwitchState, HumiditySensor, TemperatureSensor};
 use log::{info, warn};
 use parking_lot::Mutex;
-use rumqttc::QoS;
+use rumqttc::{AsyncClient, QoS};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 const ACTION_DEDUP_WINDOW: Duration = Duration::from_millis(500);
 
 /// Configuration for a W100 climate sensor.
 pub struct W100Config {
-    /// Friendly name in zigbee2mqtt (e.g., "Tim-Thermometer")
+    /// Friendly name in zigbee2mqtt (e.g., "Büro-Thermometer")
     pub friendly_name: String,
     /// Shared temperature sensor (also used by Matter)
     pub temperature_sensor: Arc<TemperatureSensor>,
@@ -340,76 +340,89 @@ impl MqttIntegration {
         // Channel for MQTT messages
         let (msg_tx, mut msg_rx) = mpsc::channel::<MqttMessage>(64);
 
-        // Channel to signal when connected
-        let (connected_tx, connected_rx) = oneshot::channel();
+        // Channel to signal every connection/reconnection.
+        let (connected_tx, mut connected_rx) = mpsc::channel::<()>(8);
 
         // Start MQTT event loop FIRST (so it can establish connection)
         let mqtt_loop = tokio::spawn(async move {
             mqtt_client.run(msg_tx, Some(connected_tx)).await;
         });
 
-        // Wait for connection (with timeout)
-        match tokio::time::timeout(Duration::from_secs(10), connected_rx).await {
-            Ok(Ok(())) => {
-                info!("[MQTT] Connection established, subscribing to topics");
-            }
-            Ok(Err(_)) => {
-                warn!("[MQTT] Connection signal channel dropped");
-                return;
-            }
-            Err(_) => {
-                warn!("[MQTT] Connection timeout after 10 seconds");
-                mqtt_loop.abort();
-                return;
-            }
-        }
-
-        // NOW subscribe to all device topics (after connection is established)
-        for device in &self.w100_devices {
-            for topic in device.subscribe_topics() {
-                if let Err(e) = subscribe_client.subscribe(&topic, QoS::AtMostOnce).await {
-                    warn!("[MQTT] Failed to subscribe to {}: {:?}", topic, e);
-                }
-            }
-        }
-
-        // Small delay to ensure subscriptions are processed before requesting state
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Request current state from all devices (W100 is battery-powered and sleeps)
-        for device in &self.w100_devices {
-            let get_topic = format!("zigbee2mqtt/{}/get", device.friendly_name);
-            if let Err(e) = subscribe_client
-                .publish(&get_topic, QoS::AtMostOnce, false, r#"{"state":""}"#)
-                .await
-            {
-                warn!(
-                    "[MQTT] Failed to request state for {}: {:?}",
-                    device.friendly_name, e
-                );
-            } else {
-                info!(
-                    "[MQTT] Requested initial state for {}",
-                    device.friendly_name
-                );
-            }
-        }
-
         info!(
             "[MQTT] Integration started with {} W100 device(s)",
             self.w100_devices.len()
         );
 
-        // Process incoming messages
-        while let Some(msg) = msg_rx.recv().await {
-            for device in &self.w100_devices {
-                if device.process_message(&msg.topic, &msg.payload, msg.retain) {
-                    break; // Message was handled by this device
+        let mut connected_once = false;
+
+        loop {
+            tokio::select! {
+                Some(()) = connected_rx.recv() => {
+                    if connected_once {
+                        info!("[MQTT] Reconnected, restoring subscriptions");
+                    } else {
+                        info!("[MQTT] Connection established, subscribing to topics");
+                        connected_once = true;
+                    }
+                    self.subscribe_and_request_state(&subscribe_client).await;
                 }
+                Some(msg) = msg_rx.recv() => {
+                    for device in &self.w100_devices {
+                        if device.process_message(&msg.topic, &msg.payload, msg.retain) {
+                            break; // Message was handled by this device
+                        }
+                    }
+                }
+                else => break,
             }
         }
 
         mqtt_loop.abort();
+    }
+
+    async fn subscribe_and_request_state(&self, client: &AsyncClient) {
+        for topic in self.subscription_topics() {
+            if let Err(e) = client.subscribe(&topic, QoS::AtMostOnce).await {
+                warn!("[MQTT] Failed to subscribe to {}: {:?}", topic, e);
+            }
+        }
+
+        // Give the broker a moment to process SUBSCRIBE before requesting state.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Request current state from all devices (W100 is battery-powered and sleeps).
+        for (friendly_name, get_topic) in self.state_request_topics() {
+            if let Err(e) = client
+                .publish(&get_topic, QoS::AtMostOnce, false, r#"{"state":""}"#)
+                .await
+            {
+                warn!(
+                    "[MQTT] Failed to request state for {}: {:?}",
+                    friendly_name, e
+                );
+            } else {
+                info!("[MQTT] Requested initial state for {}", friendly_name);
+            }
+        }
+    }
+
+    fn subscription_topics(&self) -> Vec<String> {
+        self.w100_devices
+            .iter()
+            .flat_map(W100IntegrationDevice::subscribe_topics)
+            .collect()
+    }
+
+    fn state_request_topics(&self) -> Vec<(&str, String)> {
+        self.w100_devices
+            .iter()
+            .map(|device| {
+                (
+                    device.friendly_name.as_str(),
+                    format!("zigbee2mqtt/{}/get", device.friendly_name),
+                )
+            })
+            .collect()
     }
 }
 
@@ -578,6 +591,84 @@ mod tests {
                     previous_position: 1,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn umlaut_friendly_name_builds_and_matches_mqtt_topics() {
+        let plus = Arc::new(GenericSwitchState::new());
+        let device = W100IntegrationDevice {
+            friendly_name: "Büro-Thermometer".to_string(),
+            temperature_sensor: Arc::new(TemperatureSensor::new(20.0)),
+            humidity_sensor: Arc::new(HumiditySensor::new(50.0)),
+            button_plus: Some(plus.clone()),
+            button_minus: None,
+            button_center: None,
+            last_action: Mutex::new(None),
+        };
+
+        assert_eq!(device.state_topic(), "zigbee2mqtt/Büro-Thermometer");
+        assert_eq!(device.action_topic(), "zigbee2mqtt/Büro-Thermometer/action");
+        assert_eq!(
+            device.subscribe_topics(),
+            vec![
+                "zigbee2mqtt/Büro-Thermometer".to_string(),
+                "zigbee2mqtt/Büro-Thermometer/action".to_string(),
+            ]
+        );
+
+        assert!(device.process_message(
+            "zigbee2mqtt/Büro-Thermometer",
+            r#"{"temperature":21.5,"humidity":53.0}"#,
+            false,
+        ));
+        assert_eq!(device.temperature_sensor.get_celsius(), 21.5);
+        assert_eq!(device.humidity_sensor.get_percent(), 53.0);
+
+        assert!(device.process_message(
+            "zigbee2mqtt/Büro-Thermometer/action",
+            "single_plus",
+            false,
+        ));
+        assert_eq!(
+            plus.take_pending_events(),
+            vec![
+                GenericSwitchPendingEvent::InitialPress { new_position: 1 },
+                GenericSwitchPendingEvent::ShortRelease {
+                    previous_position: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reconnect_setup_uses_umlaut_subscription_and_state_request_topics() {
+        let integration = MqttIntegration::new(MqttConfig {
+            broker_host: "127.0.0.1".to_string(),
+            broker_port: 1883,
+            client_id: "test-client".to_string(),
+            username: None,
+            password: None,
+        })
+        .with_w100(W100Config::new(
+            "Büro-Thermometer",
+            Arc::new(TemperatureSensor::new(20.0)),
+            Arc::new(HumiditySensor::new(50.0)),
+        ));
+
+        assert_eq!(
+            integration.subscription_topics(),
+            vec![
+                "zigbee2mqtt/Büro-Thermometer".to_string(),
+                "zigbee2mqtt/Büro-Thermometer/action".to_string(),
+            ]
+        );
+        assert_eq!(
+            integration.state_request_topics(),
+            vec![(
+                "Büro-Thermometer",
+                "zigbee2mqtt/Büro-Thermometer/get".to_string()
+            )]
         );
     }
 }

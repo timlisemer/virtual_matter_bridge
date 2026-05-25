@@ -233,9 +233,9 @@ impl VirtualDevice {
     ///
     /// # Example
     /// ```ignore
-    /// VirtualDevice::new("Tim Thermometer")
+    /// VirtualDevice::new("Büro Thermometer")
     ///     .with_device_info(
-    ///         BridgedDeviceInfo::new("Tim Thermometer")
+    ///         BridgedDeviceInfo::new("Büro Thermometer")
     ///             .with_vendor("Aqara")
     ///             .with_product("Climate Sensor W100")
     ///     )

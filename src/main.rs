@@ -29,6 +29,9 @@ use tokio::signal;
 /// Type alias for the state pusher callback.
 type StatePusher = Arc<dyn Fn(bool) + Send + Sync>;
 
+const W100_MATTER_DEVICE_NAME: &str = "Büro Thermometer";
+const W100_ZIGBEE2MQTT_FRIENDLY_NAME: &str = "Büro-Thermometer";
+
 fn init_logger() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
@@ -171,9 +174,9 @@ async fn main() {
             doorbell_handler.clone(),
         )),
         // W100 Climate Sensor (Aqara TH-S04D) via MQTT/zigbee2mqtt
-        VirtualDevice::new("Tim Thermometer")
+        VirtualDevice::new(W100_MATTER_DEVICE_NAME)
             .with_device_info(
-                BridgedDeviceInfo::new("Tim Thermometer")
+                BridgedDeviceInfo::new(W100_MATTER_DEVICE_NAME)
                     .with_vendor("Aqara")
                     .with_product("Climate Sensor W100"),
             )
@@ -232,7 +235,7 @@ async fn main() {
     let mqtt_task = MqttIntegration::new(mqtt_config)
         .with_w100(
             W100Config::new(
-                "Tim-Thermometer",
+                W100_ZIGBEE2MQTT_FRIENDLY_NAME,
                 w100_temperature.clone(),
                 w100_humidity.clone(),
             )
