@@ -14,7 +14,7 @@ mod matter;
 
 use crate::config::Config;
 use crate::input::camera::CameraInput;
-use crate::input::mqtt::{MqttIntegration, W100Config};
+use crate::input::mqtt::{MqttIntegration, Shelly2PmConfig, W100Config, shelly_2pm_channel_pair};
 use crate::matter::clusters::{
     BridgedDeviceInfo, GenericSwitchState, HumiditySensor, TemperatureSensor,
 };
@@ -31,6 +31,8 @@ type StatePusher = Arc<dyn Fn(bool) + Send + Sync>;
 
 const W100_MATTER_DEVICE_NAME: &str = "Büro Thermometer";
 const W100_ZIGBEE2MQTT_FRIENDLY_NAME: &str = "Büro-Thermometer";
+const SHELLY_2PM_MATTER_DEVICE_NAME: &str = "Büro Licht & PC Schalter";
+const SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME: &str = "Büro Licht & PC Schalter";
 
 fn init_logger() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -137,8 +139,12 @@ async fn main() {
     let motion_handler = Arc::new(SimulatedHandler::new(false));
     let outlet1_handler = Arc::new(SimulatedHandler::new(true));
     let outlet2_handler = Arc::new(SimulatedHandler::new(false));
-    let light_handler = Arc::new(SimulatedHandler::new(false));
     let doorbell_handler = Arc::new(SimulatedHandler::new(false));
+
+    // Shelly 2PM Gen4 two-channel relay via MQTT/zigbee2mqtt.
+    // L1/state_l1 is Tim PC Switch, L2/state_l2 is Büro Light.
+    let (shelly_l1_handler, shelly_l2_handler, shelly_command_rx) =
+        shelly_2pm_channel_pair(SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME);
 
     // Create W100 climate sensors (will be updated by MQTT)
     let w100_temperature = Arc::new(TemperatureSensor::new(20.0)); // Default 20°C
@@ -164,9 +170,21 @@ async fn main() {
         VirtualDevice::new("Power Strip")
             .with_endpoint(EndpointConfig::switch("Outlet 1", outlet1_handler.clone()))
             .with_endpoint(EndpointConfig::switch("Outlet 2", outlet2_handler.clone())),
-        // Light (parent) with light switch endpoint (child)
-        VirtualDevice::new("Light")
-            .with_endpoint(EndpointConfig::light_switch("Light", light_handler.clone())),
+        // Shelly 2PM Gen4 (parent) with two controllable channel endpoints.
+        VirtualDevice::new(SHELLY_2PM_MATTER_DEVICE_NAME)
+            .with_device_info(
+                BridgedDeviceInfo::new(SHELLY_2PM_MATTER_DEVICE_NAME)
+                    .with_vendor("Shelly")
+                    .with_product("Shelly 2PM Gen4"),
+            )
+            .with_endpoint(EndpointConfig::switch(
+                "Tim PC Switch",
+                shelly_l1_handler.clone(),
+            ))
+            .with_endpoint(EndpointConfig::light_switch(
+                "Büro Light",
+                shelly_l2_handler.clone(),
+            )),
         // Video Doorbell (parent) with camera endpoint (child)
         // Note: Camera handlers are stub - actual streaming awaits Matter 1.5 controller support
         VirtualDevice::new("Video Doorbell").with_endpoint(EndpointConfig::video_doorbell_camera(
@@ -245,6 +263,12 @@ async fn main() {
                 w100_button_center.clone(),
             ),
         )
+        .with_shelly_2pm(Shelly2PmConfig::new(
+            SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME,
+            shelly_l1_handler.clone(),
+            shelly_l2_handler.clone(),
+            shelly_command_rx,
+        ))
         .start();
 
     // Start Matter stack in a separate thread

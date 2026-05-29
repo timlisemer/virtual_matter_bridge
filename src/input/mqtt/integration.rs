@@ -1,9 +1,10 @@
 //! MQTT Integration orchestrator for clean device management.
 //!
 //! Provides a high-level API for integrating MQTT devices without exposing
-//! MQTT internals to main.rs. Supports multiple W100 devices.
+//! MQTT internals to main.rs. Supports W100 and Shelly 2PM devices.
 
 use super::client::{MqttClient, MqttMessage};
+use super::shelly_2pm::{Shelly2PmChannelHandler, Shelly2PmCommand, Shelly2PmState};
 use super::w100::{W100Action, W100State};
 use crate::config::MqttConfig;
 use crate::matter::clusters::{GenericSwitchState, HumiditySensor, TemperatureSensor};
@@ -59,6 +60,34 @@ impl W100Config {
         self.button_minus = Some(minus);
         self.button_center = Some(center);
         self
+    }
+}
+
+/// Configuration for a Shelly 2PM Gen4 two-channel relay.
+pub struct Shelly2PmConfig {
+    /// Friendly name in zigbee2mqtt (e.g., "Büro Licht & PC Schalter")
+    pub friendly_name: String,
+    /// L1 channel handler, exposed as the Tim PC normal Matter switch.
+    pub l1_handler: Arc<Shelly2PmChannelHandler>,
+    /// L2 channel handler, exposed as the Büro Light Matter light.
+    pub l2_handler: Arc<Shelly2PmChannelHandler>,
+    /// Commands queued by the Matter endpoint handlers.
+    pub command_rx: mpsc::Receiver<Shelly2PmCommand>,
+}
+
+impl Shelly2PmConfig {
+    pub fn new(
+        friendly_name: impl Into<String>,
+        l1_handler: Arc<Shelly2PmChannelHandler>,
+        l2_handler: Arc<Shelly2PmChannelHandler>,
+        command_rx: mpsc::Receiver<Shelly2PmCommand>,
+    ) -> Self {
+        Self {
+            friendly_name: friendly_name.into(),
+            l1_handler,
+            l2_handler,
+            command_rx,
+        }
     }
 }
 
@@ -278,6 +307,48 @@ impl W100IntegrationDevice {
     }
 }
 
+/// Internal Shelly 2PM device state for the integration.
+struct Shelly2PmIntegrationDevice {
+    friendly_name: String,
+    l1_handler: Arc<Shelly2PmChannelHandler>,
+    l2_handler: Arc<Shelly2PmChannelHandler>,
+}
+
+impl Shelly2PmIntegrationDevice {
+    fn state_topic(&self) -> String {
+        format!("zigbee2mqtt/{}", self.friendly_name)
+    }
+
+    fn subscribe_topics(&self) -> Vec<String> {
+        vec![self.state_topic()]
+    }
+
+    fn process_message(&self, topic: &str, payload: &str) -> bool {
+        if topic != self.state_topic() {
+            return false;
+        }
+
+        match serde_json::from_str::<Shelly2PmState>(payload) {
+            Ok(state) => {
+                if let Some(l1) = state.state_l1 {
+                    self.l1_handler.set_from_mqtt(l1.as_bool());
+                }
+                if let Some(l2) = state.state_l2 {
+                    self.l2_handler.set_from_mqtt(l2.as_bool());
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "[MQTT] Failed to parse Shelly 2PM {} state: {}",
+                    self.friendly_name, e
+                );
+            }
+        }
+
+        true
+    }
+}
+
 /// MQTT Integration orchestrator.
 ///
 /// Manages MQTT client and device subscriptions, keeping MQTT internals
@@ -285,6 +356,8 @@ impl W100IntegrationDevice {
 pub struct MqttIntegration {
     config: MqttConfig,
     w100_devices: Vec<W100IntegrationDevice>,
+    shelly_2pm_devices: Vec<Shelly2PmIntegrationDevice>,
+    shelly_2pm_command_receivers: Vec<mpsc::Receiver<Shelly2PmCommand>>,
 }
 
 impl MqttIntegration {
@@ -293,6 +366,8 @@ impl MqttIntegration {
         Self {
             config,
             w100_devices: Vec::new(),
+            shelly_2pm_devices: Vec::new(),
+            shelly_2pm_command_receivers: Vec::new(),
         }
     }
 
@@ -310,6 +385,17 @@ impl MqttIntegration {
         self
     }
 
+    /// Add a Shelly 2PM Gen4 relay to the integration.
+    pub fn with_shelly_2pm(mut self, config: Shelly2PmConfig) -> Self {
+        self.shelly_2pm_devices.push(Shelly2PmIntegrationDevice {
+            friendly_name: config.friendly_name,
+            l1_handler: config.l1_handler,
+            l2_handler: config.l2_handler,
+        });
+        self.shelly_2pm_command_receivers.push(config.command_rx);
+        self
+    }
+
     /// Start the MQTT integration.
     ///
     /// Spawns a background task that connects to the broker, subscribes to
@@ -321,8 +407,8 @@ impl MqttIntegration {
         })
     }
 
-    async fn run(self) {
-        if self.w100_devices.is_empty() {
+    async fn run(mut self) {
+        if self.w100_devices.is_empty() && self.shelly_2pm_devices.is_empty() {
             info!("[MQTT] No devices configured, skipping MQTT integration");
             return;
         }
@@ -343,14 +429,30 @@ impl MqttIntegration {
         // Channel to signal every connection/reconnection.
         let (connected_tx, mut connected_rx) = mpsc::channel::<()>(8);
 
+        // Merge command channels from Shelly Matter handlers into this task.
+        let (shelly_command_tx, mut shelly_command_rx) = mpsc::channel::<Shelly2PmCommand>(64);
+        let mut shelly_command_forwarders = Vec::new();
+        for mut receiver in self.shelly_2pm_command_receivers.drain(..) {
+            let tx = shelly_command_tx.clone();
+            shelly_command_forwarders.push(tokio::spawn(async move {
+                while let Some(command) = receiver.recv().await {
+                    if tx.send(command).await.is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        drop(shelly_command_tx);
+
         // Start MQTT event loop FIRST (so it can establish connection)
         let mqtt_loop = tokio::spawn(async move {
             mqtt_client.run(msg_tx, Some(connected_tx)).await;
         });
 
         info!(
-            "[MQTT] Integration started with {} W100 device(s)",
-            self.w100_devices.len()
+            "[MQTT] Integration started with {} W100 device(s), {} Shelly 2PM device(s)",
+            self.w100_devices.len(),
+            self.shelly_2pm_devices.len()
         );
 
         let mut connected_once = false;
@@ -372,12 +474,23 @@ impl MqttIntegration {
                             break; // Message was handled by this device
                         }
                     }
+                    for device in &self.shelly_2pm_devices {
+                        if device.process_message(&msg.topic, &msg.payload) {
+                            break; // Message was handled by this device
+                        }
+                    }
+                }
+                Some(command) = shelly_command_rx.recv() => {
+                    self.publish_shelly_command(&subscribe_client, command).await;
                 }
                 else => break,
             }
         }
 
         mqtt_loop.abort();
+        for forwarder in shelly_command_forwarders {
+            forwarder.abort();
+        }
     }
 
     async fn subscribe_and_request_state(&self, client: &AsyncClient) {
@@ -390,7 +503,7 @@ impl MqttIntegration {
         // Give the broker a moment to process SUBSCRIBE before requesting state.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Request current state from all devices (W100 is battery-powered and sleeps).
+        // Request current state from all devices.
         for (friendly_name, get_topic) in self.state_request_topics() {
             if let Err(e) = client
                 .publish(&get_topic, QoS::AtMostOnce, false, r#"{"state":""}"#)
@@ -406,10 +519,34 @@ impl MqttIntegration {
         }
     }
 
+    async fn publish_shelly_command(&self, client: &AsyncClient, command: Shelly2PmCommand) {
+        let topic = command.set_topic();
+        let payload = command.payload();
+        if let Err(e) = client
+            .publish(&topic, QoS::AtMostOnce, false, payload.as_bytes())
+            .await
+        {
+            warn!(
+                "[MQTT] Failed to publish Shelly 2PM command to {}: {:?}",
+                topic, e
+            );
+        } else {
+            info!(
+                "[MQTT] Published Shelly 2PM command to {}: {}",
+                topic, payload
+            );
+        }
+    }
+
     fn subscription_topics(&self) -> Vec<String> {
         self.w100_devices
             .iter()
             .flat_map(W100IntegrationDevice::subscribe_topics)
+            .chain(
+                self.shelly_2pm_devices
+                    .iter()
+                    .flat_map(Shelly2PmIntegrationDevice::subscribe_topics),
+            )
             .collect()
     }
 
@@ -422,14 +559,22 @@ impl MqttIntegration {
                     format!("zigbee2mqtt/{}/get", device.friendly_name),
                 )
             })
+            .chain(self.shelly_2pm_devices.iter().map(|device| {
+                (
+                    device.friendly_name.as_str(),
+                    format!("zigbee2mqtt/{}/get", device.friendly_name),
+                )
+            }))
             .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::shelly_2pm::shelly_2pm_channel_pair;
     use super::*;
     use crate::matter::clusters::generic_switch::GenericSwitchPendingEvent;
+    use crate::matter::endpoints::EndpointHandler;
 
     fn test_device() -> (
         W100IntegrationDevice,
@@ -694,5 +839,54 @@ mod tests {
                 "zigbee2mqtt/Büro-Thermometer/get".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn shelly_reconnect_setup_uses_umlaut_subscription_and_state_request_topics() {
+        let (l1, l2, command_rx) = shelly_2pm_channel_pair("Büro Licht & PC Schalter");
+        let integration = MqttIntegration::new(MqttConfig {
+            broker_host: "127.0.0.1".to_string(),
+            broker_port: 1883,
+            client_id: "test-client".to_string(),
+            username: None,
+            password: None,
+        })
+        .with_shelly_2pm(Shelly2PmConfig::new(
+            "Büro Licht & PC Schalter",
+            l1,
+            l2,
+            command_rx,
+        ));
+
+        assert_eq!(
+            integration.subscription_topics(),
+            vec!["zigbee2mqtt/Büro Licht & PC Schalter".to_string()]
+        );
+        assert_eq!(
+            integration.state_request_topics(),
+            vec![(
+                "Büro Licht & PC Schalter",
+                "zigbee2mqtt/Büro Licht & PC Schalter/get".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn shelly_state_message_updates_both_channel_handlers() {
+        let (l1, l2, _command_rx) = shelly_2pm_channel_pair("Büro Licht & PC Schalter");
+        let device = Shelly2PmIntegrationDevice {
+            friendly_name: "Büro Licht & PC Schalter".to_string(),
+            l1_handler: l1.clone(),
+            l2_handler: l2.clone(),
+        };
+
+        assert!(device.process_message(
+            "zigbee2mqtt/Büro Licht & PC Schalter",
+            r#"{"state_l1":"ON","state_l2":"OFF"}"#,
+        ));
+
+        assert!(l1.get_state());
+        assert!(!l2.get_state());
+        assert!(!device.process_message("zigbee2mqtt/other", r#"{"state_l1":"OFF"}"#,));
     }
 }

@@ -18,11 +18,11 @@ The bridge currently exposes:
 - **Door Sensor** (Endpoint 3+): Contact sensor (bridged)
 - **Motion Sensor** (Endpoint 4+): Occupancy sensor (bridged)
 - **Power Strip** (Endpoint 5+): On/Off plug-in unit (bridged)
-- **Light** (Endpoint 7+): On/Off light (bridged)
+- **Shelly 2PM Gen4** (Endpoint 7+): Two MQTT/zigbee2mqtt relay channels exposed as a switch and a light (bridged)
 - **Video Doorbell** (Endpoint 9+): Video doorbell with camera (bridged, stub)
 - **W100 Climate Sensor** (Endpoint 10+): Temperature, humidity, and 3 button endpoints via MQTT/zigbee2mqtt (bridged)
 
-Note: Endpoint numbers are dynamic based on device configuration. Video doorbell camera handlers are stub implementations awaiting Matter 1.5 controller support. GenericSwitch button events are emitted through upstream rs-matter event support.
+Note: Endpoint numbers are dynamic based on device configuration. Video doorbell camera handlers are stub implementations awaiting Matter 1.5 controller support. Shelly relay state and commands flow through MQTT/zigbee2mqtt. GenericSwitch button events are emitted through upstream rs-matter event support.
 
 ## Architecture
 
@@ -46,8 +46,9 @@ Note: Endpoint numbers are dynamic based on device configuration. Video doorbell
                         │  │ • Door (BooleanState)  │  │
                         │  │ • Motion (Occupancy)   │  │
                         │  │ • Power Strip (OnOff)  │  │
-                        │  │ • Light (OnOff)        │  │
+                        │  │ • Shelly 2PM (OnOff)   │  │
                         │  │ • Doorbell (Camera)    │  │
+                        │  │ • W100 (Sensors/Switch)│  │
                         │  └────────────────────────┘  │
                         └──────────────────────────────┘
 ```
@@ -109,11 +110,13 @@ Home Assistant now shows entities for:
 - **Door sensor** (contact sensor, bridged)
 - **Motion sensor** (occupancy sensor, bridged)
 - **Power Strip** (on/off plug-in unit, bridged)
-- **Light** (on/off light, bridged)
+- **Büro Licht & PC Schalter** (Shelly 2PM Gen4 via MQTT/zigbee2mqtt, bridged)
+  - **Tim PC Switch** (on/off switch)
+  - **Büro Light** (on/off light)
 - **Video Doorbell** (video doorbell, bridged, stub)
 - **W100 Climate Sensor** (temperature, humidity, and 3 buttons via MQTT/zigbee2mqtt, bridged)
 
-Camera clusters (AV Stream, WebRTC) are stub implementations awaiting Matter 1.5 controller support. GenericSwitch button endpoints emit upstream Matter events for W100 MQTT actions.
+Camera clusters (AV Stream, WebRTC) are stub implementations awaiting Matter 1.5 controller support. Shelly 2PM switch/light commands are translated to Zigbee2MQTT set payloads. GenericSwitch button endpoints emit upstream Matter events for W100 MQTT actions.
 
 ---
 
