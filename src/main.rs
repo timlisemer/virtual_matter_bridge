@@ -24,8 +24,9 @@ use crate::matter::endpoints::{
 use crate::matter::{
     EndpointConfig, VirtualDevice, collect_endpoint_readiness, mark_endpoint_readiness_unavailable,
 };
-use log::info;
+use log::{Level, info};
 use parking_lot::RwLock as SyncRwLock;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
@@ -41,8 +42,35 @@ const MATTER_UNAVAILABLE_PROPAGATION_GRACE: Duration = Duration::from_secs(2);
 
 fn init_logger() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp_millis()
+        .format(|buf, record| {
+            let message = record.args().to_string();
+
+            if should_suppress_log_record(record.target(), record.level(), &message) {
+                return Ok(());
+            }
+
+            writeln!(
+                buf,
+                "[{} {}{:<5}{} {}] {}",
+                buf.timestamp_millis(),
+                buf.default_level_style(record.level()),
+                record.level(),
+                buf.default_level_style(record.level()).render_reset(),
+                record.target(),
+                message
+            )
+        })
         .init();
+}
+
+fn should_suppress_log_record(target: &str, level: Level, message: &str) -> bool {
+    // Suppress late standalone Matter MRP ACK noise for now. If future issues
+    // appear around missed subscription reports, repeated retransmissions, or
+    // controller ACK handling, remember that this warning is intentionally hidden.
+    target == "rs_matter::transport"
+        && level == Level::Warn
+        && message.contains("MRPStandAloneAck")
+        && message.contains("No valid exchange found")
 }
 
 /// Example handler for simulated sensors/switches.
@@ -369,5 +397,30 @@ mod tests {
 
         assert!(handler.readiness().is_ready());
         assert_eq!(handler.get_state(), Some(false));
+    }
+
+    #[test]
+    fn suppresses_late_standalone_ack_without_hiding_other_transport_warnings() {
+        let late_ack = "\
+>>RCV UDP [::1]:5540 [SID:1,CTR:1][I|A,EID:6413,PROTO:0,OP:10,ACTR:2]
+      SC::MRPStandAloneAck
+      => No valid exchange found, dropping";
+
+        assert!(should_suppress_log_record(
+            "rs_matter::transport",
+            Level::Warn,
+            late_ack
+        ));
+
+        assert!(!should_suppress_log_record(
+            "rs_matter::transport",
+            Level::Warn,
+            "=> No valid session found, replying with SessionNotFound"
+        ));
+        assert!(!should_suppress_log_record(
+            "rs_matter::transport",
+            Level::Debug,
+            late_ack
+        ));
     }
 }
