@@ -358,7 +358,7 @@ The ICD Check-In Protocol is designed for battery-powered devices that sleep and
 
 Through code analysis of rs-matter, we discovered:
 
-1. **rs-matter silently drops packets for unknown sessions** - No response is sent to inform the controller the session is invalid. Most of these packets are logged with a warning and discarded (`src/transport.rs:558-569`). The bridge currently suppresses one narrow late-ACK warning (`MRPStandAloneAck` + `No valid exchange found`) to avoid noisy controller ACK logs; revisit that suppression if investigating missed subscription reports, repeated retransmissions, or controller ACK handling.
+1. **rs-matter silently drops packets for unknown sessions** - No response is sent to inform the controller the session is invalid. Most of these packets are logged with a warning and discarded (`src/transport.rs:558-569`). The bridge currently suppresses one narrow late-ACK warning (`MRPStandAloneAck` + `No valid exchange found`) to avoid noisy controller ACK logs, and one high-volume subscription bookkeeping line (`rs_matter::dm::subscriptions` + `kept after reporting`) emitted during normal report delivery. Revisit those suppressions if investigating missed subscription reports, repeated retransmissions, or controller ACK handling.
 
 2. **No explicit session invalidation signal** - Per Matter spec, devices could send a Status Report with `SESSION_NOT_FOUND`, but rs-matter does not implement this.
 

@@ -3,7 +3,7 @@
 //! Provides simulated sensor state changes for development and testing purposes.
 
 use crate::matter::sensors::{ContactSensor, OccupancySensor};
-use log::info;
+use log::debug;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, interval};
@@ -25,9 +25,9 @@ pub fn run_sensor_simulation(
         loop {
             interval.tick().await;
             let new_contact = contact_sensor.toggle();
-            info!("[Sim] Contact sensor toggled to: {}", new_contact);
+            debug!("[Sim] Contact sensor toggled to: {}", new_contact);
             let new_occupancy = occupancy_sensor.toggle();
-            info!("[Sim] Occupancy sensor toggled to: {}", new_occupancy);
+            debug!("[Sim] Occupancy sensor toggled to: {}", new_occupancy);
         }
     })
 }

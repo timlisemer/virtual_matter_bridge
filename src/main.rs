@@ -26,7 +26,7 @@ use crate::matter::endpoints::{
 use crate::matter::{
     EndpointConfig, VirtualDevice, collect_endpoint_readiness, mark_endpoint_readiness_unavailable,
 };
-use log::{Level, info};
+use log::{Level, debug, info};
 use parking_lot::RwLock as SyncRwLock;
 use std::io::Write;
 use std::sync::Arc;
@@ -101,6 +101,16 @@ fn init_logger() {
 }
 
 fn should_suppress_log_record(target: &str, level: Level, message: &str) -> bool {
+    // Suppress high-volume subscription bookkeeping from rs-matter. These
+    // messages are emitted for normal report delivery and do not indicate
+    // subscription churn or controller errors.
+    if target == "rs_matter::dm::subscriptions"
+        && level == Level::Info
+        && message.contains("kept after reporting")
+    {
+        return true;
+    }
+
     // Suppress late standalone Matter MRP ACK noise for now. If future issues
     // appear around missed subscription reports, repeated retransmissions, or
     // controller ACK handling, remember that this warning is intentionally hidden.
@@ -183,11 +193,11 @@ async fn run_sensor_simulation(
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
         let new_state = door_handler.toggle();
-        info!("[Simulation] Door sensor toggled to: {}", new_state);
+        debug!("[Simulation] Door sensor toggled to: {}", new_state);
 
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         let new_state = motion_handler.toggle();
-        info!("[Simulation] Motion sensor toggled to: {}", new_state);
+        debug!("[Simulation] Motion sensor toggled to: {}", new_state);
     }
 }
 
@@ -445,6 +455,26 @@ mod tests {
             "rs_matter::transport",
             Level::Debug,
             late_ack
+        ));
+    }
+
+    #[test]
+    fn suppresses_subscription_bookkeeping_without_hiding_other_subscription_logs() {
+        assert!(should_suppress_log_record(
+            "rs_matter::dm::subscriptions",
+            Level::Info,
+            "Subscription SubscriptionIds { id: 1, fab_idx: 1, peer_node_id: 112233 } kept after reporting; max-attr-change-id: 32, max-seen-event-number: 1"
+        ));
+
+        assert!(!should_suppress_log_record(
+            "rs_matter::dm::subscriptions",
+            Level::Info,
+            "Added subscription SubscriptionIds { id: 1, fab_idx: 1, peer_node_id: 112233 }"
+        ));
+        assert!(!should_suppress_log_record(
+            "rs_matter::dm::subscriptions",
+            Level::Warn,
+            "Subscription SubscriptionIds { id: 1, fab_idx: 1, peer_node_id: 112233 } kept after reporting; max-attr-change-id: 32, max-seen-event-number: 1"
         ));
     }
 
