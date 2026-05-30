@@ -5,6 +5,7 @@
 //!
 //! For example: 21.5°C is reported as 2150.
 
+use super::measurement_state::MeasurementState;
 use super::sync_dataver_with_sensor;
 use rs_matter::dm::{
     Access, Attribute, Cluster, Dataver, Handler, MatchContext, NonBlockingHandler, Quality,
@@ -14,11 +15,11 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::TLVWrite;
 use rs_matter::{attribute_enum, attributes, with};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use strum::FromRepr;
 
-use crate::matter::endpoints::endpoints_helpers::Sensor;
-use crate::matter::endpoints::{ClusterNotifier, EndpointChangeTracker, NotifiableSensor};
+use crate::matter::endpoints::endpoints_helpers::{Sensor, SourceReadiness};
+use crate::matter::endpoints::{ClusterNotifier, NotifiableSensor};
 
 /// Matter Cluster ID for TemperatureMeasurement
 pub const CLUSTER_ID: u32 = 0x0402;
@@ -78,9 +79,7 @@ pub const CLUSTER: Cluster<'static> = Cluster {
 
 /// Temperature sensor that can be updated from external sources.
 pub struct TemperatureSensor {
-    /// Temperature in centidegrees Celsius (°C * 100)
-    value: AtomicI16,
-    changes: EndpointChangeTracker,
+    state: MeasurementState<i16>,
 }
 
 impl TemperatureSensor {
@@ -90,40 +89,40 @@ impl TemperatureSensor {
     /// * `initial_celsius` - Initial temperature in degrees Celsius
     pub fn new(initial_celsius: f32) -> Self {
         Self {
-            value: AtomicI16::new((initial_celsius * 100.0) as i16),
-            changes: EndpointChangeTracker::new(),
+            state: MeasurementState::new((initial_celsius * 100.0) as i16),
         }
     }
 
     /// Get the current temperature in degrees Celsius.
     pub fn get_celsius(&self) -> f32 {
-        self.value.load(Ordering::SeqCst) as f32 / 100.0
+        self.get_centidegrees() as f32 / 100.0
     }
 
     /// Get the current temperature in centidegrees (raw Matter value).
     pub fn get_centidegrees(&self) -> i16 {
-        self.value.load(Ordering::SeqCst)
+        self.state.get()
     }
 
     /// Set the temperature in degrees Celsius.
     pub fn set_celsius(&self, celsius: f32) {
         let centidegrees = (celsius * 100.0) as i16;
-        let old = self.value.swap(centidegrees, Ordering::SeqCst);
-        if old != centidegrees {
-            self.changes.mark_changed();
-        }
+        self.state.set(centidegrees);
+    }
+
+    pub fn readiness(&self) -> Arc<dyn SourceReadiness> {
+        self.state.readiness()
     }
 }
 
 impl Sensor for TemperatureSensor {
     fn version(&self) -> u32 {
-        self.changes.version()
+        self.state.version()
     }
 }
 
 impl NotifiableSensor for TemperatureSensor {
     fn set_notifier(&self, notifier: ClusterNotifier) {
-        self.changes.set_notifier(notifier);
+        self.state.set_notifier(notifier);
     }
 }
 
@@ -222,16 +221,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn set_celsius_only_increments_version_when_raw_value_changes() {
+    fn set_celsius_marks_first_update_even_when_raw_value_is_unchanged() {
         let sensor = TemperatureSensor::new(21.5);
 
         sensor.set_celsius(21.5);
-        assert_eq!(sensor.version(), 0);
-
-        sensor.set_celsius(21.6);
         assert_eq!(sensor.version(), 1);
 
         sensor.set_celsius(21.6);
-        assert_eq!(sensor.version(), 1);
+        assert_eq!(sensor.version(), 2);
+
+        sensor.set_celsius(21.6);
+        assert_eq!(sensor.version(), 2);
     }
 }

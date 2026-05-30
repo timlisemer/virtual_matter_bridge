@@ -13,7 +13,7 @@ use crate::matter::clusters::camera_av_stream_mgmt::{
 use crate::matter::clusters::webrtc_transport_provider::{
     Features as WebRtcFeatures, IceServer, WebRtcTransportProviderCluster,
 };
-use crate::matter::controls::Switch;
+use crate::matter::endpoints::{SourceReadiness, SourceSnapshot};
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,8 +28,7 @@ pub struct CameraInput {
     /// Cluster instances use sync RwLock for Matter handler compatibility
     camera_cluster: Arc<SyncRwLock<CameraAvStreamMgmtCluster>>,
     webrtc_cluster: Arc<SyncRwLock<WebRtcTransportProviderCluster>>,
-    /// Device power switch (used by rs-matter's OnOffHandler)
-    device_power: Arc<Switch>,
+    readiness: Arc<SourceSnapshot<()>>,
     /// Bridge uses async RwLock for async I/O operations
     bridge: Arc<AsyncRwLock<Option<RtspWebRtcBridge>>>,
     running: Arc<AtomicBool>,
@@ -77,7 +76,7 @@ impl CameraInput {
             config,
             camera_cluster: Arc::new(SyncRwLock::new(camera_cluster)),
             webrtc_cluster: Arc::new(SyncRwLock::new(webrtc_cluster)),
-            device_power: Arc::new(Switch::new(true)),
+            readiness: Arc::new(SourceSnapshot::new()),
             bridge: Arc::new(AsyncRwLock::new(None)),
             running: Arc::new(AtomicBool::new(false)),
         }
@@ -102,6 +101,7 @@ impl CameraInput {
         }
 
         self.running.store(true, Ordering::SeqCst);
+        self.readiness.mark_ready();
 
         log::info!("Camera input initialized successfully");
         Ok(())
@@ -243,14 +243,8 @@ impl CameraInput {
         self.webrtc_cluster.clone()
     }
 
-    /// Get device power switch for external access (Matter stack).
-    pub fn device_power(&self) -> Arc<Switch> {
-        self.device_power.clone()
-    }
-
-    /// Check if the device power is on.
-    pub fn is_powered_on(&self) -> bool {
-        self.device_power.get()
+    pub fn readiness(&self) -> Arc<dyn SourceReadiness> {
+        self.readiness.clone()
     }
 
     /// Check if the camera input is running.
@@ -287,5 +281,6 @@ mod tests {
         let camera = CameraInput::new(config);
 
         assert!(!camera.is_running());
+        assert!(!camera.readiness().is_ready());
     }
 }

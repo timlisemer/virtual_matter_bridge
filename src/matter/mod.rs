@@ -11,8 +11,6 @@ pub mod virtual_device;
 
 pub use stack::run_matter_stack;
 
-// Re-export from endpoints for convenience
-pub use endpoints::controls;
 pub use endpoints::sensors;
 
 // Re-export virtual device types

@@ -18,12 +18,13 @@ use crate::input::mqtt::{MqttIntegration, Shelly2PmConfig, W100Config, shelly_2p
 use crate::matter::clusters::{
     BridgedDeviceInfo, GenericSwitchState, HumiditySensor, TemperatureSensor,
 };
-use crate::matter::endpoints::EndpointHandler;
+use crate::matter::endpoints::{
+    EndpointHandler, ReadinessOnlyHandler, SourceReadiness, SourceSnapshot,
+};
 use crate::matter::{EndpointConfig, VirtualDevice};
 use log::info;
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::signal;
 
 /// Type alias for the state pusher callback.
@@ -45,14 +46,14 @@ fn init_logger() {
 /// This is a simple implementation that can be used for testing.
 /// Replace with your actual hardware or API integration.
 pub struct SimulatedHandler {
-    state: AtomicBool,
+    state: Arc<SourceSnapshot<bool>>,
     pusher: SyncRwLock<Option<StatePusher>>,
 }
 
 impl SimulatedHandler {
-    pub fn new(initial: bool) -> Self {
+    pub fn new(_initial: bool) -> Self {
         Self {
-            state: AtomicBool::new(initial),
+            state: Arc::new(SourceSnapshot::new()),
             pusher: SyncRwLock::new(None),
         }
     }
@@ -60,8 +61,7 @@ impl SimulatedHandler {
     /// Update the state and push to Matter.
     /// Call this from your simulation or hardware integration.
     pub fn set_state(&self, value: bool) {
-        let old = self.state.swap(value, Ordering::SeqCst);
-        if old != value
+        if self.state.update_source(value)
             && let Some(pusher) = self.pusher.read().as_ref()
         {
             pusher(value);
@@ -70,9 +70,10 @@ impl SimulatedHandler {
 
     /// Toggle the state and push to Matter.
     pub fn toggle(&self) -> bool {
-        let old = self.state.fetch_xor(true, Ordering::SeqCst);
-        let new = !old;
-        if let Some(pusher) = self.pusher.read().as_ref() {
+        let new = !self.state.snapshot().unwrap_or(false);
+        if self.state.update_source(new)
+            && let Some(pusher) = self.pusher.read().as_ref()
+        {
             pusher(new);
         }
         new
@@ -82,11 +83,15 @@ impl SimulatedHandler {
 impl EndpointHandler for SimulatedHandler {
     fn on_command(&self, value: bool) {
         log::info!("[SimulatedHandler] Received command: {}", value);
-        self.state.store(value, Ordering::SeqCst);
+        self.state.update_source(value);
     }
 
-    fn get_state(&self) -> bool {
-        self.state.load(Ordering::SeqCst)
+    fn get_state(&self) -> Option<bool> {
+        self.state.snapshot()
+    }
+
+    fn readiness(&self) -> Arc<dyn SourceReadiness> {
+        self.state.clone()
     }
 
     fn set_state_pusher(&self, pusher: Arc<dyn Fn(bool) + Send + Sync>) {
@@ -98,7 +103,14 @@ impl EndpointHandler for SimulatedHandler {
 async fn run_sensor_simulation(
     door_handler: Arc<SimulatedHandler>,
     motion_handler: Arc<SimulatedHandler>,
+    outlet1_handler: Arc<SimulatedHandler>,
+    outlet2_handler: Arc<SimulatedHandler>,
 ) {
+    door_handler.set_state(true);
+    motion_handler.set_state(false);
+    outlet1_handler.set_state(true);
+    outlet2_handler.set_state(false);
+
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
         let new_state = door_handler.toggle();
@@ -139,7 +151,6 @@ async fn main() {
     let motion_handler = Arc::new(SimulatedHandler::new(false));
     let outlet1_handler = Arc::new(SimulatedHandler::new(true));
     let outlet2_handler = Arc::new(SimulatedHandler::new(false));
-    let doorbell_handler = Arc::new(SimulatedHandler::new(false));
 
     // Shelly 2PM Gen4 two-channel relay via MQTT/zigbee2mqtt.
     // L1/state_l1 is Tim PC Switch, L2/state_l2 is Büro Light.
@@ -153,6 +164,8 @@ async fn main() {
     let w100_button_plus = Arc::new(GenericSwitchState::new());
     let w100_button_minus = Arc::new(GenericSwitchState::new());
     let w100_button_center = Arc::new(GenericSwitchState::new());
+
+    let doorbell_handler = Arc::new(ReadinessOnlyHandler::new(camera.read().readiness()));
 
     // Define our virtual devices using the new API
     let virtual_devices = vec![
@@ -220,9 +233,6 @@ async fn main() {
             )),
     ];
 
-    // Get the bridge master on/off switch from camera input
-    let virtual_bridge_onoff = camera.read().device_power();
-
     // Initialize the camera input
     let camera_for_init = camera.clone();
     tokio::task::spawn_blocking(move || {
@@ -245,8 +255,16 @@ async fn main() {
     // Spawn a task to simulate sensor state changes for testing
     let door_for_sim = door_handler.clone();
     let motion_for_sim = motion_handler.clone();
+    let outlet1_for_sim = outlet1_handler.clone();
+    let outlet2_for_sim = outlet2_handler.clone();
     let sensor_task = tokio::spawn(async move {
-        run_sensor_simulation(door_for_sim, motion_for_sim).await;
+        run_sensor_simulation(
+            door_for_sim,
+            motion_for_sim,
+            outlet1_for_sim,
+            outlet2_for_sim,
+        )
+        .await;
     });
 
     // Start MQTT integration for W100 climate sensor (self-contained!)
@@ -279,7 +297,6 @@ async fn main() {
         .spawn(move || {
             if let Err(e) = futures_lite::future::block_on(matter::run_matter_stack(
                 &matter_config,
-                virtual_bridge_onoff,
                 virtual_devices,
             )) {
                 log::error!("Matter stack error: {:?}", e);
@@ -317,4 +334,22 @@ async fn main() {
     .expect("Shutdown task panicked");
 
     info!("Virtual Matter Bridge stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simulated_handler_is_not_ready_until_first_source_update() {
+        let handler = SimulatedHandler::new(false);
+
+        assert!(!handler.readiness().is_ready());
+        assert_eq!(handler.get_state(), None);
+
+        handler.set_state(false);
+
+        assert!(handler.readiness().is_ready());
+        assert_eq!(handler.get_state(), Some(false));
+    }
 }

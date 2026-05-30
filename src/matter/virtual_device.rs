@@ -5,8 +5,11 @@
 
 use super::clusters::{BridgedDeviceInfo, GenericSwitchState, HumiditySensor, TemperatureSensor};
 use super::endpoints::EndpointHandler;
+use super::endpoints::endpoints_helpers::{ReadinessOnlyHandler, SourceReadiness};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
+
+const MATTER_TOPOLOGY_MODEL_VERSION: u64 = 2;
 
 /// Type of endpoint (determines which cluster handler to use).
 ///
@@ -51,6 +54,27 @@ pub struct EndpointConfig {
 }
 
 impl EndpointConfig {
+    pub fn readiness(&self) -> Arc<dyn SourceReadiness> {
+        match self.kind {
+            EndpointKind::TemperatureSensor => self
+                .temperature_sensor
+                .as_ref()
+                .map(|sensor| sensor.readiness())
+                .unwrap_or_else(|| self.handler.readiness()),
+            EndpointKind::HumiditySensor => self
+                .humidity_sensor
+                .as_ref()
+                .map(|sensor| sensor.readiness())
+                .unwrap_or_else(|| self.handler.readiness()),
+            EndpointKind::GenericSwitch => self
+                .generic_switch_state
+                .as_ref()
+                .map(|state| state.readiness())
+                .unwrap_or_else(|| self.handler.readiness()),
+            _ => self.handler.readiness(),
+        }
+    }
+
     /// Create a contact sensor endpoint (BooleanState cluster).
     ///
     /// Used for door/window sensors that report open/closed state.
@@ -126,8 +150,7 @@ impl EndpointConfig {
     /// Used for temperature sensors that report temperature values.
     /// The sensor Arc can be cloned and used to update the temperature from external sources.
     pub fn temperature_sensor(label: &'static str, sensor: Arc<TemperatureSensor>) -> Self {
-        // Create a dummy handler - not used for temperature sensors
-        let handler = Arc::new(DummyHandler);
+        let handler = Arc::new(ReadinessOnlyHandler::always_ready());
         Self {
             label,
             kind: EndpointKind::TemperatureSensor,
@@ -143,8 +166,7 @@ impl EndpointConfig {
     /// Used for humidity sensors that report relative humidity.
     /// The sensor Arc can be cloned and used to update the humidity from external sources.
     pub fn humidity_sensor(label: &'static str, sensor: Arc<HumiditySensor>) -> Self {
-        // Create a dummy handler - not used for humidity sensors
-        let handler = Arc::new(DummyHandler);
+        let handler = Arc::new(ReadinessOnlyHandler::always_ready());
         Self {
             label,
             kind: EndpointKind::HumiditySensor,
@@ -160,8 +182,7 @@ impl EndpointConfig {
     /// Used for physical buttons that emit press/release events.
     /// The state Arc can be cloned and used to trigger button events from external sources.
     pub fn generic_switch(label: &'static str, state: Arc<GenericSwitchState>) -> Self {
-        // Create a dummy handler - not used for generic switches
-        let handler = Arc::new(DummyHandler);
+        let handler = Arc::new(ReadinessOnlyHandler::always_ready());
         Self {
             label,
             kind: EndpointKind::GenericSwitch,
@@ -171,17 +192,6 @@ impl EndpointConfig {
             generic_switch_state: Some(state),
         }
     }
-}
-
-/// Dummy handler for endpoints that don't use the EndpointHandler interface.
-struct DummyHandler;
-
-impl EndpointHandler for DummyHandler {
-    fn on_command(&self, _value: bool) {}
-    fn get_state(&self) -> bool {
-        false
-    }
-    fn set_state_pusher(&self, _pusher: Arc<dyn Fn(bool) + Send + Sync>) {}
 }
 
 /// A Virtual Device (parent endpoint) with one or more child Endpoints.
@@ -268,6 +278,7 @@ impl VirtualDevice {
 /// used to detect when any device structure changes between runs.
 pub fn compute_schema_hash(devices: &[VirtualDevice]) -> u64 {
     let mut hasher = DefaultHasher::new();
+    MATTER_TOPOLOGY_MODEL_VERSION.hash(&mut hasher);
     devices.len().hash(&mut hasher);
     for device in devices {
         device.schema_hash().hash(&mut hasher);

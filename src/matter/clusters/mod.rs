@@ -16,6 +16,7 @@ pub mod bridged_device_basic_info;
 pub mod camera_av_stream_mgmt;
 pub mod generic_switch;
 pub mod icd_management;
+pub mod measurement_state;
 pub mod occupancy_sensing;
 pub mod relative_humidity;
 pub mod temperature_measurement;
@@ -51,7 +52,7 @@ pub use temperature_measurement::{TemperatureMeasurementHandler, TemperatureSens
 ///     // ... rest of read logic
 /// }
 /// ```
-pub fn sync_dataver_with_sensor<S: Sensor>(
+pub fn sync_dataver_with_sensor<S: Sensor + ?Sized>(
     sensor: &S,
     last_version: &AtomicU32,
     dataver: &Dataver,

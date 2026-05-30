@@ -4,6 +4,7 @@
 //! - For sensors: push state changes via `set_state_pusher` callback
 //! - For switches: receive commands via `on_command` and push state via callback
 
+use super::endpoints_helpers::SourceReadiness;
 use std::sync::Arc;
 
 /// Trait for bidirectional communication between Matter and your business logic.
@@ -21,7 +22,7 @@ use std::sync::Arc;
 /// # Example
 /// ```ignore
 /// struct MyDoorHandler {
-///     state: AtomicBool,
+///     state: SourceSnapshot<bool>,
 ///     pusher: RwLock<Option<Arc<dyn Fn(bool) + Send + Sync>>>,
 /// }
 ///
@@ -30,8 +31,8 @@ use std::sync::Arc;
 ///         // Door sensor is read-only, ignore commands
 ///     }
 ///
-///     fn get_state(&self) -> bool {
-///         self.state.load(Ordering::SeqCst)
+///     fn get_state(&self) -> Option<bool> {
+///         self.state.snapshot()
 ///     }
 ///
 ///     fn set_state_pusher(&self, pusher: Arc<dyn Fn(bool) + Send + Sync>) {
@@ -49,7 +50,10 @@ pub trait EndpointHandler: Send + Sync + 'static {
     /// Returns the current state value.
     ///
     /// Called when Matter controller reads the attribute.
-    fn get_state(&self) -> bool;
+    fn get_state(&self) -> Option<bool>;
+
+    /// Readiness for the endpoint's backing source.
+    fn readiness(&self) -> Arc<dyn SourceReadiness>;
 
     /// Register a callback to push state changes TO Matter.
     ///

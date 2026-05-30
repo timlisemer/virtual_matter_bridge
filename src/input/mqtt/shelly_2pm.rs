@@ -4,11 +4,11 @@
 //! Matter `EndpointHandler` implementations for each controllable channel.
 
 use crate::matter::endpoints::EndpointHandler;
+use crate::matter::endpoints::{SourceReadiness, SourceSnapshot};
 use log::{info, warn};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
 type StatePusher = Arc<dyn Fn(bool) + Send + Sync>;
@@ -105,7 +105,7 @@ impl Shelly2PmCommand {
 pub struct Shelly2PmChannelHandler {
     friendly_name: String,
     channel: Shelly2PmChannel,
-    state: AtomicBool,
+    state: Arc<SourceSnapshot<bool>>,
     pusher: RwLock<Option<StatePusher>>,
     command_tx: mpsc::Sender<Shelly2PmCommand>,
 }
@@ -114,13 +114,13 @@ impl Shelly2PmChannelHandler {
     pub fn new(
         friendly_name: impl Into<String>,
         channel: Shelly2PmChannel,
-        initial: bool,
+        _initial: bool,
         command_tx: mpsc::Sender<Shelly2PmCommand>,
     ) -> Self {
         Self {
             friendly_name: friendly_name.into(),
             channel,
-            state: AtomicBool::new(initial),
+            state: Arc::new(SourceSnapshot::new()),
             pusher: RwLock::new(None),
             command_tx,
         }
@@ -135,17 +135,21 @@ impl Shelly2PmChannelHandler {
     }
 
     fn set_state(&self, value: bool, push: bool) {
-        let old = self.state.swap(value, Ordering::SeqCst);
-        if old != value {
+        let old = self.state.snapshot();
+        self.state.update_source(value);
+        if old != Some(value) {
             info!(
                 "[Shelly 2PM] {} {} state updated: {}",
                 self.friendly_name,
                 self.channel.label(),
                 if value { "ON" } else { "OFF" }
             );
-            if push && let Some(pusher) = self.pusher.read().as_ref() {
-                pusher(value);
-            }
+        }
+        if push
+            && old != Some(value)
+            && let Some(pusher) = self.pusher.read().as_ref()
+        {
+            pusher(value);
         }
     }
 
@@ -170,12 +174,24 @@ impl EndpointHandler for Shelly2PmChannelHandler {
             self.channel.label(),
             if value { "ON" } else { "OFF" }
         );
+        if !self.state.is_ready() {
+            warn!(
+                "[Matter] Ignoring pre-ready Shelly 2PM {} {} command",
+                self.friendly_name,
+                self.channel.label()
+            );
+            return;
+        }
         self.set_state(value, false);
         self.queue_command(value);
     }
 
-    fn get_state(&self) -> bool {
-        self.state.load(Ordering::SeqCst)
+    fn get_state(&self) -> Option<bool> {
+        self.state.snapshot()
+    }
+
+    fn readiness(&self) -> Arc<dyn SourceReadiness> {
+        self.state.clone()
     }
 
     fn set_state_pusher(&self, pusher: StatePusher) {
@@ -211,7 +227,7 @@ pub fn shelly_2pm_channel_pair(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const RETAINED_STATE: &str = r#"{
       "ac_frequency_l1":49.99,
@@ -273,12 +289,12 @@ mod tests {
         handler.set_from_mqtt(true);
         handler.set_from_mqtt(false);
 
-        assert!(!handler.get_state());
+        assert_eq!(handler.get_state(), Some(false));
         assert_eq!(pushes.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
-    async fn matter_command_updates_state_and_queues_mqtt_command() {
+    async fn matter_command_updates_state_and_queues_mqtt_command_after_ready() {
         let (tx, mut rx) = mpsc::channel(4);
         let handler = Shelly2PmChannelHandler::new(
             "Büro Licht & PC Schalter",
@@ -287,9 +303,10 @@ mod tests {
             tx,
         );
 
+        handler.set_from_mqtt(false);
         handler.on_command(true);
 
-        assert!(handler.get_state());
+        assert_eq!(handler.get_state(), Some(true));
         assert_eq!(
             rx.recv().await,
             Some(Shelly2PmCommand::new(
@@ -315,9 +332,26 @@ mod tests {
             pushes_for_pusher.fetch_add(1, Ordering::SeqCst);
         }));
 
+        handler.set_from_mqtt(false);
         handler.on_command(true);
 
-        assert!(handler.get_state());
-        assert_eq!(pushes.load(Ordering::SeqCst), 0);
+        assert_eq!(handler.get_state(), Some(true));
+        assert_eq!(pushes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn pre_ready_matter_command_does_not_queue_mqtt_command() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let handler = Shelly2PmChannelHandler::new(
+            "Büro Licht & PC Schalter",
+            Shelly2PmChannel::L2,
+            false,
+            tx,
+        );
+
+        handler.on_command(true);
+
+        assert_eq!(handler.get_state(), None);
+        assert!(rx.try_recv().is_err());
     }
 }

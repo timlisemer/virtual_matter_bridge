@@ -114,6 +114,14 @@ enum ActionSource {
     ActionTopic,
 }
 
+#[derive(Clone, Copy)]
+enum W100ButtonEvent {
+    SinglePress,
+    DoublePress,
+    LongPress,
+    HoldRelease,
+}
+
 impl W100IntegrationDevice {
     fn state_topic(&self) -> String {
         format!("zigbee2mqtt/{}", self.friendly_name)
@@ -184,6 +192,10 @@ impl W100IntegrationDevice {
 
     fn process_action_value(&self, action: &str, retain: bool, source: ActionSource) {
         let action_value = W100Action::from(action);
+        let button_action = self.action_button(&action_value);
+        if let Some((button, _, _)) = button_action {
+            button.mark_ready();
+        }
 
         if retain {
             info!(
@@ -202,90 +214,97 @@ impl W100IntegrationDevice {
 
         info!("[MQTT] {} button action: {}", self.friendly_name, action);
 
-        // Map W100 actions to GenericSwitch events
-        match action_value {
-            // Single press
-            W100Action::SinglePlus => {
-                if let Some(btn) = &self.button_plus {
-                    btn.single_press();
-                    info!("[Matter] Button Plus: single press event emitted");
-                }
-            }
-            W100Action::SingleMinus => {
-                if let Some(btn) = &self.button_minus {
-                    btn.single_press();
-                    info!("[Matter] Button Minus: single press event emitted");
-                }
-            }
-            W100Action::SingleCenter => {
-                if let Some(btn) = &self.button_center {
-                    btn.single_press();
-                    info!("[Matter] Button Center: single press event emitted");
-                }
-            }
-            // Double press
-            W100Action::DoublePlus => {
-                if let Some(btn) = &self.button_plus {
-                    btn.double_press();
-                    info!("[Matter] Button Plus: double press event emitted");
-                }
-            }
-            W100Action::DoubleMinus => {
-                if let Some(btn) = &self.button_minus {
-                    btn.double_press();
-                    info!("[Matter] Button Minus: double press event emitted");
-                }
-            }
-            W100Action::DoubleCenter => {
-                if let Some(btn) = &self.button_center {
-                    btn.double_press();
-                    info!("[Matter] Button Center: double press event emitted");
-                }
-            }
-            // Hold (long press)
-            W100Action::HoldPlus => {
-                if let Some(btn) = &self.button_plus {
-                    btn.long_press();
-                    info!("[Matter] Button Plus: long press event emitted");
-                }
-            }
-            W100Action::HoldMinus => {
-                if let Some(btn) = &self.button_minus {
-                    btn.long_press();
-                    info!("[Matter] Button Minus: long press event emitted");
-                }
-            }
-            W100Action::HoldCenter => {
-                if let Some(btn) = &self.button_center {
-                    btn.long_press();
-                    info!("[Matter] Button Center: long press event emitted");
-                }
-            }
-            // Release (after hold)
-            W100Action::ReleasePlus => {
-                if let Some(btn) = &self.button_plus {
-                    btn.hold_release();
-                    info!("[Matter] Button Plus: release event emitted");
-                }
-            }
-            W100Action::ReleaseMinus => {
-                if let Some(btn) = &self.button_minus {
-                    btn.hold_release();
-                    info!("[Matter] Button Minus: release event emitted");
-                }
-            }
-            W100Action::ReleaseCenter => {
-                if let Some(btn) = &self.button_center {
-                    btn.hold_release();
-                    info!("[Matter] Button Center: release event emitted");
-                }
-            }
-            W100Action::Unknown(action) => {
-                warn!("[MQTT] Unknown W100 action: {}", action);
-            }
+        if let Some((button, label, event)) = button_action {
+            Self::emit_button_event(button, event);
+            info!(
+                "[Matter] Button {}: {} event emitted",
+                label,
+                event.description()
+            );
+        } else if let W100Action::Unknown(action) = action_value {
+            warn!("[MQTT] Unknown W100 action: {}", action);
         }
     }
 
+    fn action_button(
+        &self,
+        action: &W100Action,
+    ) -> Option<(&Arc<GenericSwitchState>, &'static str, W100ButtonEvent)> {
+        match action {
+            W100Action::SinglePlus => self
+                .button_plus
+                .as_ref()
+                .map(|button| (button, "Plus", W100ButtonEvent::SinglePress)),
+            W100Action::SingleMinus => self
+                .button_minus
+                .as_ref()
+                .map(|button| (button, "Minus", W100ButtonEvent::SinglePress)),
+            W100Action::SingleCenter => self
+                .button_center
+                .as_ref()
+                .map(|button| (button, "Center", W100ButtonEvent::SinglePress)),
+            W100Action::DoublePlus => self
+                .button_plus
+                .as_ref()
+                .map(|button| (button, "Plus", W100ButtonEvent::DoublePress)),
+            W100Action::DoubleMinus => self
+                .button_minus
+                .as_ref()
+                .map(|button| (button, "Minus", W100ButtonEvent::DoublePress)),
+            W100Action::DoubleCenter => self
+                .button_center
+                .as_ref()
+                .map(|button| (button, "Center", W100ButtonEvent::DoublePress)),
+            W100Action::HoldPlus => self
+                .button_plus
+                .as_ref()
+                .map(|button| (button, "Plus", W100ButtonEvent::LongPress)),
+            W100Action::HoldMinus => self
+                .button_minus
+                .as_ref()
+                .map(|button| (button, "Minus", W100ButtonEvent::LongPress)),
+            W100Action::HoldCenter => self
+                .button_center
+                .as_ref()
+                .map(|button| (button, "Center", W100ButtonEvent::LongPress)),
+            W100Action::ReleasePlus => self
+                .button_plus
+                .as_ref()
+                .map(|button| (button, "Plus", W100ButtonEvent::HoldRelease)),
+            W100Action::ReleaseMinus => self
+                .button_minus
+                .as_ref()
+                .map(|button| (button, "Minus", W100ButtonEvent::HoldRelease)),
+            W100Action::ReleaseCenter => self
+                .button_center
+                .as_ref()
+                .map(|button| (button, "Center", W100ButtonEvent::HoldRelease)),
+            W100Action::Unknown(_) => None,
+        }
+    }
+
+    fn emit_button_event(button: &GenericSwitchState, event: W100ButtonEvent) {
+        match event {
+            W100ButtonEvent::SinglePress => button.single_press(),
+            W100ButtonEvent::DoublePress => button.double_press(),
+            W100ButtonEvent::LongPress => button.long_press(),
+            W100ButtonEvent::HoldRelease => button.hold_release(),
+        }
+    }
+}
+
+impl W100ButtonEvent {
+    fn description(self) -> &'static str {
+        match self {
+            Self::SinglePress => "single press",
+            Self::DoublePress => "double press",
+            Self::LongPress => "long press",
+            Self::HoldRelease => "release",
+        }
+    }
+}
+
+impl W100IntegrationDevice {
     fn is_duplicate_action(&self, action: &W100Action, source: ActionSource) -> bool {
         let now = Instant::now();
         let mut last_action = self.last_action.lock();
@@ -618,6 +637,35 @@ mod tests {
     }
 
     #[test]
+    fn default_equivalent_w100_values_mark_sensors_ready() {
+        let (device, _, _, _) = test_device();
+
+        assert!(!device.temperature_sensor.readiness().is_ready());
+        assert!(!device.humidity_sensor.readiness().is_ready());
+        assert!(device.process_message(
+            "zigbee2mqtt/W100",
+            r#"{"temperature":20.0,"humidity":50.0}"#,
+            false,
+        ));
+
+        assert!(device.temperature_sensor.readiness().is_ready());
+        assert!(device.humidity_sensor.readiness().is_ready());
+        assert_eq!(device.temperature_sensor.get_celsius(), 20.0);
+        assert_eq!(device.humidity_sensor.get_percent(), 50.0);
+    }
+
+    #[test]
+    fn retained_button_action_marks_button_ready_without_emitting_event() {
+        let (device, plus, _, _) = test_device();
+
+        assert!(!plus.readiness().is_ready());
+        assert!(device.process_message("zigbee2mqtt/W100", r#"{"action":"single_plus"}"#, true));
+
+        assert!(plus.readiness().is_ready());
+        assert!(plus.take_pending_events().is_empty());
+    }
+
+    #[test]
     fn action_topic_emits_button_events() {
         let (device, plus, _, center) = test_device();
 
@@ -885,8 +933,8 @@ mod tests {
             r#"{"state_l1":"ON","state_l2":"OFF"}"#,
         ));
 
-        assert!(l1.get_state());
-        assert!(!l2.get_state());
+        assert_eq!(l1.get_state(), Some(true));
+        assert_eq!(l2.get_state(), Some(false));
         assert!(!device.process_message("zigbee2mqtt/other", r#"{"state_l1":"OFF"}"#,));
     }
 }

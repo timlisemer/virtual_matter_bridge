@@ -5,6 +5,7 @@
 //!
 //! For example: 55.5% is reported as 5550.
 
+use super::measurement_state::MeasurementState;
 use super::sync_dataver_with_sensor;
 use rs_matter::dm::{
     Access, Attribute, Cluster, Dataver, Handler, MatchContext, NonBlockingHandler, Quality,
@@ -14,11 +15,11 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::TLVWrite;
 use rs_matter::{attribute_enum, attributes, with};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use strum::FromRepr;
 
-use crate::matter::endpoints::endpoints_helpers::Sensor;
-use crate::matter::endpoints::{ClusterNotifier, EndpointChangeTracker, NotifiableSensor};
+use crate::matter::endpoints::endpoints_helpers::{Sensor, SourceReadiness};
+use crate::matter::endpoints::{ClusterNotifier, NotifiableSensor};
 
 /// Matter Cluster ID for RelativeHumidityMeasurement
 pub const CLUSTER_ID: u32 = 0x0405;
@@ -78,9 +79,7 @@ pub const CLUSTER: Cluster<'static> = Cluster {
 
 /// Humidity sensor that can be updated from external sources.
 pub struct HumiditySensor {
-    /// Humidity in centi-percent (% * 100)
-    value: AtomicU16,
-    changes: EndpointChangeTracker,
+    state: MeasurementState<u16>,
 }
 
 impl HumiditySensor {
@@ -90,40 +89,40 @@ impl HumiditySensor {
     /// * `initial_percent` - Initial humidity in percent (0-100)
     pub fn new(initial_percent: f32) -> Self {
         Self {
-            value: AtomicU16::new((initial_percent * 100.0) as u16),
-            changes: EndpointChangeTracker::new(),
+            state: MeasurementState::new((initial_percent * 100.0) as u16),
         }
     }
 
     /// Get the current humidity in percent.
     pub fn get_percent(&self) -> f32 {
-        self.value.load(Ordering::SeqCst) as f32 / 100.0
+        self.get_centipercent() as f32 / 100.0
     }
 
     /// Get the current humidity in centi-percent (raw Matter value).
     pub fn get_centipercent(&self) -> u16 {
-        self.value.load(Ordering::SeqCst)
+        self.state.get()
     }
 
     /// Set the humidity in percent.
     pub fn set_percent(&self, percent: f32) {
         let centipercent = (percent * 100.0) as u16;
-        let old = self.value.swap(centipercent, Ordering::SeqCst);
-        if old != centipercent {
-            self.changes.mark_changed();
-        }
+        self.state.set(centipercent);
+    }
+
+    pub fn readiness(&self) -> Arc<dyn SourceReadiness> {
+        self.state.readiness()
     }
 }
 
 impl Sensor for HumiditySensor {
     fn version(&self) -> u32 {
-        self.changes.version()
+        self.state.version()
     }
 }
 
 impl NotifiableSensor for HumiditySensor {
     fn set_notifier(&self, notifier: ClusterNotifier) {
-        self.changes.set_notifier(notifier);
+        self.state.set_notifier(notifier);
     }
 }
 
@@ -222,16 +221,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn set_percent_only_increments_version_when_raw_value_changes() {
+    fn set_percent_marks_first_update_even_when_raw_value_is_unchanged() {
         let sensor = HumiditySensor::new(45.5);
 
         sensor.set_percent(45.5);
-        assert_eq!(sensor.version(), 0);
-
-        sensor.set_percent(46.0);
         assert_eq!(sensor.version(), 1);
 
         sensor.set_percent(46.0);
-        assert_eq!(sensor.version(), 1);
+        assert_eq!(sensor.version(), 2);
+
+        sensor.set_percent(46.0);
+        assert_eq!(sensor.version(), 2);
     }
 }

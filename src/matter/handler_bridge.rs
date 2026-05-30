@@ -4,9 +4,10 @@
 //! by Matter cluster handlers (BooleanStateHandler, OccupancySensingHandler, OnOffHooks).
 
 use super::endpoints::endpoints_helpers::{
-    ClusterNotifier, EndpointChangeTracker, NotifiableSensor, Sensor,
+    ClusterNotifier, EndpointChangeTracker, NotifiableSensor, Sensor, SourceReadiness,
 };
 use super::endpoints::handler::EndpointHandler;
+use rs_matter::error::{Error, ErrorCode};
 use std::sync::Arc;
 
 /// Bridge for sensor endpoints (ContactSensor, OccupancySensor).
@@ -43,8 +44,12 @@ impl SensorBridge {
     }
 
     /// Get the current sensor state from the handler.
-    pub fn get(&self) -> bool {
+    pub fn get(&self) -> Option<bool> {
         self.handler.get_state()
+    }
+
+    pub fn readiness(&self) -> Arc<dyn SourceReadiness> {
+        self.handler.readiness()
     }
 
     /// Called when the handler pushes a state change.
@@ -99,23 +104,36 @@ impl SwitchBridge {
     }
 
     /// Get the current switch state from the handler.
-    pub fn get(&self) -> bool {
+    pub fn get(&self) -> Option<bool> {
         self.handler.get_state()
     }
 
     /// Set the switch state (called by Matter when controller sends command).
     ///
     /// This forwards the command to the handler and updates version/notifier.
-    pub fn set(&self, value: bool) {
+    pub fn set(&self, value: bool) -> Result<(), Error> {
+        if !self.is_ready() {
+            return Err(ErrorCode::Busy.into());
+        }
         self.handler.on_command(value);
         self.changes.mark_changed();
+        Ok(())
     }
 
     /// Toggle the switch state and return the new value.
-    pub fn toggle(&self) -> bool {
-        let new_value = !self.handler.get_state();
-        self.set(new_value);
-        new_value
+    pub fn toggle(&self) -> Result<bool, Error> {
+        let current = self.handler.get_state().ok_or(ErrorCode::Busy)?;
+        let new_value = !current;
+        self.set(new_value)?;
+        Ok(new_value)
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.handler.readiness().is_ready()
+    }
+
+    pub fn readiness(&self) -> Arc<dyn SourceReadiness> {
+        self.handler.readiness()
     }
 
     /// Called when the handler pushes a state change from external source.

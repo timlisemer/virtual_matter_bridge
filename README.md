@@ -14,7 +14,7 @@ This project implements a general-purpose virtual Matter bridge that can:
 
 The bridge currently exposes:
 
-- **Virtual Matter Bridge** (Endpoint 1): Bridge master on/off control
+- **Virtual Matter Bridge** (Endpoint 1): Non-commandable bridge container/aggregator
 - **Door Sensor** (Endpoint 3+): Contact sensor (bridged)
 - **Motion Sensor** (Endpoint 4+): Occupancy sensor (bridged)
 - **Power Strip** (Endpoint 5+): On/Off plug-in unit (bridged)
@@ -34,13 +34,9 @@ Note: Endpoint numbers are dynamic based on device configuration. Video doorbell
 │ • HTTP APIs     │     │  │   Endpoint 0 (Root)    │  │     └───────────────────┘
 │ • MQTT Topics   │     │  └────────────────────────┘  │
 │ • Files         │     │  ┌────────────────────────┐  │
-│ • Commands      │     │  │ EP1 (Bridge Control)   │  │
-│ • Simulation    │     │  │ • Master on/off        │  │
+│ • Commands      │     │  │ EP1 (Bridge Container) │  │
+│ • Simulation    │     │  │ • Aggregates devices   │  │
 └─────────────────┘     │  └────────────────────────┘  │
-                        │  ┌────────────────────────┐  │
-                        │  │ EP2 (Aggregator)       │  │
-                        │  │ • Bridge root          │  │
-                        │  └────────────────────────┘  │
                         │  ┌────────────────────────┐  │
                         │  │ EP3+ (Bridged Devices) │  │
                         │  │ • Door (BooleanState)  │  │
@@ -106,7 +102,7 @@ Note: Endpoint numbers are dynamic based on device configuration. Video doorbell
 
 Home Assistant now shows entities for:
 
-- **Virtual Matter Bridge** (EP1, bridge master on/off control)
+- **Virtual Matter Bridge** (EP1, non-commandable bridge container)
 - **Door sensor** (contact sensor, bridged)
 - **Motion sensor** (occupancy sensor, bridged)
 - **Power Strip** (on/off plug-in unit, bridged)
@@ -126,7 +122,7 @@ Camera clusters (AV Stream, WebRTC) are stub implementations awaiting Matter 1.5
 
 **Goal:** Establish bridge architecture with multiple device types
 
-- [x] Create bridge endpoint structure with Aggregator (EP2) and bridged devices
+- [x] Create bridge endpoint structure with EP1 aggregator/container and bridged devices
 - [x] Add OnOff cluster for switches and lights
 - [x] Implement Contact Sensor and Occupancy Sensor as bridged devices
 

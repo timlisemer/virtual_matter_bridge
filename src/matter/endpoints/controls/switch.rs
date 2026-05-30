@@ -3,16 +3,13 @@
 //! Implements the `OnOffHooks` trait from rs-matter using `BinarySwitchHelper`
 //! for state management. Can be used for any on/off switch endpoint.
 
-use super::device_switch::DeviceSwitch;
 use super::helpers::BinarySwitchHelper;
-use parking_lot::RwLock;
 use rs_matter::dm::Cluster;
 use rs_matter::dm::clusters::app::on_off as on_off_cluster;
 use rs_matter::dm::clusters::app::on_off::{EffectVariantEnum, OnOffHooks, StartUpOnOffEnum};
 use rs_matter::error::Error;
 use rs_matter::tlv::Nullable;
 use rs_matter::with;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// On/Off switch implementing Matter's OnOffHooks trait.
@@ -20,16 +17,12 @@ use std::sync::atomic::{AtomicU8, Ordering};
 /// Uses `BinarySwitchHelper` for thread-safe state management with
 /// support for live Matter subscription updates.
 ///
-/// When used as a master switch, can cascade OFF commands to all
-/// registered device switches (parent endpoints).
 pub struct Switch {
     /// The underlying switch state
     helper: BinarySwitchHelper,
     /// Startup behavior configuration (encoded as Option discriminant + value)
     /// 0 = None, 1 = Off, 2 = On, 3 = Toggle
     start_up_on_off: AtomicU8,
-    /// Device switches to cascade to when this switch turns OFF
-    cascade_targets: RwLock<Vec<Arc<DeviceSwitch>>>,
 }
 
 impl Switch {
@@ -38,7 +31,6 @@ impl Switch {
         Self {
             helper: BinarySwitchHelper::new(initial),
             start_up_on_off: AtomicU8::new(0), // None
-            cascade_targets: RwLock::new(Vec::new()),
         }
     }
 
@@ -60,19 +52,6 @@ impl Switch {
     /// Toggle the switch state and return the new value.
     pub fn toggle(&self) -> bool {
         self.helper.toggle()
-    }
-
-    /// Add a device switch that should be cascaded when this switch turns OFF.
-    /// Used to implement virtual_bridge_onoff → parent DeviceSwitch cascade.
-    pub fn add_cascade_target(&self, target: Arc<DeviceSwitch>) {
-        self.cascade_targets.write().push(target);
-    }
-
-    /// Cascade OFF command to all registered device switches.
-    fn cascade_off(&self) {
-        for target in self.cascade_targets.read().iter() {
-            target.set_from_master(false);
-        }
     }
 
     /// Encode StartUpOnOffEnum to u8
@@ -124,11 +103,6 @@ impl OnOffHooks for Switch {
             if on { "on" } else { "off" }
         );
         self.helper.set(on);
-
-        // Cascade OFF to all registered device switches (virtual_bridge_onoff behavior)
-        if !on {
-            self.cascade_off();
-        }
     }
 
     fn start_up_on_off(&self) -> Nullable<StartUpOnOffEnum> {

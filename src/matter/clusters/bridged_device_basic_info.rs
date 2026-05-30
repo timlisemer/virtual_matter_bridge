@@ -3,6 +3,8 @@
 //! Provides device identification and endpoint names for Matter bridges.
 //! Controllers like Home Assistant read these attributes to display bridged device info.
 
+use super::sync_dataver_with_sensor;
+use crate::matter::endpoints::{AlwaysReady, SourceReadiness};
 use rs_matter::dm::{
     Access, Attribute, Cluster, Dataver, Handler, MatchContext, NonBlockingHandler, ReadContext,
     ReadReply, Reply, WriteContext,
@@ -11,7 +13,7 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::tlv::TLVWrite;
 use rs_matter::{attribute_enum, attributes, with};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use strum::FromRepr;
 
 /// Matter Cluster ID for BridgedDeviceBasicInformation
@@ -166,25 +168,29 @@ impl BridgedDeviceInfo {
 ///
 /// Provides device identification via VendorName, ProductName, and other attributes.
 /// Controllers like Home Assistant read these to display bridged device info.
-#[derive(Clone, Debug)]
 pub struct BridgedHandler {
     dataver: Dataver,
     /// Device information
     info: BridgedDeviceInfo,
-    /// Dynamic reachable state (shared with parent DeviceSwitch)
-    reachable: Arc<AtomicBool>,
+    reachable: Arc<dyn SourceReadiness>,
+    last_reachable_version: AtomicU32,
 }
 
 impl BridgedHandler {
     /// Cluster definition for use in the data model
     pub const CLUSTER: Cluster<'static> = CLUSTER;
 
-    /// Create a new handler with device info and reachable state.
-    pub fn new(dataver: Dataver, info: BridgedDeviceInfo, reachable: Arc<AtomicBool>) -> Self {
+    /// Create a new handler with device info and source-owned reachable state.
+    pub fn new(
+        dataver: Dataver,
+        info: BridgedDeviceInfo,
+        reachable: Arc<dyn SourceReadiness>,
+    ) -> Self {
         Self {
             dataver,
             info,
             reachable,
+            last_reachable_version: AtomicU32::new(0),
         }
     }
 
@@ -193,29 +199,17 @@ impl BridgedHandler {
         Self {
             dataver,
             info,
-            reachable: Arc::new(AtomicBool::new(true)),
-        }
-    }
-
-    /// Create a new handler with just a name (backwards compatible).
-    pub fn new_with_name(dataver: Dataver, name: &'static str, reachable: Arc<AtomicBool>) -> Self {
-        Self {
-            dataver,
-            info: BridgedDeviceInfo::new(name),
-            reachable,
-        }
-    }
-
-    /// Create a new handler with just a name, always reachable (backwards compatible).
-    pub fn new_with_name_always_reachable(dataver: Dataver, name: &'static str) -> Self {
-        Self {
-            dataver,
-            info: BridgedDeviceInfo::new(name),
-            reachable: Arc::new(AtomicBool::new(true)),
+            reachable: Arc::new(AlwaysReady),
+            last_reachable_version: AtomicU32::new(0),
         }
     }
 
     fn read_impl(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
+        sync_dataver_with_sensor(
+            self.reachable.as_ref(),
+            &self.last_reachable_version,
+            &self.dataver,
+        );
         let attr = ctx.attr();
 
         let Some(mut writer) = reply.with_dataver(self.dataver.get())? else {
@@ -263,7 +257,7 @@ impl BridgedHandler {
                     }
                 }
                 BridgedDeviceBasicInfoAttribute::Reachable => {
-                    tw.bool(tag, self.reachable.load(Ordering::SeqCst))?;
+                    tw.bool(tag, self.reachable.is_ready())?;
                 }
             }
         }
@@ -288,6 +282,8 @@ impl Handler for BridgedHandler {
 
     fn bump_dataver(&self, _ctx: impl MatchContext) {
         self.dataver.changed();
+        self.last_reachable_version
+            .store(self.reachable.version(), Ordering::SeqCst);
     }
 }
 

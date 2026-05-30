@@ -9,7 +9,8 @@ use super::device_types::{
     DEV_TYPE_HUMIDITY_SENSOR, DEV_TYPE_OCCUPANCY_SENSOR, DEV_TYPE_ON_OFF_LIGHT,
     DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_TEMPERATURE_SENSOR, DEV_TYPE_VIDEO_DOORBELL,
 };
-use super::endpoints::controls::{DeviceSwitch, LightSwitch, Switch};
+use super::endpoints::AnyChildReady;
+use super::endpoints::controls::{LightSwitch, Switch};
 use super::handler_bridge::{SensorBridge, SwitchBridge};
 use super::logging_udp::LoggingUdpSocket;
 use super::netif::{FilteredNetifs, get_interface_name};
@@ -23,7 +24,7 @@ use nix::net::if_::if_nametoindex;
 use nix::sys::socket::{AddressFamily, SockaddrLike};
 use rs_matter::crypto::{Crypto, default_crypto};
 use rs_matter::dm::IMBuffer;
-use rs_matter::dm::clusters::app::on_off::{self, OnOffHooks};
+use rs_matter::dm::clusters::app::on_off::OnOffHooks;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _, PartsMatcher};
 use rs_matter::dm::clusters::net_comm::SharedNetworks;
 use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM};
@@ -59,7 +60,6 @@ use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::pin::pin;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use super::clusters::{
@@ -82,6 +82,8 @@ static GENERIC_SWITCH_NOTIFY: StaticCell<Signal<CriticalSectionRawMutex, ()>> = 
 /// Static hostname storage for mDNS (needs 'static lifetime for Host struct)
 static HOSTNAME: OnceLock<String> = OnceLock::new();
 
+const BRIDGE_ENDPOINT_ID: u16 = 1;
+
 const ROOT_ENDPOINT_BASE: Endpoint<'static> = root_endpoint!(eth);
 const ROOT_ENDPOINT: Endpoint<'static> = Endpoint {
     clusters: clusters!(eth; IcdManagementHandler::CLUSTER),
@@ -94,7 +96,7 @@ const ROOT_ENDPOINT: Endpoint<'static> = Endpoint {
 pub struct DynamicPartsMatcher {
     /// parent_endpoint_id -> child_endpoint_ids
     parent_to_children: Vec<(u16, Vec<u16>)>,
-    /// Aggregator (EP2) lists these parent IDs
+    /// Bridge aggregator endpoint lists these parent IDs
     aggregator_parents: Vec<u16>,
 }
 
@@ -133,7 +135,7 @@ impl Default for DynamicPartsMatcher {
 
 impl PartsMatcher for DynamicPartsMatcher {
     fn matches(&self, our_endpoint: u16, endpoint: u16) -> bool {
-        if our_endpoint == 2 {
+        if our_endpoint == BRIDGE_ENDPOINT_ID {
             // Aggregator returns all parent endpoints
             self.aggregator_parents.contains(&endpoint)
         } else {
@@ -165,11 +167,6 @@ enum DynamicHandlerEntry {
     OnOff {
         dataver: Dataver,
         bridge: Arc<SwitchBridge>,
-    },
-    /// OnOff cluster handler using DeviceSwitch (for parent endpoints)
-    DeviceOnOff {
-        dataver: Dataver,
-        switch: Arc<DeviceSwitch>,
     },
     /// Descriptor handler for parent endpoints with PartsMatcher
     DescWithParts {
@@ -220,13 +217,6 @@ impl DynamicHandler {
         self.handlers.insert(
             (ep, Switch::CLUSTER.id),
             DynamicHandlerEntry::OnOff { dataver, bridge },
-        );
-    }
-
-    pub fn add_device_onoff(&mut self, ep: u16, dataver: Dataver, switch: Arc<DeviceSwitch>) {
-        self.handlers.insert(
-            (ep, DeviceSwitch::CLUSTER.id),
-            DynamicHandlerEntry::DeviceOnOff { dataver, switch },
         );
     }
 
@@ -303,9 +293,6 @@ impl Handler for DynamicHandler {
                 DynamicHandlerEntry::OnOff { dataver, bridge } => {
                     read_onoff(dataver, bridge, ctx, reply)
                 }
-                DynamicHandlerEntry::DeviceOnOff { dataver, switch } => {
-                    read_device_onoff(dataver, switch, ctx, reply)
-                }
                 DynamicHandlerEntry::DescWithParts {
                     dataver,
                     parts_matcher,
@@ -338,10 +325,7 @@ impl Handler for DynamicHandler {
 
         if let Some(entry) = self.handlers.get(&(ep, cl)) {
             match entry {
-                DynamicHandlerEntry::OnOff { dataver, bridge } => write_onoff(dataver, bridge, ctx),
-                DynamicHandlerEntry::DeviceOnOff { dataver, switch } => {
-                    write_device_onoff(dataver, switch, ctx)
-                }
+                DynamicHandlerEntry::OnOff { .. } => write_onoff(),
                 _ => Err(rs_matter::error::ErrorCode::UnsupportedAccess.into()),
             }
         } else {
@@ -360,37 +344,9 @@ impl Handler for DynamicHandler {
                 DynamicHandlerEntry::OnOff { bridge, .. } => {
                     // OnOff cluster commands: Off=0x00, On=0x01, Toggle=0x02
                     match cmd_id {
-                        0x00 => {
-                            bridge.set(false);
-                            Ok(())
-                        }
-                        0x01 => {
-                            bridge.set(true);
-                            Ok(())
-                        }
-                        0x02 => {
-                            bridge.toggle();
-                            Ok(())
-                        }
-                        _ => Err(rs_matter::error::ErrorCode::CommandNotFound.into()),
-                    }
-                }
-                DynamicHandlerEntry::DeviceOnOff { switch, .. } => {
-                    // Parent device switch - uses OnOffHooks trait methods
-                    match cmd_id {
-                        0x00 => {
-                            switch.set_on_off(false);
-                            Ok(())
-                        }
-                        0x01 => {
-                            switch.set_on_off(true);
-                            Ok(())
-                        }
-                        0x02 => {
-                            let new_val = !switch.on_off();
-                            switch.set_on_off(new_val);
-                            Ok(())
-                        }
+                        0x00 => bridge.set(false),
+                        0x01 => bridge.set(true),
+                        0x02 => bridge.toggle().map(|_| ()),
                         _ => Err(rs_matter::error::ErrorCode::CommandNotFound.into()),
                     }
                 }
@@ -414,7 +370,6 @@ impl Handler for DynamicHandler {
                     DynamicHandlerEntry::BooleanState { dataver, .. }
                     | DynamicHandlerEntry::OccupancySensing { dataver, .. }
                     | DynamicHandlerEntry::OnOff { dataver, .. }
-                    | DynamicHandlerEntry::DeviceOnOff { dataver, .. }
                     | DynamicHandlerEntry::DescWithParts { dataver, .. }
                     | DynamicHandlerEntry::Desc { dataver } => {
                         dataver.changed();
@@ -463,7 +418,7 @@ fn read_boolean_state(
     {
         let mut tw = writer.writer();
         match attr.attr_id {
-            0x00 => tw.bool(tag, bridge.get())?, // StateValue
+            0x00 => tw.bool(tag, state_or_pre_ready_default(bridge.get()))?, // StateValue
             _ => return Err(rs_matter::error::ErrorCode::AttributeNotFound.into()),
         }
     }
@@ -493,9 +448,16 @@ fn read_occupancy_sensing(
     {
         let mut tw = writer.writer();
         match attr.attr_id {
-            0x00 => tw.u8(tag, if bridge.get() { 1 } else { 0 })?, // Occupancy bitmap
-            0x01 => tw.u8(tag, 0)?,                                // OccupancySensorType (PIR)
-            0x02 => tw.u8(tag, 1)?,                                // OccupancySensorTypeBitmap
+            0x00 => tw.u8(
+                tag,
+                if state_or_pre_ready_default(bridge.get()) {
+                    1
+                } else {
+                    0
+                },
+            )?, // Occupancy bitmap
+            0x01 => tw.u8(tag, 0)?, // OccupancySensorType (PIR)
+            0x02 => tw.u8(tag, 1)?, // OccupancySensorTypeBitmap
             _ => return Err(rs_matter::error::ErrorCode::AttributeNotFound.into()),
         }
     }
@@ -525,7 +487,7 @@ fn read_onoff(
     {
         let mut tw = writer.writer();
         match attr.attr_id {
-            0x00 => tw.bool(tag, bridge.get())?, // OnOff
+            0x00 => tw.bool(tag, state_or_pre_ready_default(bridge.get()))?, // OnOff
             other => {
                 log::debug!(
                     "OnOff cluster: unknown attr 0x{:04x} on endpoint {}",
@@ -539,82 +501,16 @@ fn read_onoff(
     writer.complete()
 }
 
+fn state_or_pre_ready_default(state: Option<bool>) -> bool {
+    // Matter boolean attributes are non-nullable here. When the backing source
+    // has not produced its first value, expose false/off and rely on the
+    // BridgedDeviceBasicInformation Reachable attribute to carry readiness.
+    state.unwrap_or(false)
+}
+
 /// Write handler for OnOff cluster.
-fn write_onoff(
-    _dataver: &Dataver,
-    bridge: &SwitchBridge,
-    ctx: impl WriteContext,
-) -> Result<(), Error> {
-    let attr = ctx.attr();
-
-    match attr.attr_id {
-        0x00 => {
-            // OnOff attribute - this is typically controlled via commands, not writes
-            // But we support it for completeness
-            let data = ctx.data();
-            let value = data.bool()?;
-            bridge.set(value);
-            Ok(())
-        }
-        _ => Err(rs_matter::error::ErrorCode::UnsupportedAccess.into()),
-    }
-}
-
-/// Read handler for DeviceSwitch OnOff cluster (parent endpoints).
-fn read_device_onoff(
-    dataver: &Dataver,
-    switch: &DeviceSwitch,
-    ctx: impl ReadContext,
-    reply: impl ReadReply,
-) -> Result<(), Error> {
-    use rs_matter::tlv::TLVWrite;
-
-    let attr = ctx.attr();
-
-    let Some(mut writer) = reply.with_dataver(dataver.get())? else {
-        return Ok(());
-    };
-
-    if attr.is_system() {
-        return DeviceSwitch::CLUSTER.read(attr, writer);
-    }
-
-    let tag = writer.tag();
-    {
-        let mut tw = writer.writer();
-        match attr.attr_id {
-            0x00 => tw.bool(tag, switch.get())?, // OnOff
-            other => {
-                log::debug!(
-                    "DeviceOnOff cluster: unknown attr 0x{:04x} on endpoint {}",
-                    other,
-                    attr.endpoint_id
-                );
-                return Err(rs_matter::error::ErrorCode::AttributeNotFound.into());
-            }
-        }
-    }
-    writer.complete()
-}
-
-/// Write handler for DeviceSwitch OnOff cluster (parent endpoints).
-fn write_device_onoff(
-    _dataver: &Dataver,
-    switch: &DeviceSwitch,
-    ctx: impl WriteContext,
-) -> Result<(), Error> {
-    let attr = ctx.attr();
-
-    match attr.attr_id {
-        0x00 => {
-            // OnOff attribute - use OnOffHooks::set_on_off for cascade behavior
-            let data = ctx.data();
-            let value = data.bool()?;
-            switch.set_on_off(value);
-            Ok(())
-        }
-        _ => Err(rs_matter::error::ErrorCode::UnsupportedAccess.into()),
-    }
+fn write_onoff() -> Result<(), Error> {
+    Err(rs_matter::error::ErrorCode::UnsupportedAccess.into())
 }
 
 /// Get IPv4 and IPv6 addresses for a specific network interface.
@@ -826,23 +722,16 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
     let mut endpoints_vec = Vec::new();
     let mut parts_matcher = DynamicPartsMatcher::new();
     let mut mappings = Vec::new();
-    let mut next_id: u16 = 3; // Start after Root(0), Doorbell(1), Aggregator(2)
+    let mut next_id: u16 = 3; // Keep virtual device IDs stable after Root(0), Bridge(1), reserved EP2.
 
     // Endpoint 0: Root node
     endpoints_vec.push(ROOT_ENDPOINT);
 
-    // Endpoint 1: Bridge master on/off control
+    // Endpoint 1: visible bridge parent/container. It is not commandable.
     endpoints_vec.push(Endpoint::new(
-        1,
-        devices!(DEV_TYPE_ON_OFF_PLUG_IN_UNIT),
-        clusters!(desc::DescHandler::CLUSTER, Switch::CLUSTER),
-    ));
-
-    // Endpoint 2: Aggregator (bridge root - will use DynamicPartsMatcher)
-    endpoints_vec.push(Endpoint::new(
-        2,
+        BRIDGE_ENDPOINT_ID,
         devices!(DEV_TYPE_AGGREGATOR),
-        clusters!(desc::DescHandler::CLUSTER),
+        clusters!(desc::DescHandler::CLUSTER, BridgedHandler::CLUSTER),
     ));
 
     // Add virtual devices dynamically
@@ -850,19 +739,13 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
         let parent_id = next_id;
         next_id += 1;
 
-        // Get device types for parent (always OnOffPlugInUnit - parent is generic on/off switch)
-        let parent_device_types: &'static [DeviceType] =
-            leak_slice(&[DEV_TYPE_ON_OFF_PLUG_IN_UNIT, DEV_TYPE_BRIDGED_NODE]);
+        let parent_device_types: &'static [DeviceType] = leak_slice(&[DEV_TYPE_BRIDGED_NODE]);
 
-        // Parent endpoint (bridged node with OnOff cluster for device-level control)
+        // Parent endpoint (bridged node with descriptor and basic info only)
         endpoints_vec.push(Endpoint::new(
             parent_id,
             parent_device_types,
-            clusters!(
-                desc::DescHandler::CLUSTER,
-                BridgedHandler::CLUSTER,
-                DeviceSwitch::CLUSTER
-            ),
+            clusters!(desc::DescHandler::CLUSTER, BridgedHandler::CLUSTER),
         ));
 
         // Add child endpoints
@@ -976,9 +859,7 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
 /// Note: Currently uses test device credentials for development.
 pub async fn run_matter_stack(
     config: &MatterConfig,
-    // Bridge master on/off switch (controls EP1, cascades to all parent DeviceSwitches)
-    virtual_bridge_onoff: Arc<Switch>,
-    // Dynamic virtual devices (bridged under EP2 Aggregator)
+    // Dynamic virtual devices (bridged under endpoint 1 Aggregator)
     virtual_devices: Vec<VirtualDevice>,
 ) -> Result<(), Error> {
     info!("Initializing Matter stack...");
@@ -1124,17 +1005,24 @@ pub async fn run_matter_stack(
     // Create DynamicHandler for virtual device endpoints (EP3+)
     let mut dynamic_handler = DynamicHandler::new();
 
-    // Collect parent DeviceSwitches for virtual_bridge_onoff cascade
-    let mut parent_device_switches: Vec<Arc<DeviceSwitch>> = Vec::new();
     let mut generic_switch_states: Vec<Arc<GenericSwitchState>> = Vec::new();
+
+    dynamic_handler.add_desc_with_parts(
+        BRIDGE_ENDPOINT_ID,
+        Dataver::new_rand(&mut rand),
+        built_node.parts_matcher,
+    );
+    dynamic_handler.add_bridged(
+        BRIDGE_ENDPOINT_ID,
+        BridgedHandler::new_always_reachable(
+            Dataver::new_rand(&mut rand),
+            BridgedDeviceInfo::new(Box::leak(config.device_name.clone().into_boxed_str())),
+        ),
+    );
 
     for (device_idx, device) in virtual_devices.iter().enumerate() {
         let mapping = &built_node.mappings[device_idx];
         let parent_id = mapping.parent_id;
-
-        // Create the parent DeviceSwitch for this virtual device
-        let device_switch = Arc::new(DeviceSwitch::new(true));
-        parent_device_switches.push(device_switch.clone());
 
         // Add descriptor handler for parent (with parts matcher for children)
         dynamic_handler.add_desc_with_parts(
@@ -1143,7 +1031,20 @@ pub async fn run_matter_stack(
             built_node.parts_matcher,
         );
 
-        // Add bridged device info handler for parent (always reachable)
+        let child_readiness: Vec<_> = device
+            .endpoints
+            .iter()
+            .map(|ep_config| ep_config.readiness())
+            .collect();
+        let parent_readiness = Arc::new(AnyChildReady::new(child_readiness));
+        register_cluster_notifier(
+            parent_readiness.as_ref(),
+            sensor_notify_ref,
+            parent_id,
+            BridgedHandler::CLUSTER.id,
+        );
+
+        // Add bridged device info handler for parent (reachable when any child is ready)
         // Use device_info if provided, otherwise create from label
         let parent_device_info = device
             .device_info
@@ -1151,35 +1052,33 @@ pub async fn run_matter_stack(
             .unwrap_or_else(|| BridgedDeviceInfo::new(device.label));
         dynamic_handler.add_bridged(
             parent_id,
-            BridgedHandler::new_always_reachable(Dataver::new_rand(&mut rand), parent_device_info),
-        );
-
-        // Add OnOff handler for parent (device-level switch)
-        dynamic_handler.add_device_onoff(
-            parent_id,
-            Dataver::new_rand(&mut rand),
-            device_switch.clone(),
+            BridgedHandler::new(
+                Dataver::new_rand(&mut rand),
+                parent_device_info,
+                parent_readiness,
+            ),
         );
 
         // Create handlers for each child endpoint
         for (child_idx, ep_config) in device.endpoints.iter().enumerate() {
             let child_id = mapping.child_ids[child_idx];
 
-            // Create reachable flag for this child (controlled by parent DeviceSwitch)
-            let child_reachable = Arc::new(AtomicBool::new(true));
-            device_switch.add_child_reachable(child_reachable.clone());
-
             // Add descriptor handler for child (no parts)
             dynamic_handler.add_desc(child_id, Dataver::new_rand(&mut rand));
 
-            // Add bridged device info handler for child (with dynamic reachable)
-            // Child endpoints use label only (device info is on parent)
+            let child_readiness = ep_config.readiness();
+            register_cluster_notifier(
+                child_readiness.as_ref(),
+                sensor_notify_ref,
+                child_id,
+                BridgedHandler::CLUSTER.id,
+            );
             dynamic_handler.add_bridged(
                 child_id,
-                BridgedHandler::new_with_name(
+                BridgedHandler::new(
                     Dataver::new_rand(&mut rand),
-                    ep_config.label,
-                    child_reachable,
+                    BridgedDeviceInfo::new(ep_config.label),
+                    child_readiness,
                 ),
             );
 
@@ -1220,8 +1119,6 @@ pub async fn run_matter_stack(
                         child_id,
                         Switch::CLUSTER.id,
                     );
-                    // Add child switch to parent's cascade list
-                    device_switch.add_child_switch(bridge.clone());
                     dynamic_handler.add_onoff(child_id, Dataver::new_rand(&mut rand), bridge);
                 }
                 EndpointKind::VideoDoorbellCamera => {
@@ -1301,18 +1198,6 @@ pub async fn run_matter_stack(
         }
     }
 
-    // Wire up virtual_bridge_onoff to cascade to all parent DeviceSwitches
-    for device_switch in &parent_device_switches {
-        virtual_bridge_onoff.add_cascade_target(device_switch.clone());
-    }
-
-    // Create OnOff handler for bridge master on/off (endpoint 1)
-    let virtual_bridge_onoff_handler = on_off::OnOffHandler::new_standalone(
-        Dataver::new_rand(&mut rand),
-        1,
-        virtual_bridge_onoff.as_ref(),
-    );
-
     let eth_sys_handler = endpoints::EthSysHandlerBuilder::new()
         .netif_diag(get_netifs())
         .build(&mut rand);
@@ -1330,27 +1215,7 @@ pub async fn run_matter_stack(
                     ),
                 ),
             )
-            // === Endpoint 1: Bridge master on/off control ===
-            .chain(
-                EpClMatcher::new(Some(1), Some(desc::DescHandler::CLUSTER.id)),
-                Async(desc::DescHandler::new(Dataver::new_rand(&mut rand)).adapt()),
-            )
-            .chain(
-                EpClMatcher::new(Some(1), Some(Switch::CLUSTER.id)),
-                virtual_bridge_onoff_handler.adapt(),
-            )
-            // === Endpoint 2: Aggregator ===
-            .chain(
-                EpClMatcher::new(Some(2), Some(desc::DescHandler::CLUSTER.id)),
-                Async(
-                    desc::DescHandler::new_matching(
-                        Dataver::new_rand(&mut rand),
-                        built_node.parts_matcher,
-                    )
-                    .adapt(),
-                ),
-            )
-            // === Endpoint 3+: Virtual Devices (dynamic) ===
+            // === Endpoint 1+: Bridge and virtual devices (dynamic) ===
             .chain(
                 &dynamic_handler, // Only matches (ep, cl) pairs we have handlers for
                 Async(&dynamic_handler),
@@ -1574,6 +1439,8 @@ pub async fn run_matter_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matter::EndpointConfig;
+    use crate::matter::endpoints::{EndpointHandler, SourceReadiness, SourceSnapshot};
 
     #[test]
     fn root_endpoint_keeps_standard_clusters_when_adding_icd_management() {
@@ -1585,5 +1452,93 @@ mod tests {
 
         assert!(cluster_ids.contains(&desc::DescHandler::CLUSTER.id));
         assert!(cluster_ids.contains(&IcdManagementHandler::CLUSTER.id));
+    }
+
+    #[test]
+    fn dynamic_topology_has_bridge_parent_without_master_onoff() {
+        let handler = Arc::new(TestHandler::new());
+        let devices = vec![
+            VirtualDevice::new("Device").with_endpoint(EndpointConfig::switch("Switch", handler)),
+        ];
+
+        let built = build_node(&devices);
+        let endpoint_ids: Vec<u16> = built.node.endpoints.iter().map(|ep| ep.id).collect();
+
+        assert!(endpoint_ids.contains(&BRIDGE_ENDPOINT_ID));
+        assert!(!endpoint_ids.contains(&2));
+        assert_eq!(built.mappings[0].parent_id, 3);
+        assert!(built.parts_matcher.matches(BRIDGE_ENDPOINT_ID, 3));
+        assert!(built.parts_matcher.matches(3, 4));
+
+        let bridge = built
+            .node
+            .endpoints
+            .iter()
+            .find(|ep| ep.id == BRIDGE_ENDPOINT_ID)
+            .unwrap();
+        let bridge_cluster_ids: Vec<u32> =
+            bridge.clusters.iter().map(|cluster| cluster.id).collect();
+        assert!(bridge_cluster_ids.contains(&desc::DescHandler::CLUSTER.id));
+        assert!(bridge_cluster_ids.contains(&BridgedHandler::CLUSTER.id));
+        assert!(!bridge_cluster_ids.contains(&Switch::CLUSTER.id));
+
+        let parent = built.node.endpoints.iter().find(|ep| ep.id == 3).unwrap();
+        let parent_cluster_ids: Vec<u32> =
+            parent.clusters.iter().map(|cluster| cluster.id).collect();
+        let parent_device_type_ids: Vec<u16> = parent
+            .device_types
+            .iter()
+            .map(|device_type| device_type.dtype)
+            .collect();
+        assert!(!parent_cluster_ids.contains(&Switch::CLUSTER.id));
+        assert!(!parent_device_type_ids.contains(&DEV_TYPE_ON_OFF_PLUG_IN_UNIT.dtype));
+
+        let child = built.node.endpoints.iter().find(|ep| ep.id == 4).unwrap();
+        let child_cluster_ids: Vec<u32> = child.clusters.iter().map(|cluster| cluster.id).collect();
+        assert!(child_cluster_ids.contains(&Switch::CLUSTER.id));
+        assert!(child_cluster_ids.contains(&BridgedHandler::CLUSTER.id));
+    }
+
+    #[test]
+    fn direct_onoff_attribute_write_is_rejected() {
+        assert_eq!(
+            write_onoff().unwrap_err().code(),
+            rs_matter::error::ErrorCode::UnsupportedAccess
+        );
+    }
+
+    #[test]
+    fn pre_ready_boolean_reads_default_to_false() {
+        assert!(!state_or_pre_ready_default(None));
+        assert!(!state_or_pre_ready_default(Some(false)));
+        assert!(state_or_pre_ready_default(Some(true)));
+    }
+
+    struct TestHandler {
+        state: Arc<SourceSnapshot<bool>>,
+    }
+
+    impl TestHandler {
+        fn new() -> Self {
+            Self {
+                state: Arc::new(SourceSnapshot::new()),
+            }
+        }
+    }
+
+    impl EndpointHandler for TestHandler {
+        fn on_command(&self, value: bool) {
+            self.state.update_source(value);
+        }
+
+        fn get_state(&self) -> Option<bool> {
+            self.state.snapshot()
+        }
+
+        fn readiness(&self) -> Arc<dyn SourceReadiness> {
+            self.state.clone()
+        }
+
+        fn set_state_pusher(&self, _pusher: Arc<dyn Fn(bool) + Send + Sync>) {}
     }
 }

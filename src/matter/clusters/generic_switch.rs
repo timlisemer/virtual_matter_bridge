@@ -11,6 +11,7 @@
 //! - ShortRelease (0x03) - Button released after short press
 //! - MultiPressComplete (0x06) - Multi-press sequence completed
 
+use crate::matter::endpoints::endpoints_helpers::{SourceReadiness, SourceSnapshot};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use parking_lot::{Mutex, RwLock};
@@ -190,6 +191,7 @@ pub struct GenericSwitchState {
     endpoint_id: AtomicU16,
     /// Matter task notifier for pending events.
     notifier: RwLock<Option<&'static Signal<CriticalSectionRawMutex, ()>>>,
+    readiness: Arc<SourceSnapshot<()>>,
 }
 
 impl GenericSwitchState {
@@ -200,6 +202,7 @@ impl GenericSwitchState {
             pending_events: Mutex::new(VecDeque::new()),
             endpoint_id: AtomicU16::new(0),
             notifier: RwLock::new(None),
+            readiness: Arc::new(SourceSnapshot::new()),
         }
     }
 
@@ -223,8 +226,17 @@ impl GenericSwitchState {
         notifier.signal(());
     }
 
+    pub fn mark_ready(&self) {
+        self.readiness.mark_ready();
+    }
+
+    pub fn readiness(&self) -> Arc<dyn SourceReadiness> {
+        self.readiness.clone()
+    }
+
     fn push_event(&self, event: GenericSwitchPendingEvent) {
         self.pending_events.lock().push_back(event);
+        self.mark_ready();
         if let Some(notifier) = *self.notifier.read() {
             notifier.signal(());
         }

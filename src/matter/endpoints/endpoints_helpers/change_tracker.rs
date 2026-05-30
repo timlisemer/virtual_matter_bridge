@@ -10,14 +10,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// and to push live Matter subscription updates when their value changes.
 pub struct EndpointChangeTracker {
     version: AtomicU32,
-    notifier: RwLock<Option<ClusterNotifier>>,
+    notifiers: RwLock<Vec<ClusterNotifier>>,
 }
 
 impl EndpointChangeTracker {
     pub fn new() -> Self {
         Self {
             version: AtomicU32::new(0),
-            notifier: RwLock::new(None),
+            notifiers: RwLock::new(Vec::new()),
         }
     }
 
@@ -27,13 +27,13 @@ impl EndpointChangeTracker {
 
     pub fn mark_changed(&self) {
         self.version.fetch_add(1, Ordering::SeqCst);
-        if let Some(notifier) = self.notifier.read().as_ref() {
+        for notifier in self.notifiers.read().iter() {
             notifier.notify();
         }
     }
 
     pub fn set_notifier(&self, notifier: ClusterNotifier) {
-        *self.notifier.write() = Some(notifier);
+        self.notifiers.write().push(notifier);
     }
 }
 

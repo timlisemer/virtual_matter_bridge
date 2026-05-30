@@ -22,6 +22,7 @@ pub type ClusterChangeQueue = Channel<CriticalSectionRawMutex, ClusterChange, 64
 ///     notifier.notify();
 /// }
 /// ```
+#[derive(Clone, Copy)]
 pub struct ClusterNotifier {
     queue: &'static ClusterChangeQueue,
     endpoint_id: u16,
