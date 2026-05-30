@@ -272,6 +272,22 @@ impl VirtualDevice {
     }
 }
 
+pub fn collect_endpoint_readiness(
+    virtual_devices: &[VirtualDevice],
+) -> Vec<Arc<dyn SourceReadiness>> {
+    virtual_devices
+        .iter()
+        .flat_map(|device| device.endpoints.iter().map(EndpointConfig::readiness))
+        .collect()
+}
+
+pub fn mark_endpoint_readiness_unavailable(readiness: &[Arc<dyn SourceReadiness>]) -> usize {
+    readiness
+        .iter()
+        .filter(|source| source.mark_unavailable())
+        .count()
+}
+
 /// Compute a combined schema hash for all virtual devices.
 ///
 /// This creates a deterministic hash of the entire device configuration,
@@ -284,4 +300,71 @@ pub fn compute_schema_hash(devices: &[VirtualDevice]) -> u64 {
         device.schema_hash().hash(&mut hasher);
     }
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::matter::endpoints::{EndpointHandler, SourceSnapshot};
+
+    struct TestHandler {
+        state: Arc<SourceSnapshot<bool>>,
+    }
+
+    impl TestHandler {
+        fn new() -> Self {
+            Self {
+                state: Arc::new(SourceSnapshot::new()),
+            }
+        }
+
+        fn set_state(&self, value: bool) {
+            self.state.update_source(value);
+        }
+    }
+
+    impl EndpointHandler for TestHandler {
+        fn on_command(&self, value: bool) {
+            self.set_state(value);
+        }
+
+        fn get_state(&self) -> Option<bool> {
+            self.state.snapshot()
+        }
+
+        fn readiness(&self) -> Arc<dyn SourceReadiness> {
+            self.state.clone()
+        }
+
+        fn set_state_pusher(&self, _pusher: Arc<dyn Fn(bool) + Send + Sync>) {}
+    }
+
+    #[test]
+    fn endpoint_readiness_shutdown_marks_all_collected_endpoints_unavailable() {
+        let switch = Arc::new(TestHandler::new());
+        let temperature = Arc::new(TemperatureSensor::new(20.0));
+        let button = Arc::new(GenericSwitchState::new());
+
+        let devices = vec![
+            VirtualDevice::new("Relay")
+                .with_endpoint(EndpointConfig::switch("Switch", switch.clone())),
+            VirtualDevice::new("Climate")
+                .with_endpoint(EndpointConfig::temperature_sensor(
+                    "Temperature",
+                    temperature.clone(),
+                ))
+                .with_endpoint(EndpointConfig::generic_switch("Button", button.clone())),
+        ];
+        let readiness = collect_endpoint_readiness(&devices);
+
+        switch.set_state(true);
+        temperature.set_celsius(20.0);
+        button.mark_ready();
+
+        assert_eq!(readiness.len(), 3);
+        assert!(readiness.iter().all(|source| source.is_ready()));
+        assert_eq!(mark_endpoint_readiness_unavailable(&readiness), 3);
+        assert!(readiness.iter().all(|source| !source.is_ready()));
+        assert_eq!(mark_endpoint_readiness_unavailable(&readiness), 0);
+    }
 }

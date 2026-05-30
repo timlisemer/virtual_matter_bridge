@@ -21,10 +21,13 @@ use crate::matter::clusters::{
 use crate::matter::endpoints::{
     EndpointHandler, ReadinessOnlyHandler, SourceReadiness, SourceSnapshot,
 };
-use crate::matter::{EndpointConfig, VirtualDevice};
+use crate::matter::{
+    EndpointConfig, VirtualDevice, collect_endpoint_readiness, mark_endpoint_readiness_unavailable,
+};
 use log::info;
 use parking_lot::RwLock as SyncRwLock;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::signal;
 
 /// Type alias for the state pusher callback.
@@ -34,6 +37,7 @@ const W100_MATTER_DEVICE_NAME: &str = "Büro Thermometer";
 const W100_ZIGBEE2MQTT_FRIENDLY_NAME: &str = "Büro-Thermometer";
 const SHELLY_2PM_MATTER_DEVICE_NAME: &str = "Büro Licht & PC Schalter";
 const SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME: &str = "Büro Licht & PC Schalter";
+const MATTER_UNAVAILABLE_PROPAGATION_GRACE: Duration = Duration::from_secs(2);
 
 fn init_logger() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -232,6 +236,7 @@ async fn main() {
                 w100_button_center.clone(),
             )),
     ];
+    let endpoint_readiness = collect_endpoint_readiness(&virtual_devices);
 
     // Initialize the camera input
     let camera_for_init = camera.clone();
@@ -316,9 +321,22 @@ async fn main() {
         }
     }
 
-    // Shutdown
+    // Stop inputs that could mark endpoints ready again while we publish shutdown readiness.
     sensor_task.abort();
-    mqtt_task.abort();
+    mqtt_task.shutdown().await;
+
+    info!("Marking Matter endpoints unavailable");
+    let unavailable_count = mark_endpoint_readiness_unavailable(&endpoint_readiness);
+    info!(
+        "Marked {} Matter endpoint(s) unavailable",
+        unavailable_count
+    );
+
+    info!(
+        "Waiting {}s for Matter availability updates to propagate",
+        MATTER_UNAVAILABLE_PROPAGATION_GRACE.as_secs()
+    );
+    tokio::time::sleep(MATTER_UNAVAILABLE_PROPAGATION_GRACE).await;
 
     // Shutdown the camera input
     let camera_for_shutdown = camera.clone();

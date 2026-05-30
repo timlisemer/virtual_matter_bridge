@@ -257,6 +257,7 @@ impl CameraInput {
         log::info!("Shutting down camera input...");
 
         self.running.store(false, Ordering::SeqCst);
+        self.readiness.mark_unavailable();
 
         // Shutdown bridge
         {

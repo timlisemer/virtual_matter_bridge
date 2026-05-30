@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use rumqttc::{AsyncClient, QoS};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 const ACTION_DEDUP_WINDOW: Duration = Duration::from_millis(500);
@@ -379,6 +379,26 @@ pub struct MqttIntegration {
     shelly_2pm_command_receivers: Vec<mpsc::Receiver<Shelly2PmCommand>>,
 }
 
+/// Running MQTT integration task.
+pub struct MqttIntegrationHandle {
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+}
+
+impl MqttIntegrationHandle {
+    pub async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+
+        if let Err(e) = self.task.await
+            && !e.is_cancelled()
+        {
+            warn!("[MQTT] Integration task failed during shutdown: {}", e);
+        }
+    }
+}
+
 impl MqttIntegration {
     /// Create a new MQTT integration with the given broker config.
     pub fn new(config: MqttConfig) -> Self {
@@ -419,14 +439,20 @@ impl MqttIntegration {
     ///
     /// Spawns a background task that connects to the broker, subscribes to
     /// device topics, and routes messages to the appropriate handlers.
-    /// Returns a JoinHandle that can be used to abort the task on shutdown.
-    pub fn start(self) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            self.run().await;
-        })
+    /// Returns a handle that can be used to shut the task down cleanly.
+    pub fn start(self) -> MqttIntegrationHandle {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            self.run(shutdown_rx).await;
+        });
+
+        MqttIntegrationHandle {
+            shutdown_tx: Some(shutdown_tx),
+            task,
+        }
     }
 
-    async fn run(mut self) {
+    async fn run(mut self, mut shutdown_rx: oneshot::Receiver<()>) {
         if self.w100_devices.is_empty() && self.shelly_2pm_devices.is_empty() {
             info!("[MQTT] No devices configured, skipping MQTT integration");
             return;
@@ -501,6 +527,10 @@ impl MqttIntegration {
                 }
                 Some(command) = shelly_command_rx.recv() => {
                     self.publish_shelly_command(&subscribe_client, command).await;
+                }
+                _ = &mut shutdown_rx => {
+                    info!("[MQTT] Shutdown requested");
+                    break;
                 }
                 else => break,
             }
@@ -594,6 +624,7 @@ mod tests {
     use super::*;
     use crate::matter::clusters::generic_switch::GenericSwitchPendingEvent;
     use crate::matter::endpoints::EndpointHandler;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn test_device() -> (
         W100IntegrationDevice,
@@ -619,6 +650,25 @@ mod tests {
             minus,
             center,
         )
+    }
+
+    #[tokio::test]
+    async fn mqtt_integration_handle_shutdown_signals_task_and_awaits_completion() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_for_task = completed.clone();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = shutdown_rx.await;
+            completed_for_task.store(true, Ordering::SeqCst);
+        });
+        let handle = MqttIntegrationHandle {
+            shutdown_tx: Some(shutdown_tx),
+            task,
+        };
+
+        handle.shutdown().await;
+
+        assert!(completed.load(Ordering::SeqCst));
     }
 
     #[test]

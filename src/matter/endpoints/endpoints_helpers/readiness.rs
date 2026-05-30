@@ -3,9 +3,10 @@ use crate::matter::endpoints::EndpointHandler;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-/// Read-only readiness view shared with Matter endpoint metadata.
+/// Readiness view shared with Matter endpoint metadata.
 pub trait SourceReadiness: Sensor + NotifiableSensor + Send + Sync {
     fn is_ready(&self) -> bool;
+    fn mark_unavailable(&self) -> bool;
 }
 
 #[derive(Debug)]
@@ -24,6 +25,10 @@ impl NotifiableSensor for AlwaysReady {
 impl SourceReadiness for AlwaysReady {
     fn is_ready(&self) -> bool {
         true
+    }
+
+    fn mark_unavailable(&self) -> bool {
+        false
     }
 }
 
@@ -56,6 +61,14 @@ impl NotifiableSensor for AnyChildReady {
 impl SourceReadiness for AnyChildReady {
     fn is_ready(&self) -> bool {
         self.children.iter().any(|child| child.is_ready())
+    }
+
+    fn mark_unavailable(&self) -> bool {
+        let mut changed = false;
+        for child in &self.children {
+            changed = child.mark_unavailable() || changed;
+        }
+        changed
     }
 }
 
@@ -129,6 +142,18 @@ impl<T: Clone + PartialEq> SourceSnapshot<T> {
     }
 }
 
+impl<T> SourceSnapshot<T> {
+    pub fn clear_source(&self) -> bool {
+        let mut guard = self.value.write();
+        let changed = guard.is_some();
+        *guard = None;
+        if changed {
+            self.changes.mark_changed();
+        }
+        changed
+    }
+}
+
 impl SourceSnapshot<()> {
     pub fn mark_ready(&self) {
         self.update_source(());
@@ -157,6 +182,10 @@ impl<T: Send + Sync + 'static> SourceReadiness for SourceSnapshot<T> {
     fn is_ready(&self) -> bool {
         SourceSnapshot::is_ready(self)
     }
+
+    fn mark_unavailable(&self) -> bool {
+        self.clear_source()
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +201,26 @@ mod tests {
         assert!(snapshot.is_ready());
         assert_eq!(snapshot.snapshot(), Some(false));
         assert_eq!(snapshot.version(), 1);
+    }
+
+    #[test]
+    fn clear_source_returns_to_pre_ready_state() {
+        let snapshot = SourceSnapshot::<bool>::new();
+
+        assert!(!snapshot.clear_source());
+        assert_eq!(snapshot.version(), 0);
+
+        snapshot.update_source(false);
+        assert!(snapshot.is_ready());
+        assert_eq!(snapshot.version(), 1);
+
+        assert!(snapshot.clear_source());
+        assert!(!snapshot.is_ready());
+        assert_eq!(snapshot.snapshot(), None);
+        assert_eq!(snapshot.version(), 2);
+
+        assert!(!snapshot.clear_source());
+        assert_eq!(snapshot.version(), 2);
     }
 
     #[test]

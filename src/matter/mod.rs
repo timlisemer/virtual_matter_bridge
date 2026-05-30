@@ -14,4 +14,6 @@ pub use stack::run_matter_stack;
 pub use endpoints::sensors;
 
 // Re-export virtual device types
-pub use virtual_device::{EndpointConfig, VirtualDevice};
+pub use virtual_device::{
+    EndpointConfig, VirtualDevice, collect_endpoint_readiness, mark_endpoint_readiness_unavailable,
+};
