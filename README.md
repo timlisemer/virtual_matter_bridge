@@ -18,7 +18,7 @@ The bridge currently exposes:
 - **Door Sensor** (Endpoint 3+): Contact sensor (bridged)
 - **Motion Sensor** (Endpoint 4+): Occupancy sensor (bridged)
 - **Power Strip** (Endpoint 5+): On/Off plug-in unit (bridged)
-- **Shelly 2PM Gen4** (Endpoint 7+): Two MQTT/zigbee2mqtt relay channels exposed as a switch and a light (bridged)
+- **Shelly 2PM Gen4 Switches** (Endpoint 7+): Two MQTT/zigbee2mqtt relay channels exposed as separate bridged Matter devices with electrical telemetry and diagnostics
 - **Video Doorbell** (Endpoint 9+): Video doorbell with camera (bridged, stub)
 - **W100 Climate Sensor** (Endpoint 10+): Temperature, humidity, and 3 button endpoints via MQTT/zigbee2mqtt (bridged)
 
@@ -42,7 +42,7 @@ Note: Endpoint numbers are dynamic based on device configuration. Video doorbell
                         │  │ • Door (BooleanState)  │  │
                         │  │ • Motion (Occupancy)   │  │
                         │  │ • Power Strip (OnOff)  │  │
-                        │  │ • Shelly 2PM (OnOff)   │  │
+                        │  │ • Shelly 2PM x2        │  │
                         │  │ • Doorbell (Camera)    │  │
                         │  │ • W100 (Sensors/Switch)│  │
                         │  └────────────────────────┘  │
@@ -60,6 +60,9 @@ Note: Endpoint numbers are dynamic based on device configuration. Video doorbell
 | TemperatureMeasurement      | `0x0402` | ✅ Implemented | Temperature sensor readings                                           |
 | RelativeHumidityMeasurement | `0x0405` | ✅ Implemented | Humidity sensor readings                                              |
 | OccupancySensing            | `0x0406` | ✅ Implemented | Occupancy/motion detection                                            |
+| ElectricalPowerMeasurement  | `0x0090` | ✅ Implemented | Shelly voltage, current, power, frequency, and power-factor readings  |
+| ElectricalEnergyMeasurement | `0x0091` | ✅ Implemented | Shelly imported and produced energy readings                          |
+| ShellyDiagnostics           | `0xFC00` | ✅ Implemented | Shelly MQTT diagnostics exposed as read-only Matter attributes        |
 | Camera AV Stream Management | `0x0551` | ✅ Stub        | Video/audio stream allocation (for future video doorbell sub-devices) |
 | WebRTC Transport Provider   | `0x0553` | ✅ Stub        | WebRTC session management (for future video doorbell sub-devices)     |
 
@@ -106,9 +109,10 @@ Home Assistant now shows entities for:
 - **Door sensor** (contact sensor, bridged)
 - **Motion sensor** (occupancy sensor, bridged)
 - **Power Strip** (on/off plug-in unit, bridged)
-- **Büro Licht & PC Schalter** (Shelly 2PM Gen4 via MQTT/zigbee2mqtt, bridged)
-  - **Tim PC Switch** (on/off switch)
-  - **Büro Light** (on/off light)
+- **Shelly 2PM Gen4 - Switch 1** (Shelly 2PM Gen4 via MQTT/zigbee2mqtt, bridged)
+  - **Büro Licht** (on/off light, electrical telemetry, diagnostics)
+- **Shelly 2PM Gen4 - Switch 2** (Shelly 2PM Gen4 via MQTT/zigbee2mqtt, bridged)
+  - **Tim-PC** (on/off switch, electrical telemetry, diagnostics)
 - **Video Doorbell** (video doorbell, bridged, stub)
 - **W100 Climate Sensor** (temperature, humidity, and 3 buttons via MQTT/zigbee2mqtt, bridged)
 

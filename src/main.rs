@@ -14,7 +14,9 @@ mod matter;
 
 use crate::config::Config;
 use crate::input::camera::CameraInput;
-use crate::input::mqtt::{MqttIntegration, Shelly2PmConfig, W100Config, shelly_2pm_channel_pair};
+use crate::input::mqtt::{
+    MqttIntegration, Shelly2PmConfig, Shelly2PmParts, W100Config, shelly_2pm_parts,
+};
 use crate::matter::clusters::{
     BridgedDeviceInfo, GenericSwitchState, HumiditySensor, TemperatureSensor,
 };
@@ -36,9 +38,44 @@ type StatePusher = Arc<dyn Fn(bool) + Send + Sync>;
 
 const W100_MATTER_DEVICE_NAME: &str = "Büro Thermometer";
 const W100_ZIGBEE2MQTT_FRIENDLY_NAME: &str = "Büro-Thermometer";
-const SHELLY_2PM_MATTER_DEVICE_NAME: &str = "Büro Licht & PC Schalter";
+const SHELLY_2PM_SWITCH_1_MATTER_DEVICE_NAME: &str = "Shelly 2PM Gen4 - Switch 1";
+const SHELLY_2PM_SWITCH_2_MATTER_DEVICE_NAME: &str = "Shelly 2PM Gen4 - Switch 2";
+const SHELLY_2PM_SWITCH_1_ENDPOINT_NAME: &str = "Büro Licht";
+const SHELLY_2PM_SWITCH_2_ENDPOINT_NAME: &str = "Tim-PC";
 const SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME: &str = "Büro Licht & PC Schalter";
 const MATTER_UNAVAILABLE_PROPAGATION_GRACE: Duration = Duration::from_secs(2);
+
+fn shelly_2pm_virtual_devices(parts: &Shelly2PmParts) -> [VirtualDevice; 2] {
+    [
+        VirtualDevice::new(SHELLY_2PM_SWITCH_1_MATTER_DEVICE_NAME)
+            .with_device_info(
+                BridgedDeviceInfo::new(SHELLY_2PM_SWITCH_1_MATTER_DEVICE_NAME)
+                    .with_vendor("Shelly")
+                    .with_product("Shelly 2PM Gen4"),
+            )
+            .with_endpoint(
+                EndpointConfig::light_switch(
+                    SHELLY_2PM_SWITCH_1_ENDPOINT_NAME,
+                    parts.l2_handler.clone(),
+                )
+                .with_electrical_power(parts.l2_power.clone())
+                .with_electrical_energy(parts.l2_energy.clone())
+                .with_shelly_diagnostics(parts.diagnostics.clone()),
+            ),
+        VirtualDevice::new(SHELLY_2PM_SWITCH_2_MATTER_DEVICE_NAME)
+            .with_device_info(
+                BridgedDeviceInfo::new(SHELLY_2PM_SWITCH_2_MATTER_DEVICE_NAME)
+                    .with_vendor("Shelly")
+                    .with_product("Shelly 2PM Gen4"),
+            )
+            .with_endpoint(
+                EndpointConfig::switch(SHELLY_2PM_SWITCH_2_ENDPOINT_NAME, parts.l1_handler.clone())
+                    .with_electrical_power(parts.l1_power.clone())
+                    .with_electrical_energy(parts.l1_energy.clone())
+                    .with_shelly_diagnostics(parts.diagnostics.clone()),
+            ),
+    ]
+}
 
 fn init_logger() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -185,9 +222,8 @@ async fn main() {
     let outlet2_handler = Arc::new(SimulatedHandler::new(false));
 
     // Shelly 2PM Gen4 two-channel relay via MQTT/zigbee2mqtt.
-    // L1/state_l1 is Tim PC Switch, L2/state_l2 is Büro Light.
-    let (shelly_l1_handler, shelly_l2_handler, shelly_command_rx) =
-        shelly_2pm_channel_pair(SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME);
+    // L1/state_l1 is Switch 2: Tim-PC, L2/state_l2 is Switch 1: Büro Licht.
+    let shelly_parts = shelly_2pm_parts(SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME);
 
     // Create W100 climate sensors (will be updated by MQTT)
     let w100_temperature = Arc::new(TemperatureSensor::new(20.0)); // Default 20°C
@@ -200,6 +236,8 @@ async fn main() {
     let doorbell_handler = Arc::new(ReadinessOnlyHandler::new(camera.read().readiness()));
 
     // Define our virtual devices using the new API
+    let [shelly_switch_1_device, shelly_switch_2_device] =
+        shelly_2pm_virtual_devices(&shelly_parts);
     let virtual_devices = vec![
         // Door sensor (parent) with contact sensor endpoint (child)
         VirtualDevice::new("Door").with_endpoint(EndpointConfig::contact_sensor(
@@ -215,21 +253,9 @@ async fn main() {
         VirtualDevice::new("Power Strip")
             .with_endpoint(EndpointConfig::switch("Outlet 1", outlet1_handler.clone()))
             .with_endpoint(EndpointConfig::switch("Outlet 2", outlet2_handler.clone())),
-        // Shelly 2PM Gen4 (parent) with two controllable channel endpoints.
-        VirtualDevice::new(SHELLY_2PM_MATTER_DEVICE_NAME)
-            .with_device_info(
-                BridgedDeviceInfo::new(SHELLY_2PM_MATTER_DEVICE_NAME)
-                    .with_vendor("Shelly")
-                    .with_product("Shelly 2PM Gen4"),
-            )
-            .with_endpoint(EndpointConfig::switch(
-                "Tim PC Switch",
-                shelly_l1_handler.clone(),
-            ))
-            .with_endpoint(EndpointConfig::light_switch(
-                "Büro Light",
-                shelly_l2_handler.clone(),
-            )),
+        // Shelly 2PM Gen4 split into one Matter bridged device per channel.
+        shelly_switch_1_device,
+        shelly_switch_2_device,
         // Video Doorbell (parent) with camera endpoint (child)
         // Note: Camera handlers are stub - actual streaming awaits Matter 1.5 controller support
         VirtualDevice::new("Video Doorbell").with_endpoint(EndpointConfig::video_doorbell_camera(
@@ -316,9 +342,7 @@ async fn main() {
         )
         .with_shelly_2pm(Shelly2PmConfig::new(
             SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME,
-            shelly_l1_handler.clone(),
-            shelly_l2_handler.clone(),
-            shelly_command_rx,
+            shelly_parts,
         ))
         .start();
 
@@ -422,5 +446,42 @@ mod tests {
             Level::Debug,
             late_ack
         ));
+    }
+
+    #[test]
+    fn shelly_virtual_devices_are_split_and_named_by_channel() {
+        let parts = shelly_2pm_parts(SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME);
+        let devices = shelly_2pm_virtual_devices(&parts);
+
+        assert_eq!(devices[0].label, SHELLY_2PM_SWITCH_1_MATTER_DEVICE_NAME);
+        assert_eq!(devices[1].label, SHELLY_2PM_SWITCH_2_MATTER_DEVICE_NAME);
+        assert_ne!(devices[0].label, SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME);
+        assert_ne!(devices[1].label, SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME);
+
+        assert_eq!(devices[0].endpoints.len(), 1);
+        assert_eq!(
+            devices[0].endpoints[0].label,
+            SHELLY_2PM_SWITCH_1_ENDPOINT_NAME
+        );
+        assert_eq!(
+            devices[0].endpoints[0].kind,
+            crate::matter::virtual_device::EndpointKind::LightSwitch
+        );
+        assert!(devices[0].endpoints[0].electrical_power.is_some());
+        assert!(devices[0].endpoints[0].electrical_energy.is_some());
+        assert!(devices[0].endpoints[0].shelly_diagnostics.is_some());
+
+        assert_eq!(devices[1].endpoints.len(), 1);
+        assert_eq!(
+            devices[1].endpoints[0].label,
+            SHELLY_2PM_SWITCH_2_ENDPOINT_NAME
+        );
+        assert_eq!(
+            devices[1].endpoints[0].kind,
+            crate::matter::virtual_device::EndpointKind::Switch
+        );
+        assert!(devices[1].endpoints[0].electrical_power.is_some());
+        assert!(devices[1].endpoints[0].electrical_energy.is_some());
+        assert!(devices[1].endpoints[0].shelly_diagnostics.is_some());
     }
 }

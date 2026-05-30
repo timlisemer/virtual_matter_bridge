@@ -4,10 +4,15 @@
 //! MQTT internals to main.rs. Supports W100 and Shelly 2PM devices.
 
 use super::client::{MqttClient, MqttMessage};
-use super::shelly_2pm::{Shelly2PmChannelHandler, Shelly2PmCommand, Shelly2PmState};
+use super::shelly_2pm::{
+    Shelly2PmChannel, Shelly2PmChannelHandler, Shelly2PmCommand, Shelly2PmParts, Shelly2PmState,
+};
 use super::w100::{W100Action, W100State};
 use crate::config::MqttConfig;
-use crate::matter::clusters::{GenericSwitchState, HumiditySensor, TemperatureSensor};
+use crate::matter::clusters::{
+    ElectricalEnergyState, ElectricalPowerState, GenericSwitchState, HumiditySensor,
+    ShellyDiagnosticsState, ShellyDiagnosticsValues, TemperatureSensor,
+};
 use log::{info, warn};
 use parking_lot::Mutex;
 use rumqttc::{AsyncClient, QoS};
@@ -67,26 +72,31 @@ impl W100Config {
 pub struct Shelly2PmConfig {
     /// Friendly name in zigbee2mqtt (e.g., "Büro Licht & PC Schalter")
     pub friendly_name: String,
-    /// L1 channel handler, exposed as the Tim PC normal Matter switch.
+    /// L1 channel handler, exposed as the Tim-PC normal Matter switch.
     pub l1_handler: Arc<Shelly2PmChannelHandler>,
-    /// L2 channel handler, exposed as the Büro Light Matter light.
+    /// L2 channel handler, exposed as the Büro Licht Matter light.
     pub l2_handler: Arc<Shelly2PmChannelHandler>,
+    pub l1_power: Arc<ElectricalPowerState>,
+    pub l1_energy: Arc<ElectricalEnergyState>,
+    pub l2_power: Arc<ElectricalPowerState>,
+    pub l2_energy: Arc<ElectricalEnergyState>,
+    pub diagnostics: Arc<ShellyDiagnosticsState>,
     /// Commands queued by the Matter endpoint handlers.
     pub command_rx: mpsc::Receiver<Shelly2PmCommand>,
 }
 
 impl Shelly2PmConfig {
-    pub fn new(
-        friendly_name: impl Into<String>,
-        l1_handler: Arc<Shelly2PmChannelHandler>,
-        l2_handler: Arc<Shelly2PmChannelHandler>,
-        command_rx: mpsc::Receiver<Shelly2PmCommand>,
-    ) -> Self {
+    pub fn new(friendly_name: impl Into<String>, parts: Shelly2PmParts) -> Self {
         Self {
             friendly_name: friendly_name.into(),
-            l1_handler,
-            l2_handler,
-            command_rx,
+            l1_handler: parts.l1_handler,
+            l2_handler: parts.l2_handler,
+            l1_power: parts.l1_power,
+            l1_energy: parts.l1_energy,
+            l2_power: parts.l2_power,
+            l2_energy: parts.l2_energy,
+            diagnostics: parts.diagnostics,
+            command_rx: parts.command_rx,
         }
     }
 }
@@ -331,6 +341,11 @@ struct Shelly2PmIntegrationDevice {
     friendly_name: String,
     l1_handler: Arc<Shelly2PmChannelHandler>,
     l2_handler: Arc<Shelly2PmChannelHandler>,
+    l1_power: Arc<ElectricalPowerState>,
+    l1_energy: Arc<ElectricalEnergyState>,
+    l2_power: Arc<ElectricalPowerState>,
+    l2_energy: Arc<ElectricalEnergyState>,
+    diagnostics: Arc<ShellyDiagnosticsState>,
 }
 
 impl Shelly2PmIntegrationDevice {
@@ -355,6 +370,20 @@ impl Shelly2PmIntegrationDevice {
                 if let Some(l2) = state.state_l2 {
                     self.l2_handler.set_from_mqtt(l2.as_bool());
                 }
+                let l1_telemetry = Shelly2PmChannel::L1.telemetry_from(&state);
+                self.l1_power.set_values(l1_telemetry.power_values());
+                self.l1_energy.set_values(l1_telemetry.energy_values());
+                let l2_telemetry = Shelly2PmChannel::L2.telemetry_from(&state);
+                self.l2_power.set_values(l2_telemetry.power_values());
+                self.l2_energy.set_values(l2_telemetry.energy_values());
+                self.diagnostics.set_values(ShellyDiagnosticsValues {
+                    dhcp_enabled: state.dhcp_enabled,
+                    ip_address: state.ip_address,
+                    linkquality: state.linkquality,
+                    wifi_config_enabled: state.wifi_config.as_ref().and_then(|wifi| wifi.enabled),
+                    wifi_config_ssid: state.wifi_config.and_then(|wifi| wifi.ssid),
+                    wifi_status: state.wifi_status,
+                });
             }
             Err(e) => {
                 warn!(
@@ -430,6 +459,11 @@ impl MqttIntegration {
             friendly_name: config.friendly_name,
             l1_handler: config.l1_handler,
             l2_handler: config.l2_handler,
+            l1_power: config.l1_power,
+            l1_energy: config.l1_energy,
+            l2_power: config.l2_power,
+            l2_energy: config.l2_energy,
+            diagnostics: config.diagnostics,
         });
         self.shelly_2pm_command_receivers.push(config.command_rx);
         self
@@ -620,7 +654,7 @@ impl MqttIntegration {
 
 #[cfg(test)]
 mod tests {
-    use super::super::shelly_2pm::shelly_2pm_channel_pair;
+    use super::super::shelly_2pm::shelly_2pm_parts;
     use super::*;
     use crate::matter::clusters::generic_switch::GenericSwitchPendingEvent;
     use crate::matter::endpoints::EndpointHandler;
@@ -941,7 +975,7 @@ mod tests {
 
     #[test]
     fn shelly_reconnect_setup_uses_umlaut_subscription_and_state_request_topics() {
-        let (l1, l2, command_rx) = shelly_2pm_channel_pair("Büro Licht & PC Schalter");
+        let shelly = shelly_2pm_parts("Büro Licht & PC Schalter");
         let integration = MqttIntegration::new(MqttConfig {
             broker_host: "127.0.0.1".to_string(),
             broker_port: 1883,
@@ -949,12 +983,7 @@ mod tests {
             username: None,
             password: None,
         })
-        .with_shelly_2pm(Shelly2PmConfig::new(
-            "Büro Licht & PC Schalter",
-            l1,
-            l2,
-            command_rx,
-        ));
+        .with_shelly_2pm(Shelly2PmConfig::new("Büro Licht & PC Schalter", shelly));
 
         assert_eq!(
             integration.subscription_topics(),
@@ -971,20 +1000,50 @@ mod tests {
 
     #[test]
     fn shelly_state_message_updates_both_channel_handlers() {
-        let (l1, l2, _command_rx) = shelly_2pm_channel_pair("Büro Licht & PC Schalter");
+        let shelly = shelly_2pm_parts("Büro Licht & PC Schalter");
         let device = Shelly2PmIntegrationDevice {
             friendly_name: "Büro Licht & PC Schalter".to_string(),
-            l1_handler: l1.clone(),
-            l2_handler: l2.clone(),
+            l1_handler: shelly.l1_handler.clone(),
+            l2_handler: shelly.l2_handler.clone(),
+            l1_power: shelly.l1_power.clone(),
+            l1_energy: shelly.l1_energy.clone(),
+            l2_power: shelly.l2_power.clone(),
+            l2_energy: shelly.l2_energy.clone(),
+            diagnostics: shelly.diagnostics.clone(),
         };
 
         assert!(device.process_message(
             "zigbee2mqtt/Büro Licht & PC Schalter",
-            r#"{"state_l1":"ON","state_l2":"OFF"}"#,
+            r#"{
+                "state_l1":"ON",
+                "state_l2":"OFF",
+                "power_l1":269,
+                "power_l2":0,
+                "voltage_l1":231.67,
+                "voltage_l2":229.76,
+                "energy_l1":215.24,
+                "energy_l2":0.12,
+                "produced_energy_l1":0,
+                "produced_energy_l2":0,
+                "linkquality":148,
+                "dhcp_enabled":true,
+                "ip_address":"10.0.0.98",
+                "wifi_config":{"enabled":false,"ssid":"TestWiFi"},
+                "wifi_status":"got ip"
+            }"#,
         ));
 
-        assert_eq!(l1.get_state(), Some(true));
-        assert_eq!(l2.get_state(), Some(false));
+        assert_eq!(shelly.l1_handler.get_state(), Some(true));
+        assert_eq!(shelly.l2_handler.get_state(), Some(false));
+        assert_eq!(shelly.l1_power.active_power_mw(), Some(269_000));
+        assert_eq!(shelly.l2_power.rms_voltage_mv(), Some(229_760));
+        assert_eq!(shelly.l2_energy.imported_energy_mwh(), Some(120_000));
+        assert_eq!(shelly.diagnostics.linkquality(), Some(148));
+        assert_eq!(shelly.diagnostics.dhcp_enabled(), Some(true));
+        assert_eq!(
+            shelly.diagnostics.ip_address().as_deref(),
+            Some("10.0.0.98")
+        );
         assert!(!device.process_message("zigbee2mqtt/other", r#"{"state_l1":"OFF"}"#,));
     }
 }

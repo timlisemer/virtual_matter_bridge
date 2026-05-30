@@ -1,7 +1,8 @@
 use super::clusters::{
-    BooleanStateHandler, BridgedDeviceInfo, BridgedHandler, GenericSwitchHandler,
-    GenericSwitchState, IcdManagementHandler, OccupancySensingHandler, RelativeHumidityHandler,
-    TemperatureMeasurementHandler,
+    BooleanStateHandler, BridgedDeviceInfo, BridgedHandler, ElectricalEnergyMeasurementHandler,
+    ElectricalPowerMeasurementHandler, GenericSwitchHandler, GenericSwitchState,
+    IcdManagementHandler, OccupancySensingHandler, RelativeHumidityHandler,
+    ShellyDiagnosticsHandler, TemperatureMeasurementHandler,
 };
 use super::device_info::DEV_INFO;
 use super::device_types::{
@@ -63,7 +64,8 @@ use std::pin::pin;
 use std::sync::{Arc, OnceLock};
 
 use super::clusters::{
-    boolean_state, generic_switch, occupancy_sensing, relative_humidity, temperature_measurement,
+    boolean_state, electrical_energy_measurement, electrical_power_measurement, generic_switch,
+    occupancy_sensing, relative_humidity, shelly_diagnostics, temperature_measurement,
 };
 use super::endpoints::{ClusterChangeQueue, ClusterNotifier, NotifiableSensor};
 use crate::config::MatterConfig;
@@ -185,6 +187,16 @@ enum DynamicHandlerEntry {
     Humidity { handler: RelativeHumidityHandler },
     /// GenericSwitch cluster handler (for buttons)
     GenericSwitch { handler: GenericSwitchHandler },
+    /// ElectricalPowerMeasurement cluster handler
+    ElectricalPower {
+        handler: ElectricalPowerMeasurementHandler,
+    },
+    /// ElectricalEnergyMeasurement cluster handler
+    ElectricalEnergy {
+        handler: ElectricalEnergyMeasurementHandler,
+    },
+    /// Shelly diagnostics cluster handler
+    ShellyDiagnostics { handler: ShellyDiagnosticsHandler },
 }
 
 /// Dynamic handler that routes requests based on (endpoint_id, cluster_id).
@@ -269,6 +281,27 @@ impl DynamicHandler {
             DynamicHandlerEntry::GenericSwitch { handler },
         );
     }
+
+    pub fn add_electrical_power(&mut self, ep: u16, handler: ElectricalPowerMeasurementHandler) {
+        self.handlers.insert(
+            (ep, electrical_power_measurement::CLUSTER_ID),
+            DynamicHandlerEntry::ElectricalPower { handler },
+        );
+    }
+
+    pub fn add_electrical_energy(&mut self, ep: u16, handler: ElectricalEnergyMeasurementHandler) {
+        self.handlers.insert(
+            (ep, electrical_energy_measurement::CLUSTER_ID),
+            DynamicHandlerEntry::ElectricalEnergy { handler },
+        );
+    }
+
+    pub fn add_shelly_diagnostics(&mut self, ep: u16, handler: ShellyDiagnosticsHandler) {
+        self.handlers.insert(
+            (ep, shelly_diagnostics::CLUSTER_ID),
+            DynamicHandlerEntry::ShellyDiagnostics { handler },
+        );
+    }
 }
 
 impl Default for DynamicHandler {
@@ -308,6 +341,9 @@ impl Handler for DynamicHandler {
                 DynamicHandlerEntry::Temperature { handler } => handler.read(ctx, reply),
                 DynamicHandlerEntry::Humidity { handler } => handler.read(ctx, reply),
                 DynamicHandlerEntry::GenericSwitch { handler } => handler.read(ctx, reply),
+                DynamicHandlerEntry::ElectricalPower { handler } => handler.read(ctx, reply),
+                DynamicHandlerEntry::ElectricalEnergy { handler } => handler.read(ctx, reply),
+                DynamicHandlerEntry::ShellyDiagnostics { handler } => handler.read(ctx, reply),
             }
         } else {
             log::debug!(
@@ -378,6 +414,11 @@ impl Handler for DynamicHandler {
                     DynamicHandlerEntry::Temperature { handler } => handler.bump_dataver(&ctx),
                     DynamicHandlerEntry::Humidity { handler } => handler.bump_dataver(&ctx),
                     DynamicHandlerEntry::GenericSwitch { handler } => handler.bump_dataver(&ctx),
+                    DynamicHandlerEntry::ElectricalPower { handler } => handler.bump_dataver(&ctx),
+                    DynamicHandlerEntry::ElectricalEnergy { handler } => handler.bump_dataver(&ctx),
+                    DynamicHandlerEntry::ShellyDiagnostics { handler } => {
+                        handler.bump_dataver(&ctx)
+                    }
                 }
             }
         }
@@ -696,6 +737,27 @@ fn leak<T>(value: T) -> &'static T {
     Box::leak(Box::new(value))
 }
 
+fn switch_endpoint_clusters(
+    ep_config: &super::virtual_device::EndpointConfig,
+    onoff_cluster: Cluster<'static>,
+) -> &'static [Cluster<'static>] {
+    let mut clusters = vec![
+        desc::DescHandler::CLUSTER,
+        BridgedHandler::CLUSTER,
+        onoff_cluster,
+    ];
+    if ep_config.electrical_power.is_some() {
+        clusters.push(ElectricalPowerMeasurementHandler::CLUSTER);
+    }
+    if ep_config.electrical_energy.is_some() {
+        clusters.push(ElectricalEnergyMeasurementHandler::CLUSTER);
+    }
+    if ep_config.shelly_diagnostics.is_some() {
+        clusters.push(ShellyDiagnosticsHandler::CLUSTER);
+    }
+    leak_slice(&clusters)
+}
+
 /// Mapping of allocated endpoint IDs for a virtual device.
 #[derive(Debug, Clone)]
 pub struct EndpointMapping {
@@ -775,19 +837,11 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
                     ),
                     EndpointKind::Switch => (
                         leak_slice(&[DEV_TYPE_ON_OFF_PLUG_IN_UNIT]),
-                        clusters!(
-                            desc::DescHandler::CLUSTER,
-                            BridgedHandler::CLUSTER,
-                            Switch::CLUSTER
-                        ),
+                        switch_endpoint_clusters(ep_config, Switch::CLUSTER),
                     ),
                     EndpointKind::LightSwitch => (
                         leak_slice(&[DEV_TYPE_ON_OFF_LIGHT]),
-                        clusters!(
-                            desc::DescHandler::CLUSTER,
-                            BridgedHandler::CLUSTER,
-                            LightSwitch::CLUSTER
-                        ),
+                        switch_endpoint_clusters(ep_config, LightSwitch::CLUSTER),
                     ),
                     EndpointKind::VideoDoorbellCamera => (
                         leak_slice(&[DEV_TYPE_VIDEO_DOORBELL]),
@@ -1120,6 +1174,51 @@ pub async fn run_matter_stack(
                         Switch::CLUSTER.id,
                     );
                     dynamic_handler.add_onoff(child_id, Dataver::new_rand(&mut rand), bridge);
+                    if let Some(state) = &ep_config.electrical_power {
+                        register_cluster_notifier(
+                            state.as_ref(),
+                            sensor_notify_ref,
+                            child_id,
+                            electrical_power_measurement::CLUSTER_ID,
+                        );
+                        dynamic_handler.add_electrical_power(
+                            child_id,
+                            ElectricalPowerMeasurementHandler::new(
+                                Dataver::new_rand(&mut rand),
+                                state.clone(),
+                            ),
+                        );
+                    }
+                    if let Some(state) = &ep_config.electrical_energy {
+                        register_cluster_notifier(
+                            state.as_ref(),
+                            sensor_notify_ref,
+                            child_id,
+                            electrical_energy_measurement::CLUSTER_ID,
+                        );
+                        dynamic_handler.add_electrical_energy(
+                            child_id,
+                            ElectricalEnergyMeasurementHandler::new(
+                                Dataver::new_rand(&mut rand),
+                                state.clone(),
+                            ),
+                        );
+                    }
+                    if let Some(state) = &ep_config.shelly_diagnostics {
+                        register_cluster_notifier(
+                            state.as_ref(),
+                            sensor_notify_ref,
+                            child_id,
+                            shelly_diagnostics::CLUSTER_ID,
+                        );
+                        dynamic_handler.add_shelly_diagnostics(
+                            child_id,
+                            ShellyDiagnosticsHandler::new(
+                                Dataver::new_rand(&mut rand),
+                                state.clone(),
+                            ),
+                        );
+                    }
                 }
                 EndpointKind::VideoDoorbellCamera => {
                     // TODO: Camera handlers are async and need different handling than DynamicHandler.
@@ -1497,6 +1596,43 @@ mod tests {
         let child_cluster_ids: Vec<u32> = child.clusters.iter().map(|cluster| cluster.id).collect();
         assert!(child_cluster_ids.contains(&Switch::CLUSTER.id));
         assert!(child_cluster_ids.contains(&BridgedHandler::CLUSTER.id));
+    }
+
+    #[test]
+    fn switch_endpoint_advertises_optional_electrical_and_diagnostic_clusters() {
+        let handler = Arc::new(TestHandler::new());
+        let power = Arc::new(crate::matter::clusters::ElectricalPowerState::new());
+        let energy = Arc::new(crate::matter::clusters::ElectricalEnergyState::new());
+        let diagnostics = Arc::new(crate::matter::clusters::ShellyDiagnosticsState::new());
+        let devices = vec![
+            VirtualDevice::new("Shelly 2PM Gen4 - Switch 1").with_endpoint(
+                EndpointConfig::light_switch("Büro Licht", handler)
+                    .with_electrical_power(power)
+                    .with_electrical_energy(energy)
+                    .with_shelly_diagnostics(diagnostics),
+            ),
+        ];
+
+        let built = build_node(&devices);
+        let child_id = built.mappings[0].child_ids[0];
+        let child = built
+            .node
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == child_id)
+            .unwrap();
+        let child_cluster_ids: Vec<u32> = child.clusters.iter().map(|cluster| cluster.id).collect();
+        let child_device_type_ids: Vec<u16> = child
+            .device_types
+            .iter()
+            .map(|device_type| device_type.dtype)
+            .collect();
+
+        assert!(child_device_type_ids.contains(&DEV_TYPE_ON_OFF_LIGHT.dtype));
+        assert!(child_cluster_ids.contains(&LightSwitch::CLUSTER.id));
+        assert!(child_cluster_ids.contains(&electrical_power_measurement::CLUSTER_ID));
+        assert!(child_cluster_ids.contains(&electrical_energy_measurement::CLUSTER_ID));
+        assert!(child_cluster_ids.contains(&shelly_diagnostics::CLUSTER_ID));
     }
 
     #[test]

@@ -1,60 +1,35 @@
 # Shelly 2PM Gen4 Integration via MQTT
 
-This document describes the integration of the Shelly 2PM Gen4 device `Büro Licht & PC Schalter` into the Virtual Matter Bridge via Zigbee2MQTT and MQTT.
+This document describes the integration of the Shelly 2PM Gen4 Zigbee2MQTT device `Büro Licht & PC Schalter` into the Virtual Matter Bridge.
 
 **Instead of**: Home Assistant <- MQTT <- Zigbee2MQTT <- Shelly 2PM
 
 **We want**: Home Assistant <- Matter <- **Virtual Matter Bridge** <- MQTT <- Zigbee2MQTT <- Shelly 2PM
 
-The bridge subscribes to the Shelly Zigbee2MQTT state topic and exposes the two controllable relay channels as two Matter child endpoints under one bridged device.
+The bridge subscribes to one Zigbee2MQTT Shelly state topic and exposes each relay channel as its own Matter bridged device.
 
-## Device: Shelly 2PM Gen4
+## Device Mapping
 
-Observed device:
-
-- Matter parent device: `Büro Licht & PC Schalter`
-- Zigbee2MQTT friendly name: `Büro Licht & PC Schalter`
-- L1 / `state_l1`: `Tim PC Switch`
-- L2 / `state_l2`: `Büro Light`
-
-Matter endpoint mapping:
-
-| Shelly Channel | Zigbee2MQTT Key | Matter Endpoint Label | Matter Type |
-| --- | --- | --- | --- |
-| L1 | `state_l1` | `Tim PC Switch` | Normal switch / On-Off Plug-in Unit |
-| L2 | `state_l2` | `Büro Light` | Light / On-Off Light |
-
-L1 is intentionally exposed with `EndpointConfig::switch`, so controllers should treat it as a normal switch rather than as a light. L2 is intentionally exposed with `EndpointConfig::light_switch`, so controllers should treat it as a light.
-
-## MQTT Interface
-
-State topic:
+The Zigbee2MQTT friendly name and physical MQTT command topic remain unchanged:
 
 ```text
 zigbee2mqtt/Büro Licht & PC Schalter
-```
-
-Set topic:
-
-```text
 zigbee2mqtt/Büro Licht & PC Schalter/set
-```
-
-Get topic:
-
-```text
 zigbee2mqtt/Büro Licht & PC Schalter/get
 ```
 
-On MQTT connection and reconnection, the bridge subscribes to the state topic and requests current state with:
+Matter endpoint mapping:
 
-```json
-{"state":""}
-```
+| Matter Device | Matter Endpoint | Matter Type | MQTT Channel |
+| --- | --- | --- | --- |
+| `Shelly 2PM Gen4 - Switch 1` | `Büro Licht` | Light / On-Off Light | L2 / `state_l2` |
+| `Shelly 2PM Gen4 - Switch 2` | `Tim-PC` | Normal switch / On-Off Plug-in Unit | L1 / `state_l1` |
 
-## Observed State Payload
+The Matter device names are split for controller display. MQTT command routing still follows the physical channel mapping already used by the bridge.
 
-Retained state observed from the MQTT broker:
+## MQTT State Payload
+
+The bridge parses the full retained/live Shelly payload shape used by Zigbee2MQTT:
 
 ```json
 {
@@ -83,59 +58,54 @@ Retained state observed from the MQTT broker:
   "voltage_l2": 229.76,
   "wifi_config": {
     "enabled": false,
-    "ssid": "BND_Observavations_Van_3"
+    "ssid": "<redacted>"
   },
   "wifi_status": "got ip"
 }
 ```
 
-The bridge currently consumes only:
+## Matter Telemetry
 
-- `state_l1`
-- `state_l2`
+Each Shelly switch endpoint also advertises:
 
-Power, current, voltage, energy, Wi-Fi status, and linkquality are documented here but are not exposed to Matter in the first implementation.
+| MQTT Data | Matter Representation |
+| --- | --- |
+| `power_l*`, `power_apparent_l*`, `power_reactive_l*`, `voltage_l*`, `current_l*`, `ac_frequency_l*`, `power_factor_l*` | Electrical Power Measurement cluster `0x0090` |
+| `energy_l*`, `produced_energy_l*` | Electrical Energy Measurement cluster `0x0091` |
+| `dhcp_enabled`, `ip_address`, `linkquality`, `wifi_config.enabled`, `wifi_config.ssid`, `wifi_status` | Shelly diagnostics cluster `0xFC00` |
+
+Diagnostics are read-only. The bridge does not publish MQTT writes for `wifi_config`.
 
 ## Command Payloads
 
-Matter commands are translated to Zigbee2MQTT set payloads.
+Matter commands are translated to Zigbee2MQTT set payloads. Each command targets exactly one physical channel.
 
-Turn L1 / Tim PC Switch on:
+Turn `Tim-PC` / L1 on or off:
 
 ```json
 {"state_l1":"ON"}
-```
-
-Turn L1 / Tim PC Switch off:
-
-```json
 {"state_l1":"OFF"}
 ```
 
-Turn L2 / Büro Light on:
+Turn `Büro Licht` / L2 on or off:
 
 ```json
 {"state_l2":"ON"}
-```
-
-Turn L2 / Büro Light off:
-
-```json
 {"state_l2":"OFF"}
 ```
-
-Each command payload targets exactly one channel.
 
 ## Data Flow
 
 ```text
 Zigbee2MQTT state topic
 zigbee2mqtt/Büro Licht & PC Schalter
-payload has state_l1 and state_l2
+payload has state_l1, state_l2, telemetry, diagnostics
 |
-+--> state_l1 --> Tim PC Switch shared state --> Matter normal switch
++--> L1/state_l1 + L1 telemetry --> Shelly 2PM Gen4 - Switch 2 / Tim-PC
 |
-+--> state_l2 --> Büro Light shared state ----> Matter light
++--> L2/state_l2 + L2 telemetry --> Shelly 2PM Gen4 - Switch 1 / Büro Licht
+|
++--> shared diagnostics ---------> both Shelly Matter devices
 ```
 
 Matter command path:
@@ -147,14 +117,14 @@ v
 Shelly channel EndpointHandler
 |
 v
-Local state update + Matter pusher notification + queued MQTT command
+Local state update + queued MQTT command
 |
 v
 MqttIntegration command publisher
 |
-+--> l1 publishes {"state_l1":"ON"|"OFF"}
++--> Tim-PC publishes {"state_l1":"ON"|"OFF"}
 |
-+--> l2 publishes {"state_l2":"ON"|"OFF"}
++--> Büro Licht publishes {"state_l2":"ON"|"OFF"}
 |
 v
 zigbee2mqtt/Büro Licht & PC Schalter/set
@@ -174,42 +144,24 @@ Monitor live Shelly state:
 nix-shell -p mosquitto jq --run "mosquitto_sub -h 10.0.0.2 -t 'zigbee2mqtt/Büro Licht & PC Schalter' | jq ."
 ```
 
-Request current state:
-
-```bash
-nix-shell -p mosquitto --run "mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Büro Licht & PC Schalter/get' -m '{\"state\":\"\"}'"
-```
-
-Manually command L1 / Tim PC Switch:
-
-```bash
-nix-shell -p mosquitto --run "mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Büro Licht & PC Schalter/set' -m '{\"state_l1\":\"ON\"}'"
-nix-shell -p mosquitto --run "mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Büro Licht & PC Schalter/set' -m '{\"state_l1\":\"OFF\"}'"
-```
-
-Manually command L2 / Büro Light:
-
-```bash
-nix-shell -p mosquitto --run "mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Büro Licht & PC Schalter/set' -m '{\"state_l2\":\"ON\"}'"
-nix-shell -p mosquitto --run "mosquitto_pub -h 10.0.0.2 -t 'zigbee2mqtt/Büro Licht & PC Schalter/set' -m '{\"state_l2\":\"OFF\"}'"
-```
-
 ## Matter Verification
 
-After starting the bridge and refreshing or pairing it in Home Assistant:
+After starting the bridge and refreshing or re-pairing it in Home Assistant:
 
-1. Confirm `Büro Licht & PC Schalter` appears as one bridged device.
-2. Confirm `Tim PC Switch` appears as a normal switch, not as a light.
-3. Confirm `Büro Light` appears as a light.
-4. Toggle `Tim PC Switch` from Matter/Home Assistant and verify `state_l1` changes on MQTT.
-5. Toggle `Büro Light` from Matter/Home Assistant and verify `state_l2` changes on MQTT.
-6. Toggle either channel outside Matter and confirm Matter/Home Assistant reflects the updated state.
+1. Confirm `Büro Licht & PC Schalter` no longer appears as a Shelly bridged Matter device.
+2. Confirm `Shelly 2PM Gen4 - Switch 1` appears with light endpoint `Büro Licht`.
+3. Confirm `Shelly 2PM Gen4 - Switch 2` appears with switch endpoint `Tim-PC`.
+4. Toggle `Tim-PC` from Matter/Home Assistant and verify `state_l1` changes on MQTT.
+5. Toggle `Büro Licht` from Matter/Home Assistant and verify `state_l2` changes on MQTT.
+6. Confirm each Matter device exposes electrical telemetry, and confirm shared diagnostics are visible or inspectable through cluster `0xFC00`.
 
 ## Implementation Files
 
 | File | Purpose |
 | --- | --- |
-| `src/input/mqtt/shelly_2pm.rs` | Shelly state parsing, channel handlers, and command payload generation |
-| `src/input/mqtt/integration.rs` | MQTT subscription, state routing, initial state request, and command publishing |
+| `src/input/mqtt/shelly_2pm.rs` | Shelly state parsing, channel handlers, telemetry extraction, and command payload generation |
+| `src/input/mqtt/integration.rs` | MQTT subscription, state routing, telemetry/diagnostic updates, initial state request, and command publishing |
+| `src/matter/clusters/electrical_power_measurement.rs` | Electrical Power Measurement cluster |
+| `src/matter/clusters/electrical_energy_measurement.rs` | Electrical Energy Measurement cluster |
+| `src/matter/clusters/shelly_diagnostics.rs` | Shelly diagnostics cluster |
 | `src/main.rs` | Shelly Matter device registration and endpoint typing |
-

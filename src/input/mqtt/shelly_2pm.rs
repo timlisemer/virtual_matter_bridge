@@ -3,6 +3,10 @@
 //! Parses zigbee2mqtt state for a two-channel Shelly relay and provides
 //! Matter `EndpointHandler` implementations for each controllable channel.
 
+use crate::matter::clusters::{
+    ElectricalEnergyState, ElectricalEnergyValues, ElectricalPowerState, ElectricalPowerValues,
+    ShellyDiagnosticsState,
+};
 use crate::matter::endpoints::EndpointHandler;
 use crate::matter::endpoints::{SourceReadiness, SourceSnapshot};
 use log::{info, warn};
@@ -19,15 +23,35 @@ pub struct Shelly2PmState {
     pub state_l1: Option<Shelly2PmSwitchState>,
     pub state_l2: Option<Shelly2PmSwitchState>,
     pub linkquality: Option<u16>,
+    pub ac_frequency_l1: Option<f64>,
+    pub ac_frequency_l2: Option<f64>,
     pub power_l1: Option<f64>,
     pub power_l2: Option<f64>,
+    pub power_apparent_l1: Option<f64>,
+    pub power_apparent_l2: Option<f64>,
+    pub power_factor_l1: Option<f64>,
+    pub power_factor_l2: Option<f64>,
+    pub power_reactive_l1: Option<f64>,
+    pub power_reactive_l2: Option<f64>,
     pub current_l1: Option<f64>,
     pub current_l2: Option<f64>,
     pub voltage_l1: Option<f64>,
     pub voltage_l2: Option<f64>,
     pub energy_l1: Option<f64>,
     pub energy_l2: Option<f64>,
+    pub produced_energy_l1: Option<f64>,
+    pub produced_energy_l2: Option<f64>,
+    pub dhcp_enabled: Option<bool>,
+    pub ip_address: Option<String>,
+    pub wifi_config: Option<Shelly2PmWifiConfig>,
     pub wifi_status: Option<String>,
+}
+
+/// Nested Zigbee2MQTT Wi-Fi configuration payload.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct Shelly2PmWifiConfig {
+    pub enabled: Option<bool>,
+    pub ssid: Option<String>,
 }
 
 /// Zigbee2MQTT ON/OFF value.
@@ -69,6 +93,72 @@ impl Shelly2PmChannel {
             Self::L2 => "L2",
         }
     }
+
+    pub fn telemetry_from(self, state: &Shelly2PmState) -> Shelly2PmChannelTelemetry {
+        match self {
+            Self::L1 => Shelly2PmChannelTelemetry {
+                ac_frequency: state.ac_frequency_l1,
+                current: state.current_l1,
+                energy: state.energy_l1,
+                power: state.power_l1,
+                power_apparent: state.power_apparent_l1,
+                power_factor: state.power_factor_l1,
+                power_reactive: state.power_reactive_l1,
+                produced_energy: state.produced_energy_l1,
+                voltage: state.voltage_l1,
+            },
+            Self::L2 => Shelly2PmChannelTelemetry {
+                ac_frequency: state.ac_frequency_l2,
+                current: state.current_l2,
+                energy: state.energy_l2,
+                power: state.power_l2,
+                power_apparent: state.power_apparent_l2,
+                power_factor: state.power_factor_l2,
+                power_reactive: state.power_reactive_l2,
+                produced_energy: state.produced_energy_l2,
+                voltage: state.voltage_l2,
+            },
+        }
+    }
+}
+
+/// Per-channel electrical telemetry parsed from the Shelly state payload.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Shelly2PmChannelTelemetry {
+    pub ac_frequency: Option<f64>,
+    pub current: Option<f64>,
+    pub energy: Option<f64>,
+    pub power: Option<f64>,
+    pub power_apparent: Option<f64>,
+    pub power_factor: Option<f64>,
+    pub power_reactive: Option<f64>,
+    pub produced_energy: Option<f64>,
+    pub voltage: Option<f64>,
+}
+
+impl Shelly2PmChannelTelemetry {
+    pub fn power_values(self) -> ElectricalPowerValues {
+        ElectricalPowerValues {
+            active_power_mw: scale(self.power, 1_000.0),
+            reactive_power_mvar: scale(self.power_reactive, 1_000.0),
+            apparent_power_mva: scale(self.power_apparent, 1_000.0),
+            rms_voltage_mv: scale(self.voltage, 1_000.0),
+            rms_current_ma: scale(self.current, 1_000.0),
+            frequency_mhz: scale(self.ac_frequency, 1_000.0),
+            power_factor_centipercent: scale(self.power_factor, 10_000.0),
+        }
+    }
+
+    pub fn energy_values(self) -> ElectricalEnergyValues {
+        ElectricalEnergyValues {
+            imported_energy_mwh: scale(self.energy, 1_000_000.0),
+            exported_energy_mwh: scale(self.produced_energy, 1_000_000.0),
+        }
+    }
+}
+
+fn scale(value: Option<f64>, factor: f64) -> Option<i64> {
+    value.map(|value| (value * factor).round() as i64)
 }
 
 /// MQTT command emitted by a Matter endpoint command.
@@ -77,6 +167,18 @@ pub struct Shelly2PmCommand {
     pub friendly_name: String,
     pub channel: Shelly2PmChannel,
     pub state: Shelly2PmSwitchState,
+}
+
+/// Matter-facing state objects for the Shelly 2PM MQTT device.
+pub struct Shelly2PmParts {
+    pub l1_handler: Arc<Shelly2PmChannelHandler>,
+    pub l2_handler: Arc<Shelly2PmChannelHandler>,
+    pub l1_power: Arc<ElectricalPowerState>,
+    pub l1_energy: Arc<ElectricalEnergyState>,
+    pub l2_power: Arc<ElectricalPowerState>,
+    pub l2_energy: Arc<ElectricalEnergyState>,
+    pub diagnostics: Arc<ShellyDiagnosticsState>,
+    pub command_rx: mpsc::Receiver<Shelly2PmCommand>,
 }
 
 impl Shelly2PmCommand {
@@ -199,14 +301,8 @@ impl EndpointHandler for Shelly2PmChannelHandler {
     }
 }
 
-/// Create both channel handlers and the command receiver consumed by MQTT.
-pub fn shelly_2pm_channel_pair(
-    friendly_name: &str,
-) -> (
-    Arc<Shelly2PmChannelHandler>,
-    Arc<Shelly2PmChannelHandler>,
-    mpsc::Receiver<Shelly2PmCommand>,
-) {
+/// Create all Shelly channel handlers, measurement states, and the MQTT command receiver.
+pub fn shelly_2pm_parts(friendly_name: &str) -> Shelly2PmParts {
     let (command_tx, command_rx) = mpsc::channel(32);
     let l1 = Arc::new(Shelly2PmChannelHandler::new(
         friendly_name,
@@ -221,7 +317,16 @@ pub fn shelly_2pm_channel_pair(
         command_tx,
     ));
 
-    (l1, l2, command_rx)
+    Shelly2PmParts {
+        l1_handler: l1,
+        l2_handler: l2,
+        l1_power: Arc::new(ElectricalPowerState::new()),
+        l1_energy: Arc::new(ElectricalEnergyState::new()),
+        l2_power: Arc::new(ElectricalPowerState::new()),
+        l2_energy: Arc::new(ElectricalEnergyState::new()),
+        diagnostics: Arc::new(ShellyDiagnosticsState::new()),
+        command_rx,
+    }
 }
 
 #[cfg(test)]
@@ -239,12 +344,24 @@ mod tests {
       "energy_l2":0.12,
       "ip_address":"10.0.0.98",
       "linkquality":148,
+      "power_apparent_l1":272,
+      "power_apparent_l2":0,
+      "power_factor_l1":0.01,
+      "power_factor_l2":0,
       "power_l1":269,
       "power_l2":0,
+      "power_reactive_l1":0,
+      "power_reactive_l2":0,
+      "produced_energy_l1":0,
+      "produced_energy_l2":0,
       "state_l1":"ON",
       "state_l2":"OFF",
       "voltage_l1":231.67,
       "voltage_l2":229.76,
+      "wifi_config": {
+        "enabled": false,
+        "ssid": "TestWiFi"
+      },
       "wifi_status":"got ip"
     }"#;
 
@@ -255,9 +372,43 @@ mod tests {
         assert_eq!(state.state_l1, Some(Shelly2PmSwitchState::On));
         assert_eq!(state.state_l2, Some(Shelly2PmSwitchState::Off));
         assert_eq!(state.linkquality, Some(148));
+        assert_eq!(state.ac_frequency_l1, Some(49.99));
         assert_eq!(state.power_l1, Some(269.0));
+        assert_eq!(state.power_apparent_l1, Some(272.0));
+        assert_eq!(state.power_factor_l1, Some(0.01));
+        assert_eq!(state.power_reactive_l1, Some(0.0));
+        assert_eq!(state.produced_energy_l2, Some(0.0));
         assert_eq!(state.voltage_l2, Some(229.76));
+        assert_eq!(state.dhcp_enabled, Some(true));
+        assert_eq!(state.ip_address.as_deref(), Some("10.0.0.98"));
+        assert_eq!(
+            state.wifi_config.as_ref().and_then(|wifi| wifi.enabled),
+            Some(false)
+        );
+        assert_eq!(
+            state
+                .wifi_config
+                .as_ref()
+                .and_then(|wifi| wifi.ssid.as_deref()),
+            Some("TestWiFi")
+        );
         assert_eq!(state.wifi_status.as_deref(), Some("got ip"));
+    }
+
+    #[test]
+    fn channel_telemetry_selects_and_scales_l1_and_l2_fields() {
+        let state: Shelly2PmState = serde_json::from_str(RETAINED_STATE).unwrap();
+
+        let l1 = Shelly2PmChannel::L1.telemetry_from(&state);
+        let l2 = Shelly2PmChannel::L2.telemetry_from(&state);
+
+        assert_eq!(l1.power, Some(269.0));
+        assert_eq!(l2.energy, Some(0.12));
+        assert_eq!(l1.power_values().active_power_mw, Some(269_000));
+        assert_eq!(l1.power_values().rms_voltage_mv, Some(231_670));
+        assert_eq!(l1.power_values().frequency_mhz, Some(49_990));
+        assert_eq!(l1.power_values().power_factor_centipercent, Some(100));
+        assert_eq!(l2.energy_values().imported_energy_mwh, Some(120_000));
     }
 
     #[test]

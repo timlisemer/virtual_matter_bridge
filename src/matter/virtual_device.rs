@@ -3,13 +3,16 @@
 //! A Virtual Device represents a parent endpoint with one or more child Endpoints.
 //! This module provides the configuration types needed to define devices at startup.
 
-use super::clusters::{BridgedDeviceInfo, GenericSwitchState, HumiditySensor, TemperatureSensor};
+use super::clusters::{
+    BridgedDeviceInfo, ElectricalEnergyState, ElectricalPowerState, GenericSwitchState,
+    HumiditySensor, ShellyDiagnosticsState, TemperatureSensor,
+};
 use super::endpoints::EndpointHandler;
 use super::endpoints::endpoints_helpers::{ReadinessOnlyHandler, SourceReadiness};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
-const MATTER_TOPOLOGY_MODEL_VERSION: u64 = 2;
+const MATTER_TOPOLOGY_MODEL_VERSION: u64 = 3;
 
 /// Type of endpoint (determines which cluster handler to use).
 ///
@@ -51,6 +54,12 @@ pub struct EndpointConfig {
     pub humidity_sensor: Option<Arc<HumiditySensor>>,
     /// Optional generic switch state (for GenericSwitch endpoints)
     pub generic_switch_state: Option<Arc<GenericSwitchState>>,
+    /// Optional electrical power telemetry attached to switch/light endpoints
+    pub electrical_power: Option<Arc<ElectricalPowerState>>,
+    /// Optional electrical energy telemetry attached to switch/light endpoints
+    pub electrical_energy: Option<Arc<ElectricalEnergyState>>,
+    /// Optional Shelly diagnostics attached to switch/light endpoints
+    pub shelly_diagnostics: Option<Arc<ShellyDiagnosticsState>>,
 }
 
 impl EndpointConfig {
@@ -75,74 +84,57 @@ impl EndpointConfig {
         }
     }
 
-    /// Create a contact sensor endpoint (BooleanState cluster).
-    ///
-    /// Used for door/window sensors that report open/closed state.
-    pub fn contact_sensor(label: &'static str, handler: Arc<dyn EndpointHandler>) -> Self {
+    fn without_optional_telemetry(
+        label: &'static str,
+        kind: EndpointKind,
+        handler: Arc<dyn EndpointHandler>,
+    ) -> Self {
         Self {
             label,
-            kind: EndpointKind::ContactSensor,
+            kind,
             handler,
             temperature_sensor: None,
             humidity_sensor: None,
             generic_switch_state: None,
+            electrical_power: None,
+            electrical_energy: None,
+            shelly_diagnostics: None,
         }
+    }
+
+    /// Create a contact sensor endpoint (BooleanState cluster).
+    ///
+    /// Used for door/window sensors that report open/closed state.
+    pub fn contact_sensor(label: &'static str, handler: Arc<dyn EndpointHandler>) -> Self {
+        Self::without_optional_telemetry(label, EndpointKind::ContactSensor, handler)
     }
 
     /// Create an occupancy sensor endpoint (OccupancySensing cluster).
     ///
     /// Used for motion/presence sensors.
     pub fn occupancy_sensor(label: &'static str, handler: Arc<dyn EndpointHandler>) -> Self {
-        Self {
-            label,
-            kind: EndpointKind::OccupancySensor,
-            handler,
-            temperature_sensor: None,
-            humidity_sensor: None,
-            generic_switch_state: None,
-        }
+        Self::without_optional_telemetry(label, EndpointKind::OccupancySensor, handler)
     }
 
     /// Create a switch endpoint (OnOff cluster, plug-in unit appearance).
     ///
     /// Used for power outlets, relays, or generic switches.
     pub fn switch(label: &'static str, handler: Arc<dyn EndpointHandler>) -> Self {
-        Self {
-            label,
-            kind: EndpointKind::Switch,
-            handler,
-            temperature_sensor: None,
-            humidity_sensor: None,
-            generic_switch_state: None,
-        }
+        Self::without_optional_telemetry(label, EndpointKind::Switch, handler)
     }
 
     /// Create a light switch endpoint (OnOff cluster, light appearance).
     ///
     /// Used for lights - appears as a light in controllers.
     pub fn light_switch(label: &'static str, handler: Arc<dyn EndpointHandler>) -> Self {
-        Self {
-            label,
-            kind: EndpointKind::LightSwitch,
-            handler,
-            temperature_sensor: None,
-            humidity_sensor: None,
-            generic_switch_state: None,
-        }
+        Self::without_optional_telemetry(label, EndpointKind::LightSwitch, handler)
     }
 
     /// Create a video doorbell camera endpoint (CameraAvStreamMgmt + WebRtcTransportProvider clusters).
     ///
     /// Used for video doorbells and cameras with streaming capability.
     pub fn video_doorbell_camera(label: &'static str, handler: Arc<dyn EndpointHandler>) -> Self {
-        Self {
-            label,
-            kind: EndpointKind::VideoDoorbellCamera,
-            handler,
-            temperature_sensor: None,
-            humidity_sensor: None,
-            generic_switch_state: None,
-        }
+        Self::without_optional_telemetry(label, EndpointKind::VideoDoorbellCamera, handler)
     }
 
     /// Create a temperature sensor endpoint (TemperatureMeasurement cluster).
@@ -158,6 +150,9 @@ impl EndpointConfig {
             temperature_sensor: Some(sensor),
             humidity_sensor: None,
             generic_switch_state: None,
+            electrical_power: None,
+            electrical_energy: None,
+            shelly_diagnostics: None,
         }
     }
 
@@ -174,6 +169,9 @@ impl EndpointConfig {
             temperature_sensor: None,
             humidity_sensor: Some(sensor),
             generic_switch_state: None,
+            electrical_power: None,
+            electrical_energy: None,
+            shelly_diagnostics: None,
         }
     }
 
@@ -190,7 +188,25 @@ impl EndpointConfig {
             temperature_sensor: None,
             humidity_sensor: None,
             generic_switch_state: Some(state),
+            electrical_power: None,
+            electrical_energy: None,
+            shelly_diagnostics: None,
         }
+    }
+
+    pub fn with_electrical_power(mut self, state: Arc<ElectricalPowerState>) -> Self {
+        self.electrical_power = Some(state);
+        self
+    }
+
+    pub fn with_electrical_energy(mut self, state: Arc<ElectricalEnergyState>) -> Self {
+        self.electrical_energy = Some(state);
+        self
+    }
+
+    pub fn with_shelly_diagnostics(mut self, state: Arc<ShellyDiagnosticsState>) -> Self {
+        self.shelly_diagnostics = Some(state);
+        self
     }
 }
 
@@ -267,6 +283,9 @@ impl VirtualDevice {
         for endpoint in &self.endpoints {
             endpoint.kind.hash(&mut hasher);
             endpoint.label.hash(&mut hasher);
+            endpoint.electrical_power.is_some().hash(&mut hasher);
+            endpoint.electrical_energy.is_some().hash(&mut hasher);
+            endpoint.shelly_diagnostics.is_some().hash(&mut hasher);
         }
         hasher.finish()
     }
