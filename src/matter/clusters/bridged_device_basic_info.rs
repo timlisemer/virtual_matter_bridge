@@ -3,7 +3,7 @@
 //! Provides device identification and endpoint names for Matter bridges.
 //! Controllers like Home Assistant read these attributes to display bridged device info.
 
-use super::sync_dataver_with_sensor;
+use crate::matter::clusters::versioned_state::sync_dataver_with_sensor;
 use crate::matter::endpoints::{AlwaysReady, SourceReadiness};
 use rs_matter::dm::{
     Access, Attribute, Cluster, Dataver, Handler, MatchContext, NonBlockingHandler, ReadContext,

@@ -10,6 +10,49 @@ use super::endpoints::handler::EndpointHandler;
 use rs_matter::error::{Error, ErrorCode};
 use std::sync::Arc;
 
+struct BridgeCore {
+    handler: Arc<dyn EndpointHandler>,
+    changes: EndpointChangeTracker,
+}
+
+impl BridgeCore {
+    fn new(handler: Arc<dyn EndpointHandler>) -> Arc<Self> {
+        let core = Arc::new(Self {
+            handler: handler.clone(),
+            changes: EndpointChangeTracker::new(),
+        });
+
+        let core_weak = Arc::downgrade(&core);
+        handler.set_state_pusher(Arc::new(move |_value| {
+            if let Some(core) = core_weak.upgrade() {
+                core.on_state_changed();
+            }
+        }));
+
+        core
+    }
+
+    fn get(&self) -> Option<bool> {
+        self.handler.get_state()
+    }
+
+    fn readiness(&self) -> Arc<dyn SourceReadiness> {
+        self.handler.readiness()
+    }
+
+    fn version(&self) -> u32 {
+        self.changes.version()
+    }
+
+    fn set_notifier(&self, notifier: ClusterNotifier) {
+        self.changes.set_notifier(notifier);
+    }
+
+    fn on_state_changed(&self) {
+        self.changes.mark_changed();
+    }
+}
+
 /// Bridge for sensor endpoints (ContactSensor, OccupancySensor).
 ///
 /// Wraps an `EndpointHandler` and implements the `Sensor` trait needed by
@@ -20,53 +63,36 @@ use std::sync::Arc;
 /// - Version is tracked locally and incremented when pusher is called
 /// - Notifier is wired up to push changes to Matter subscriptions
 pub struct SensorBridge {
-    handler: Arc<dyn EndpointHandler>,
-    changes: EndpointChangeTracker,
+    core: Arc<BridgeCore>,
 }
 
 impl SensorBridge {
     /// Create a new sensor bridge wrapping the given handler.
     pub fn new(handler: Arc<dyn EndpointHandler>) -> Arc<Self> {
-        let bridge = Arc::new(Self {
-            handler: handler.clone(),
-            changes: EndpointChangeTracker::new(),
-        });
-
-        // Wire up the pusher so the handler can push state changes to Matter
-        let bridge_weak = Arc::downgrade(&bridge);
-        handler.set_state_pusher(Arc::new(move |_value| {
-            if let Some(bridge) = bridge_weak.upgrade() {
-                bridge.on_state_changed();
-            }
-        }));
-
-        bridge
+        Arc::new(Self {
+            core: BridgeCore::new(handler),
+        })
     }
 
     /// Get the current sensor state from the handler.
     pub fn get(&self) -> Option<bool> {
-        self.handler.get_state()
+        self.core.get()
     }
 
     pub fn readiness(&self) -> Arc<dyn SourceReadiness> {
-        self.handler.readiness()
-    }
-
-    /// Called when the handler pushes a state change.
-    fn on_state_changed(&self) {
-        self.changes.mark_changed();
+        self.core.readiness()
     }
 }
 
 impl Sensor for SensorBridge {
     fn version(&self) -> u32 {
-        self.changes.version()
+        self.core.version()
     }
 }
 
 impl NotifiableSensor for SensorBridge {
     fn set_notifier(&self, notifier: ClusterNotifier) {
-        self.changes.set_notifier(notifier);
+        self.core.set_notifier(notifier);
     }
 }
 
@@ -80,32 +106,20 @@ impl NotifiableSensor for SensorBridge {
 /// - Version tracking enables subscription updates
 /// - Notifier pushes changes to Matter subscriptions
 pub struct SwitchBridge {
-    handler: Arc<dyn EndpointHandler>,
-    changes: EndpointChangeTracker,
+    core: Arc<BridgeCore>,
 }
 
 impl SwitchBridge {
     /// Create a new switch bridge wrapping the given handler.
     pub fn new(handler: Arc<dyn EndpointHandler>) -> Arc<Self> {
-        let bridge = Arc::new(Self {
-            handler: handler.clone(),
-            changes: EndpointChangeTracker::new(),
-        });
-
-        // Wire up the pusher so the handler can push state changes to Matter
-        let bridge_weak = Arc::downgrade(&bridge);
-        handler.set_state_pusher(Arc::new(move |_value| {
-            if let Some(bridge) = bridge_weak.upgrade() {
-                bridge.on_state_changed();
-            }
-        }));
-
-        bridge
+        Arc::new(Self {
+            core: BridgeCore::new(handler),
+        })
     }
 
     /// Get the current switch state from the handler.
     pub fn get(&self) -> Option<bool> {
-        self.handler.get_state()
+        self.core.get()
     }
 
     /// Set the switch state (called by Matter when controller sends command).
@@ -115,41 +129,36 @@ impl SwitchBridge {
         if !self.is_ready() {
             return Err(ErrorCode::Busy.into());
         }
-        self.handler.on_command(value);
-        self.changes.mark_changed();
+        self.core.handler.on_command(value);
+        self.core.on_state_changed();
         Ok(())
     }
 
     /// Toggle the switch state and return the new value.
     pub fn toggle(&self) -> Result<bool, Error> {
-        let current = self.handler.get_state().ok_or(ErrorCode::Busy)?;
+        let current = self.core.get().ok_or(ErrorCode::Busy)?;
         let new_value = !current;
         self.set(new_value)?;
         Ok(new_value)
     }
 
     pub fn is_ready(&self) -> bool {
-        self.handler.readiness().is_ready()
+        self.core.readiness().is_ready()
     }
 
     pub fn readiness(&self) -> Arc<dyn SourceReadiness> {
-        self.handler.readiness()
-    }
-
-    /// Called when the handler pushes a state change from external source.
-    fn on_state_changed(&self) {
-        self.changes.mark_changed();
+        self.core.readiness()
     }
 }
 
 impl Sensor for SwitchBridge {
     fn version(&self) -> u32 {
-        self.changes.version()
+        self.core.version()
     }
 }
 
 impl NotifiableSensor for SwitchBridge {
     fn set_notifier(&self, notifier: ClusterNotifier) {
-        self.changes.set_notifier(notifier);
+        self.core.set_notifier(notifier);
     }
 }

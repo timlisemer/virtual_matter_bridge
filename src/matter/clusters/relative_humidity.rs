@@ -5,20 +5,17 @@
 //!
 //! For example: 55.5% is reported as 5550.
 
-use super::measurement_state::MeasurementState;
-use super::sync_dataver_with_sensor;
-use rs_matter::dm::{
-    Access, Attribute, Cluster, Dataver, Handler, MatchContext, NonBlockingHandler, Quality,
-    ReadContext, ReadReply, Reply, WriteContext,
-};
-use rs_matter::error::{Error, ErrorCode};
+use super::read_only_cluster::define_versioned_read_only_cluster_handler;
+use super::scalar_measurement::define_scalar_measurement_handler;
+use rs_matter::dm::{Access, Attribute, Cluster, Quality};
 use rs_matter::tlv::TLVWrite;
 use rs_matter::{attribute_enum, attributes, with};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use strum::FromRepr;
 
-use crate::matter::endpoints::endpoints_helpers::{Sensor, SourceReadiness};
+use crate::matter::endpoints::endpoints_helpers::{
+    ScalarMeasurementSensor, Sensor, SourceReadiness,
+};
 use crate::matter::endpoints::{ClusterNotifier, NotifiableSensor};
 
 /// Matter Cluster ID for RelativeHumidityMeasurement
@@ -79,7 +76,7 @@ pub const CLUSTER: Cluster<'static> = Cluster {
 
 /// Humidity sensor that can be updated from external sources.
 pub struct HumiditySensor {
-    state: MeasurementState<u16>,
+    state: ScalarMeasurementSensor<u16>,
 }
 
 impl HumiditySensor {
@@ -89,7 +86,7 @@ impl HumiditySensor {
     /// * `initial_percent` - Initial humidity in percent (0-100)
     pub fn new(initial_percent: f32) -> Self {
         Self {
-            state: MeasurementState::new((initial_percent * 100.0) as u16),
+            state: ScalarMeasurementSensor::new((initial_percent * 100.0) as u16),
         }
     }
 
@@ -100,17 +97,21 @@ impl HumiditySensor {
 
     /// Get the current humidity in centi-percent (raw Matter value).
     pub fn get_centipercent(&self) -> u16 {
-        self.state.get()
+        self.raw_value()
     }
 
     /// Set the humidity in percent.
     pub fn set_percent(&self, percent: f32) {
         let centipercent = (percent * 100.0) as u16;
-        self.state.set(centipercent);
+        self.state.set_raw(centipercent);
     }
 
     pub fn readiness(&self) -> Arc<dyn SourceReadiness> {
         self.state.readiness()
+    }
+
+    pub fn raw_value(&self) -> u16 {
+        self.state.get_raw()
     }
 }
 
@@ -126,95 +127,15 @@ impl NotifiableSensor for HumiditySensor {
     }
 }
 
-/// Handler that serves a RelativeHumidityMeasurement cluster.
-pub struct RelativeHumidityHandler {
-    dataver: Dataver,
-    sensor: Arc<HumiditySensor>,
-    last_sensor_version: AtomicU32,
-    /// Minimum humidity in centi-percent (0% = 0)
-    min_value: u16,
-    /// Maximum humidity in centi-percent (100% = 10000)
-    max_value: u16,
-}
-
-impl RelativeHumidityHandler {
-    /// Cluster definition for use in the data model
-    pub const CLUSTER: Cluster<'static> = CLUSTER;
-
-    /// Create a new handler with a sensor reference.
-    ///
-    /// Default range: 0% to 100%
-    pub fn new(dataver: Dataver, sensor: Arc<HumiditySensor>) -> Self {
-        Self {
-            dataver,
-            sensor,
-            last_sensor_version: AtomicU32::new(0),
-            min_value: 0,     // 0%
-            max_value: 10000, // 100%
-        }
-    }
-
-    fn read_impl(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        sync_dataver_with_sensor(&*self.sensor, &self.last_sensor_version, &self.dataver);
-
-        let attr = ctx.attr();
-
-        let Some(mut writer) = reply.with_dataver(self.dataver.get())? else {
-            return Ok(());
-        };
-
-        // Global attributes
-        if attr.is_system() {
-            return CLUSTER.read(attr, writer);
-        }
-
-        let tag = writer.tag();
-        {
-            let mut tw = writer.writer();
-
-            match attr.attr_id.try_into()? {
-                RelativeHumidityAttribute::MeasuredValue => {
-                    tw.u16(tag, self.sensor.get_centipercent())?;
-                }
-                RelativeHumidityAttribute::MinMeasuredValue => {
-                    tw.u16(tag, self.min_value)?;
-                }
-                RelativeHumidityAttribute::MaxMeasuredValue => {
-                    tw.u16(tag, self.max_value)?;
-                }
-                RelativeHumidityAttribute::Tolerance => {
-                    // Tolerance in 0.01% units (0 = not specified)
-                    tw.u16(tag, 0)?;
-                }
-            }
-        }
-
-        writer.complete()
-    }
-
-    fn write_impl(&self, _ctx: impl WriteContext) -> Result<(), Error> {
-        // Cluster is read-only
-        Err(ErrorCode::UnsupportedAccess.into())
-    }
-}
-
-impl Handler for RelativeHumidityHandler {
-    fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        self.read_impl(ctx, reply)
-    }
-
-    fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        self.write_impl(ctx)
-    }
-
-    fn bump_dataver(&self, _ctx: impl MatchContext) {
-        self.dataver.changed();
-        self.last_sensor_version
-            .store(self.sensor.version(), Ordering::SeqCst);
-    }
-}
-
-impl NonBlockingHandler for RelativeHumidityHandler {}
+define_scalar_measurement_handler!(
+    RelativeHumidityHandler,
+    HumiditySensor,
+    RelativeHumidityAttribute,
+    CLUSTER,
+    0,
+    10000,
+    u16
+);
 
 #[cfg(test)]
 mod tests {

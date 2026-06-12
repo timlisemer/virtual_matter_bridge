@@ -7,16 +7,10 @@
 //! Uses version tracking to detect changes and notify subscribers automatically.
 
 use super::super::endpoints::sensors::OccupancySensor;
-use super::sync_dataver_with_sensor;
-use rs_matter::dm::{
-    Access, Attribute, Cluster, Dataver, Handler, MatchContext, NonBlockingHandler, ReadContext,
-    ReadReply, Reply, WriteContext,
-};
-use rs_matter::error::{Error, ErrorCode};
+use super::read_only_cluster::define_versioned_read_only_cluster_handler;
+use rs_matter::dm::{Access, Attribute, Cluster};
 use rs_matter::tlv::TLVWrite;
 use rs_matter::{attribute_enum, attributes, with};
-use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
 use strum::FromRepr;
 
 /// Matter Cluster ID for OccupancySensing
@@ -78,89 +72,24 @@ pub const CLUSTER: Cluster<'static> = Cluster {
     with_events: with!(all),
 };
 
-/// Handler that serves a read-only OccupancySensing cluster.
-///
-/// Reads state from a shared `BooleanSensor` that can be updated from
-/// external sources (HTTP endpoints, simulation, etc.).
-///
-/// Automatically detects sensor value changes and notifies subscribers
-/// by tracking the sensor's version number.
-pub struct OccupancySensingHandler {
-    dataver: Dataver,
-    sensor: Arc<OccupancySensor>,
-    last_sensor_version: AtomicU32,
-}
-
-impl OccupancySensingHandler {
-    /// Cluster definition for use in the data model
-    pub const CLUSTER: Cluster<'static> = CLUSTER;
-
-    /// Create a new handler with a sensor reference.
-    pub fn new(dataver: Dataver, sensor: Arc<OccupancySensor>) -> Self {
-        Self {
-            dataver,
-            sensor,
-            last_sensor_version: AtomicU32::new(0),
-        }
-    }
-
-    fn read_impl(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        // Check if sensor changed and bump dataver to notify subscribers
-        sync_dataver_with_sensor(&*self.sensor, &self.last_sensor_version, &self.dataver);
-
-        let attr = ctx.attr();
-
-        let Some(mut writer) = reply.with_dataver(self.dataver.get())? else {
-            return Ok(()); // No update needed
-        };
-
-        // Global attributes
-        if attr.is_system() {
-            return CLUSTER.read(attr, writer);
-        }
-
-        let tag = writer.tag();
-        {
-            let mut tw = writer.writer();
-
-            match attr.attr_id.try_into()? {
-                OccupancySensingAttribute::Occupancy => {
-                    // Bitmap8: bit 0 = sensed occupancy (1 = occupied, 0 = unoccupied)
-                    let occupancy_bitmap: u8 = if self.sensor.get() { 0x01 } else { 0x00 };
-                    tw.u8(tag, occupancy_bitmap)?;
-                }
-                OccupancySensingAttribute::OccupancySensorType => {
-                    // PhysicalContact sensor type (virtual sensor)
-                    tw.u8(tag, OccupancySensorType::PhysicalContact as u8)?;
-                }
-                OccupancySensingAttribute::OccupancySensorTypeBitmap => {
-                    // Bitmap indicating PhysicalContact is supported (bit 3)
-                    tw.u8(tag, 0x08)?; // bit 3 = PhysicalContact
-                }
+define_versioned_read_only_cluster_handler!(
+    OccupancySensingHandler,
+    OccupancySensor,
+    OccupancySensingAttribute,
+    CLUSTER,
+    |sensor, tw, tag, attr| {
+        match attr {
+            OccupancySensingAttribute::Occupancy => {
+                let occupancy_bitmap: u8 = if sensor.get() { 0x01 } else { 0x00 };
+                tw.u8(tag, occupancy_bitmap)?;
+            }
+            OccupancySensingAttribute::OccupancySensorType => {
+                tw.u8(tag, OccupancySensorType::PhysicalContact as u8)?;
+            }
+            OccupancySensingAttribute::OccupancySensorTypeBitmap => {
+                tw.u8(tag, 0x08)?;
             }
         }
-
-        writer.complete()
+        Ok::<(), rs_matter::error::Error>(())
     }
-
-    fn write_impl(&self, _ctx: impl WriteContext) -> Result<(), Error> {
-        // Cluster is read-only
-        Err(ErrorCode::UnsupportedAccess.into())
-    }
-}
-
-impl Handler for OccupancySensingHandler {
-    fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        self.read_impl(ctx, reply)
-    }
-
-    fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        self.write_impl(ctx)
-    }
-
-    fn bump_dataver(&self, _ctx: impl MatchContext) {
-        self.dataver.changed();
-    }
-}
-
-impl NonBlockingHandler for OccupancySensingHandler {}
+);

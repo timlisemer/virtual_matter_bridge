@@ -5,7 +5,9 @@
 
 pub mod helpers;
 pub mod light_switch;
+pub mod on_off_control;
 pub mod switch;
 
 pub use light_switch::LightSwitch;
+pub use on_off_control::{OnOffEndpoint, OnOffEndpointConfig};
 pub use switch::Switch;

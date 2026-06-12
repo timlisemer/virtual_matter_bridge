@@ -3,21 +3,15 @@
 //! Exposes Shelly per-channel cumulative energy telemetry using Matter cluster
 //! 0x0091.
 
-use super::sync_dataver_with_sensor;
-use crate::matter::endpoints::endpoints_helpers::{
-    EndpointChangeTracker, Sensor, SourceReadiness, SourceSnapshot,
-};
+use super::read_only_cluster::define_versioned_read_only_cluster_handler;
+use crate::matter::clusters::tlv_helpers::write_nullable;
+use crate::matter::endpoints::endpoints_helpers::{Sensor, SourceReadiness, TrackedEndpointState};
 use crate::matter::endpoints::{ClusterNotifier, NotifiableSensor};
-use parking_lot::RwLock;
-use rs_matter::dm::{
-    Access, Attribute, Cluster, Dataver, Handler, MatchContext, NonBlockingHandler, Quality,
-    ReadContext, ReadReply, Reply, WriteContext,
-};
-use rs_matter::error::{Error, ErrorCode};
+use rs_matter::dm::{Access, Attribute, Cluster, Quality};
+use rs_matter::error::Error;
 use rs_matter::tlv::{TLVTag, TLVWrite};
 use rs_matter::{attribute_enum, attributes, with};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use strum::FromRepr;
 
 pub const CLUSTER_ID: u32 = 0x0091;
@@ -71,37 +65,26 @@ pub struct ElectricalEnergyValues {
 }
 
 pub struct ElectricalEnergyState {
-    values: RwLock<ElectricalEnergyValues>,
-    changes: EndpointChangeTracker,
-    readiness: Arc<SourceSnapshot<()>>,
+    values: TrackedEndpointState<ElectricalEnergyValues>,
 }
 
 impl ElectricalEnergyState {
     pub fn new() -> Self {
         Self {
-            values: RwLock::new(ElectricalEnergyValues::default()),
-            changes: EndpointChangeTracker::new(),
-            readiness: Arc::new(SourceSnapshot::new()),
+            values: TrackedEndpointState::new(ElectricalEnergyValues::default()),
         }
     }
 
     pub fn set_values(&self, values: ElectricalEnergyValues) {
-        let was_ready = self.readiness.is_ready();
-        let mut guard = self.values.write();
-        if *guard != values || !was_ready {
-            *guard = values;
-            self.changes.mark_changed();
-        }
-        drop(guard);
-        self.readiness.mark_ready();
+        self.values.set(values);
     }
 
     pub fn values(&self) -> ElectricalEnergyValues {
-        *self.values.read()
+        self.values.get()
     }
 
     pub fn readiness(&self) -> Arc<dyn SourceReadiness> {
-        self.readiness.clone()
+        self.values.readiness()
     }
 
     pub fn imported_energy_mwh(&self) -> Option<i64> {
@@ -117,122 +100,75 @@ impl Default for ElectricalEnergyState {
 
 impl Sensor for ElectricalEnergyState {
     fn version(&self) -> u32 {
-        self.changes.version()
+        self.values.version()
     }
 }
 
 impl NotifiableSensor for ElectricalEnergyState {
     fn set_notifier(&self, notifier: ClusterNotifier) {
-        self.changes.set_notifier(notifier);
+        self.values.set_notifier(notifier);
     }
 }
 
-pub struct ElectricalEnergyMeasurementHandler {
-    dataver: Dataver,
-    state: Arc<ElectricalEnergyState>,
-    last_state_version: AtomicU32,
+define_versioned_read_only_cluster_handler!(
+    ElectricalEnergyMeasurementHandler,
+    ElectricalEnergyState,
+    ElectricalEnergyMeasurementAttribute,
+    CLUSTER,
+    |sensor, tw, tag, attr| { write_energy_attr(&mut tw, tag, sensor.values(), attr) }
+);
+
+fn write_energy_attr(
+    tw: &mut impl TLVWrite,
+    tag: &TLVTag,
+    values: ElectricalEnergyValues,
+    attr: ElectricalEnergyMeasurementAttribute,
+) -> Result<(), Error> {
+    match attr {
+        ElectricalEnergyMeasurementAttribute::Accuracy => {
+            write_accuracy(tw, tag, values)?;
+        }
+        ElectricalEnergyMeasurementAttribute::CumulativeEnergyImported => {
+            write_energy_measurement(tw, tag, values.imported_energy_mwh)?;
+        }
+        ElectricalEnergyMeasurementAttribute::CumulativeEnergyExported => {
+            write_energy_measurement(tw, tag, values.exported_energy_mwh)?;
+        }
+    }
+    Ok(())
 }
 
-impl ElectricalEnergyMeasurementHandler {
-    pub const CLUSTER: Cluster<'static> = CLUSTER;
+fn write_accuracy(
+    tw: &mut impl TLVWrite,
+    tag: &TLVTag,
+    values: ElectricalEnergyValues,
+) -> Result<(), Error> {
+    let value = values
+        .imported_energy_mwh
+        .or(values.exported_energy_mwh)
+        .unwrap_or(0);
+    tw.start_struct(tag)?;
+    tw.u16(&TLVTag::Context(0), MEASUREMENT_ELECTRICAL_ENERGY)?;
+    tw.bool(&TLVTag::Context(1), true)?;
+    tw.i64(&TLVTag::Context(2), value)?;
+    tw.i64(&TLVTag::Context(3), value)?;
+    tw.start_array(&TLVTag::Context(4))?;
+    tw.end_container()?;
+    tw.end_container()?;
+    Ok(())
+}
 
-    pub fn new(dataver: Dataver, state: Arc<ElectricalEnergyState>) -> Self {
-        Self {
-            dataver,
-            state,
-            last_state_version: AtomicU32::new(0),
-        }
-    }
-
-    fn read_impl(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        sync_dataver_with_sensor(&*self.state, &self.last_state_version, &self.dataver);
-
-        let attr = ctx.attr();
-        let Some(mut writer) = reply.with_dataver(self.dataver.get())? else {
-            return Ok(());
-        };
-
-        if attr.is_system() {
-            return CLUSTER.read(attr, writer);
-        }
-
-        let tag = writer.tag();
-        let values = self.state.values();
-        {
-            let mut tw = writer.writer();
-            match attr.attr_id.try_into()? {
-                ElectricalEnergyMeasurementAttribute::Accuracy => {
-                    Self::write_accuracy(&mut tw, tag, values)?;
-                }
-                ElectricalEnergyMeasurementAttribute::CumulativeEnergyImported => {
-                    Self::write_energy_measurement(&mut tw, tag, values.imported_energy_mwh)?;
-                }
-                ElectricalEnergyMeasurementAttribute::CumulativeEnergyExported => {
-                    Self::write_energy_measurement(&mut tw, tag, values.exported_energy_mwh)?;
-                }
-            }
-        }
-
-        writer.complete()
-    }
-
-    fn write_accuracy(
-        tw: &mut impl TLVWrite,
-        tag: &TLVTag,
-        values: ElectricalEnergyValues,
-    ) -> Result<(), Error> {
-        let value = values
-            .imported_energy_mwh
-            .or(values.exported_energy_mwh)
-            .unwrap_or(0);
+fn write_energy_measurement(
+    tw: &mut impl TLVWrite,
+    tag: &TLVTag,
+    value: Option<i64>,
+) -> Result<(), Error> {
+    write_nullable(tw, tag, value, |tw, tag, value| {
         tw.start_struct(tag)?;
-        tw.u16(&TLVTag::Context(0), MEASUREMENT_ELECTRICAL_ENERGY)?;
-        tw.bool(&TLVTag::Context(1), true)?;
-        tw.i64(&TLVTag::Context(2), value)?;
-        tw.i64(&TLVTag::Context(3), value)?;
-        tw.start_array(&TLVTag::Context(4))?;
-        tw.end_container()?;
-        tw.end_container()?;
-        Ok(())
-    }
-
-    fn write_energy_measurement(
-        tw: &mut impl TLVWrite,
-        tag: &TLVTag,
-        value: Option<i64>,
-    ) -> Result<(), Error> {
-        if let Some(value) = value {
-            tw.start_struct(tag)?;
-            tw.i64(&TLVTag::Context(0), value)?;
-            tw.end_container()?;
-        } else {
-            tw.null(tag)?;
-        }
-        Ok(())
-    }
-
-    fn write_impl(&self, _ctx: impl WriteContext) -> Result<(), Error> {
-        Err(ErrorCode::UnsupportedAccess.into())
-    }
+        tw.i64(&TLVTag::Context(0), value)?;
+        tw.end_container()
+    })
 }
-
-impl Handler for ElectricalEnergyMeasurementHandler {
-    fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        self.read_impl(ctx, reply)
-    }
-
-    fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        self.write_impl(ctx)
-    }
-
-    fn bump_dataver(&self, _ctx: impl MatchContext) {
-        self.dataver.changed();
-        self.last_state_version
-            .store(self.state.version(), Ordering::SeqCst);
-    }
-}
-
-impl NonBlockingHandler for ElectricalEnergyMeasurementHandler {}
 
 #[cfg(test)]
 mod tests {

@@ -97,9 +97,9 @@ Note: Endpoint numbers are dynamic based on device configuration. Video doorbell
 - [x] **Endpoint Architecture**
   - `src/matter/endpoints/` folder structure with sensors, controls, shared helpers
   - `BinarySensorHelper` for read-only binary state with version tracking
-  - `SwitchHelper` for read-write on/off controls with version tracking
+  - `BinarySwitchHelper` for read-write on/off controls with version tracking
   - `ClusterNotifier` for live Matter subscription updates
-  - Type aliases: `ContactSensor`, `OccupancySensor`, `Switch`
+  - Endpoint types: `ContactSensor`, `OccupancySensor`, `Switch`, `LightSwitch`
 
 ### Current Status
 
@@ -135,9 +135,9 @@ Camera clusters (AV Stream, WebRTC) are stub implementations awaiting Matter 1.5
 **Goal:** Create clean architecture for sensors and controls
 
 - [x] Create `src/matter/endpoints/` folder structure with sensors, controls, and shared helpers
-- [x] Implement `SwitchHelper` for on/off controls (mirrors `BinarySensorHelper` pattern)
+- [x] Implement `BinarySwitchHelper` for on/off controls using shared binary state
 - [x] Move shared utilities (notifier, traits) to `endpoints_helpers/`
-- [x] Create `Switch` type alias for reusable on/off controls
+- [x] Create reusable `Switch` and `LightSwitch` OnOff control types
 - [x] Implement `ContactSensor` and `OccupancySensor` using `BinarySensorHelper`
 
 ### Phase 3: Multi-Device Bridge Architecture
@@ -153,7 +153,7 @@ Camera clusters (AV Stream, WebRTC) are stub implementations awaiting Matter 1.5
 
 **Goal:** Add support for simple On/Off switches
 
-- [x] Create Switch control type using `SwitchHelper` (matches sensor pattern)
+- [x] Create Switch control type using `BinarySwitchHelper` and shared OnOff behavior
 - [ ] Create OnOff cluster handler for Switch controls
 - [ ] Create data source abstraction (trait for boolean data sources)
 - [ ] Implement data source backends: HTTP endpoint, MQTT, file, command execution

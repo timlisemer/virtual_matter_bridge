@@ -6,7 +6,7 @@
 //! Uses `commission_with_code` with `network_only: true` to commission via
 //! mDNS/IP without requiring Bluetooth.
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -14,7 +14,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 /// Request message for python-matter-server WebSocket API.
 #[derive(Debug, Serialize)]
-struct WsRequest {
+pub struct WsRequest {
     message_id: String,
     command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -23,14 +23,72 @@ struct WsRequest {
 
 /// Response message from python-matter-server.
 #[derive(Debug, Deserialize)]
-struct WsResponse {
-    message_id: String,
+pub struct WsResponse {
+    pub message_id: String,
     #[serde(default)]
-    result: Option<serde_json::Value>,
+    pub result: Option<serde_json::Value>,
     #[serde(default)]
-    error_code: Option<i32>,
+    pub error_code: Option<i32>,
     #[serde(default)]
-    details: Option<String>,
+    pub details: Option<String>,
+}
+
+impl WsRequest {
+    pub fn new(
+        message_id: impl Into<String>,
+        command: impl Into<String>,
+        args: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            message_id: message_id.into(),
+            command: command.into(),
+            args,
+        }
+    }
+}
+
+pub async fn send_ws_request<W>(
+    write: &mut W,
+    message_id: impl Into<String>,
+    command: impl Into<String>,
+    args: Option<serde_json::Value>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    W: Sink<Message> + Unpin,
+    W::Error: std::error::Error + Send + Sync + 'static,
+{
+    let request = WsRequest::new(message_id, command, args);
+    write
+        .send(Message::Text(serde_json::to_string(&request)?.into()))
+        .await?;
+    Ok(())
+}
+
+pub async fn wait_for_ws_response<R>(
+    read: &mut R,
+    message_id: &str,
+    mut on_other_text: impl FnMut(&str),
+) -> Result<Option<WsResponse>, tokio_tungstenite::tungstenite::Error>
+where
+    R: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    while let Some(msg) = read.next().await {
+        match msg {
+            Ok(Message::Text(text)) => {
+                let text_str: &str = &text;
+                if let Ok(response) = serde_json::from_str::<WsResponse>(text_str)
+                    && response.message_id == message_id
+                {
+                    return Ok(Some(response));
+                }
+                on_other_text(text_str);
+            }
+            Ok(Message::Close(_)) => return Ok(None),
+            Err(e) => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(None)
 }
 
 /// Generate the manual pairing code from discriminator and passcode.
@@ -113,32 +171,15 @@ pub async fn remove_bridge_nodes(
     let (mut write, mut read) = ws_stream.split();
 
     // Get list of all nodes
-    let request = WsRequest {
-        message_id: "get-nodes".to_string(),
-        command: "get_nodes".to_string(),
-        args: None,
-    };
-
-    write
-        .send(Message::Text(serde_json::to_string(&request)?.into()))
-        .await?;
+    send_ws_request(&mut write, "get-nodes", "get_nodes", None).await?;
 
     // Wait for response
-    let nodes_response = tokio::time::timeout(Duration::from_secs(30), async {
-        while let Some(msg) = read.next().await {
-            if let Ok(Message::Text(text)) = msg {
-                let text_str: &str = &text;
-                if let Ok(response) = serde_json::from_str::<WsResponse>(text_str)
-                    && response.message_id == "get-nodes"
-                {
-                    return Some(response);
-                }
-            }
-        }
-        None
-    })
+    let nodes_response = tokio::time::timeout(
+        Duration::from_secs(30),
+        wait_for_ws_response(&mut read, "get-nodes", |_| {}),
+    )
     .await
-    .map_err(|_| "Timeout waiting for get_nodes response")?
+    .map_err(|_| "Timeout waiting for get_nodes response")??
     .ok_or("Connection closed")?;
 
     // Parse nodes and find ones matching our vendor ID
@@ -165,17 +206,14 @@ pub async fn remove_bridge_nodes(
                 nid, vid
             );
 
-            let remove_request = WsRequest {
-                message_id: format!("remove-{}", nid),
-                command: "remove_node".to_string(),
-                args: Some(serde_json::json!({ "node_id": nid })),
-            };
-
-            if let Err(e) = write
-                .send(Message::Text(
-                    serde_json::to_string(&remove_request)?.into(),
-                ))
-                .await
+            let remove_message_id = format!("remove-{}", nid);
+            if let Err(e) = send_ws_request(
+                &mut write,
+                remove_message_id.as_str(),
+                "remove_node",
+                Some(serde_json::json!({ "node_id": nid })),
+            )
+            .await
             {
                 warn!(
                     "[Commission] Failed to send remove request for node {}: {}",
@@ -185,34 +223,28 @@ pub async fn remove_bridge_nodes(
             }
 
             // Wait for remove response
-            let remove_timeout = tokio::time::timeout(Duration::from_secs(30), async {
-                while let Some(msg) = read.next().await {
-                    if let Ok(Message::Text(text)) = msg {
-                        let text_str: &str = &text;
-                        if let Ok(response) = serde_json::from_str::<WsResponse>(text_str)
-                            && response.message_id == format!("remove-{}", nid)
-                        {
-                            return Some(response);
-                        }
-                    }
-                }
-                None
-            })
+            let remove_timeout = tokio::time::timeout(
+                Duration::from_secs(30),
+                wait_for_ws_response(&mut read, &remove_message_id, |_| {}),
+            )
             .await;
 
             match remove_timeout {
-                Ok(Some(response)) if response.error_code.is_none() => {
+                Ok(Ok(Some(response))) if response.error_code.is_none() => {
                     info!("[Commission] Successfully removed node {}", nid);
                     removed_count += 1;
                 }
-                Ok(Some(response)) => {
+                Ok(Ok(Some(response))) => {
                     warn!(
                         "[Commission] Failed to remove node {}: {:?}",
                         nid, response.details
                     );
                 }
-                Ok(None) => {
+                Ok(Ok(None)) => {
                     warn!("[Commission] Connection closed while removing node {}", nid);
+                }
+                Ok(Err(e)) => {
+                    warn!("[Commission] WebSocket error removing node {}: {}", nid, e);
                 }
                 Err(_) => {
                     warn!("[Commission] Timeout removing node {}", nid);
@@ -267,48 +299,27 @@ pub async fn auto_commission(
     );
 
     // Send commission request using network discovery (no Bluetooth)
-    let request = WsRequest {
-        message_id: "auto-commission".to_string(),
-        command: "commission_with_code".to_string(),
-        args: Some(serde_json::json!({
+    send_ws_request(
+        &mut write,
+        "auto-commission",
+        "commission_with_code",
+        Some(serde_json::json!({
             "code": pairing_code,
             "network_only": true
         })),
-    };
-
-    let msg = serde_json::to_string(&request)?;
-    write.send(Message::Text(msg.into())).await?;
+    )
+    .await?;
 
     // Wait for response (with timeout)
     info!("[Commission] Waiting for commissioning response...");
-    let timeout = tokio::time::timeout(Duration::from_secs(120), async {
-        while let Some(msg) = read.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    let text_str: &str = &text;
-                    if let Ok(response) = serde_json::from_str::<WsResponse>(text_str)
-                        && response.message_id == "auto-commission"
-                    {
-                        return Some(response);
-                    }
-                }
-                Ok(Message::Close(_)) => {
-                    warn!("[Commission] Server closed connection");
-                    return None;
-                }
-                Err(e) => {
-                    warn!("[Commission] WebSocket error: {}", e);
-                    return None;
-                }
-                _ => {}
-            }
-        }
-        None
-    })
+    let timeout = tokio::time::timeout(
+        Duration::from_secs(120),
+        wait_for_ws_response(&mut read, "auto-commission", |_| {}),
+    )
     .await;
 
     match timeout {
-        Ok(Some(response)) => {
+        Ok(Ok(Some(response))) => {
             if let Some(error_code) = response.error_code {
                 let details = response.details.unwrap_or_default();
                 Err(format!("Commissioning failed (error {}): {}", error_code, details).into())
@@ -317,7 +328,11 @@ pub async fn auto_commission(
                 Ok(())
             }
         }
-        Ok(None) => Err("Connection closed before receiving response".into()),
+        Ok(Ok(None)) => Err("Connection closed before receiving response".into()),
+        Ok(Err(e)) => {
+            warn!("[Commission] WebSocket error: {}", e);
+            Err(format!("WebSocket error before receiving response: {}", e).into())
+        }
         Err(_) => {
             // Timeout isn't necessarily an error - commissioning may still succeed
             warn!("[Commission] Timeout waiting for response. Device may still be commissioning.");

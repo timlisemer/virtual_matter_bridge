@@ -7,10 +7,6 @@
 //! because the provisional camera clusters have path resolution issues when used from
 //! outside the rs-matter crate.
 
-use super::endpoints::endpoints_helpers::Sensor;
-use rs_matter::dm::Dataver;
-use std::sync::atomic::{AtomicU32, Ordering};
-
 pub mod boolean_state;
 pub mod bridged_device_basic_info;
 pub mod camera_av_stream_mgmt;
@@ -18,11 +14,14 @@ pub mod electrical_energy_measurement;
 pub mod electrical_power_measurement;
 pub mod generic_switch;
 pub mod icd_management;
-pub mod measurement_state;
 pub mod occupancy_sensing;
+pub mod read_only_cluster;
 pub mod relative_humidity;
+pub mod scalar_measurement;
 pub mod shelly_diagnostics;
 pub mod temperature_measurement;
+mod tlv_helpers;
+mod versioned_state;
 pub mod webrtc_transport_provider;
 
 // Re-export for convenience
@@ -45,33 +44,3 @@ pub use temperature_measurement::{TemperatureMeasurementHandler, TemperatureSens
 // TODO: Re-export when handlers are wired in stack.rs
 // pub use camera_av_stream_mgmt::CameraAvStreamMgmtHandler;
 // pub use webrtc_transport_provider::WebRtcTransportProviderHandler;
-
-/// Sync dataver with sensor version changes.
-///
-/// Call this at the start of `read_impl()` for any cluster handler backed by a sensor.
-/// When the sensor's version has changed since the last read, this bumps the dataver
-/// to notify subscribers that the attribute value has changed.
-///
-/// # Arguments
-/// * `sensor` - The sensor to check for changes
-/// * `last_version` - Atomic storing the last seen sensor version
-/// * `dataver` - The cluster's dataver to bump on changes
-///
-/// # Example
-/// ```ignore
-/// fn read_impl(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-///     sync_dataver_with_sensor(&*self.sensor, &self.last_sensor_version, &self.dataver);
-///     // ... rest of read logic
-/// }
-/// ```
-pub fn sync_dataver_with_sensor<S: Sensor + ?Sized>(
-    sensor: &S,
-    last_version: &AtomicU32,
-    dataver: &Dataver,
-) {
-    let current = sensor.version();
-    let last = last_version.swap(current, Ordering::SeqCst);
-    if current != last {
-        dataver.changed();
-    }
-}

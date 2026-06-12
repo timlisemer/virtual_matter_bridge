@@ -3,21 +3,15 @@
 //! Exposes Shelly per-channel electrical power telemetry using Matter cluster
 //! 0x0090.
 
-use super::sync_dataver_with_sensor;
-use crate::matter::endpoints::endpoints_helpers::{
-    EndpointChangeTracker, Sensor, SourceReadiness, SourceSnapshot,
-};
+use super::read_only_cluster::define_versioned_read_only_cluster_handler;
+use crate::matter::clusters::tlv_helpers::write_nullable;
+use crate::matter::endpoints::endpoints_helpers::{Sensor, SourceReadiness, TrackedEndpointState};
 use crate::matter::endpoints::{ClusterNotifier, NotifiableSensor};
-use parking_lot::RwLock;
-use rs_matter::dm::{
-    Access, Attribute, Cluster, Dataver, Handler, MatchContext, NonBlockingHandler, Quality,
-    ReadContext, ReadReply, Reply, WriteContext,
-};
-use rs_matter::error::{Error, ErrorCode};
+use rs_matter::dm::{Access, Attribute, Cluster, Quality};
+use rs_matter::error::Error;
 use rs_matter::tlv::{TLVTag, TLVWrite};
 use rs_matter::{attribute_enum, attributes, with};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use strum::FromRepr;
 
 pub const CLUSTER_ID: u32 = 0x0090;
@@ -127,37 +121,26 @@ pub struct ElectricalPowerValues {
 }
 
 pub struct ElectricalPowerState {
-    values: RwLock<ElectricalPowerValues>,
-    changes: EndpointChangeTracker,
-    readiness: Arc<SourceSnapshot<()>>,
+    values: TrackedEndpointState<ElectricalPowerValues>,
 }
 
 impl ElectricalPowerState {
     pub fn new() -> Self {
         Self {
-            values: RwLock::new(ElectricalPowerValues::default()),
-            changes: EndpointChangeTracker::new(),
-            readiness: Arc::new(SourceSnapshot::new()),
+            values: TrackedEndpointState::new(ElectricalPowerValues::default()),
         }
     }
 
     pub fn set_values(&self, values: ElectricalPowerValues) {
-        let was_ready = self.readiness.is_ready();
-        let mut guard = self.values.write();
-        if *guard != values || !was_ready {
-            *guard = values;
-            self.changes.mark_changed();
-        }
-        drop(guard);
-        self.readiness.mark_ready();
+        self.values.set(values);
     }
 
     pub fn values(&self) -> ElectricalPowerValues {
-        *self.values.read()
+        self.values.get()
     }
 
     pub fn readiness(&self) -> Arc<dyn SourceReadiness> {
-        self.readiness.clone()
+        self.values.readiness()
     }
 
     pub fn active_power_mw(&self) -> Option<i64> {
@@ -185,157 +168,108 @@ impl Default for ElectricalPowerState {
 
 impl Sensor for ElectricalPowerState {
     fn version(&self) -> u32 {
-        self.changes.version()
+        self.values.version()
     }
 }
 
 impl NotifiableSensor for ElectricalPowerState {
     fn set_notifier(&self, notifier: ClusterNotifier) {
-        self.changes.set_notifier(notifier);
+        self.values.set_notifier(notifier);
     }
 }
 
-pub struct ElectricalPowerMeasurementHandler {
-    dataver: Dataver,
-    state: Arc<ElectricalPowerState>,
-    last_state_version: AtomicU32,
+define_versioned_read_only_cluster_handler!(
+    ElectricalPowerMeasurementHandler,
+    ElectricalPowerState,
+    ElectricalPowerMeasurementAttribute,
+    CLUSTER,
+    |sensor, tw, tag, attr| { write_power_attr(&mut tw, tag, sensor.values(), attr) }
+);
+
+fn write_power_attr(
+    tw: &mut impl TLVWrite,
+    tag: &TLVTag,
+    values: ElectricalPowerValues,
+    attr: ElectricalPowerMeasurementAttribute,
+) -> Result<(), Error> {
+    match attr {
+        ElectricalPowerMeasurementAttribute::PowerMode => tw.u8(tag, POWER_MODE_AC)?,
+        ElectricalPowerMeasurementAttribute::NumberOfMeasurementTypes => {
+            tw.u8(tag, MEASUREMENT_COUNT)?;
+        }
+        ElectricalPowerMeasurementAttribute::Accuracy => {
+            write_accuracy_array(tw, tag, values)?;
+        }
+        ElectricalPowerMeasurementAttribute::ActivePower => {
+            write_nullable_i64(tw, tag, values.active_power_mw)?;
+        }
+        ElectricalPowerMeasurementAttribute::ReactivePower => {
+            write_nullable_i64(tw, tag, values.reactive_power_mvar)?;
+        }
+        ElectricalPowerMeasurementAttribute::ApparentPower => {
+            write_nullable_i64(tw, tag, values.apparent_power_mva)?;
+        }
+        ElectricalPowerMeasurementAttribute::RmsVoltage => {
+            write_nullable_i64(tw, tag, values.rms_voltage_mv)?;
+        }
+        ElectricalPowerMeasurementAttribute::RmsCurrent => {
+            write_nullable_i64(tw, tag, values.rms_current_ma)?;
+        }
+        ElectricalPowerMeasurementAttribute::Frequency => {
+            write_nullable_i64(tw, tag, values.frequency_mhz)?;
+        }
+        ElectricalPowerMeasurementAttribute::PowerFactor => {
+            write_nullable_i64(tw, tag, values.power_factor_centipercent)?;
+        }
+    }
+    Ok(())
 }
 
-impl ElectricalPowerMeasurementHandler {
-    pub const CLUSTER: Cluster<'static> = CLUSTER;
-
-    pub fn new(dataver: Dataver, state: Arc<ElectricalPowerState>) -> Self {
-        Self {
-            dataver,
-            state,
-            last_state_version: AtomicU32::new(0),
-        }
-    }
-
-    fn read_impl(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        sync_dataver_with_sensor(&*self.state, &self.last_state_version, &self.dataver);
-
-        let attr = ctx.attr();
-        let Some(mut writer) = reply.with_dataver(self.dataver.get())? else {
-            return Ok(());
-        };
-
-        if attr.is_system() {
-            return CLUSTER.read(attr, writer);
-        }
-
-        let tag = writer.tag();
-        let values = self.state.values();
-        {
-            let mut tw = writer.writer();
-            match attr.attr_id.try_into()? {
-                ElectricalPowerMeasurementAttribute::PowerMode => tw.u8(tag, POWER_MODE_AC)?,
-                ElectricalPowerMeasurementAttribute::NumberOfMeasurementTypes => {
-                    tw.u8(tag, MEASUREMENT_COUNT)?;
-                }
-                ElectricalPowerMeasurementAttribute::Accuracy => {
-                    Self::write_accuracy_array(&mut tw, tag, values)?;
-                }
-                ElectricalPowerMeasurementAttribute::ActivePower => {
-                    Self::write_nullable_i64(&mut tw, tag, values.active_power_mw)?;
-                }
-                ElectricalPowerMeasurementAttribute::ReactivePower => {
-                    Self::write_nullable_i64(&mut tw, tag, values.reactive_power_mvar)?;
-                }
-                ElectricalPowerMeasurementAttribute::ApparentPower => {
-                    Self::write_nullable_i64(&mut tw, tag, values.apparent_power_mva)?;
-                }
-                ElectricalPowerMeasurementAttribute::RmsVoltage => {
-                    Self::write_nullable_i64(&mut tw, tag, values.rms_voltage_mv)?;
-                }
-                ElectricalPowerMeasurementAttribute::RmsCurrent => {
-                    Self::write_nullable_i64(&mut tw, tag, values.rms_current_ma)?;
-                }
-                ElectricalPowerMeasurementAttribute::Frequency => {
-                    Self::write_nullable_i64(&mut tw, tag, values.frequency_mhz)?;
-                }
-                ElectricalPowerMeasurementAttribute::PowerFactor => {
-                    Self::write_nullable_i64(&mut tw, tag, values.power_factor_centipercent)?;
-                }
-            }
-        }
-
-        writer.complete()
-    }
-
-    fn write_nullable_i64(
-        tw: &mut impl TLVWrite,
-        tag: &TLVTag,
-        value: Option<i64>,
-    ) -> Result<(), Error> {
-        if let Some(value) = value {
-            tw.i64(tag, value)?;
-        } else {
-            tw.null(tag)?;
-        }
-        Ok(())
-    }
-
-    fn write_accuracy_array(
-        tw: &mut impl TLVWrite,
-        tag: &TLVTag,
-        values: ElectricalPowerValues,
-    ) -> Result<(), Error> {
-        tw.start_array(tag)?;
-        Self::write_accuracy(tw, MEASUREMENT_ACTIVE_POWER, values.active_power_mw)?;
-        Self::write_accuracy(tw, MEASUREMENT_REACTIVE_POWER, values.reactive_power_mvar)?;
-        Self::write_accuracy(tw, MEASUREMENT_APPARENT_POWER, values.apparent_power_mva)?;
-        Self::write_accuracy(tw, MEASUREMENT_RMS_VOLTAGE, values.rms_voltage_mv)?;
-        Self::write_accuracy(tw, MEASUREMENT_RMS_CURRENT, values.rms_current_ma)?;
-        Self::write_accuracy(tw, MEASUREMENT_FREQUENCY, values.frequency_mhz)?;
-        Self::write_accuracy(
-            tw,
-            MEASUREMENT_POWER_FACTOR,
-            values.power_factor_centipercent,
-        )?;
-        tw.end_container()?;
-        Ok(())
-    }
-
-    fn write_accuracy(
-        tw: &mut impl TLVWrite,
-        measurement_type: u16,
-        value: Option<i64>,
-    ) -> Result<(), Error> {
-        let value = value.unwrap_or(0);
-        tw.start_struct(&TLVTag::Anonymous)?;
-        tw.u16(&TLVTag::Context(0), measurement_type)?;
-        tw.bool(&TLVTag::Context(1), true)?;
-        tw.i64(&TLVTag::Context(2), value)?;
-        tw.i64(&TLVTag::Context(3), value)?;
-        tw.start_array(&TLVTag::Context(4))?;
-        tw.end_container()?;
-        tw.end_container()?;
-        Ok(())
-    }
-
-    fn write_impl(&self, _ctx: impl WriteContext) -> Result<(), Error> {
-        Err(ErrorCode::UnsupportedAccess.into())
-    }
+fn write_nullable_i64(
+    tw: &mut impl TLVWrite,
+    tag: &TLVTag,
+    value: Option<i64>,
+) -> Result<(), Error> {
+    write_nullable(tw, tag, value, |tw, tag, value| tw.i64(tag, value))
 }
 
-impl Handler for ElectricalPowerMeasurementHandler {
-    fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        self.read_impl(ctx, reply)
-    }
-
-    fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        self.write_impl(ctx)
-    }
-
-    fn bump_dataver(&self, _ctx: impl MatchContext) {
-        self.dataver.changed();
-        self.last_state_version
-            .store(self.state.version(), Ordering::SeqCst);
-    }
+fn write_accuracy_array(
+    tw: &mut impl TLVWrite,
+    tag: &TLVTag,
+    values: ElectricalPowerValues,
+) -> Result<(), Error> {
+    tw.start_array(tag)?;
+    write_accuracy(tw, MEASUREMENT_ACTIVE_POWER, values.active_power_mw)?;
+    write_accuracy(tw, MEASUREMENT_REACTIVE_POWER, values.reactive_power_mvar)?;
+    write_accuracy(tw, MEASUREMENT_APPARENT_POWER, values.apparent_power_mva)?;
+    write_accuracy(tw, MEASUREMENT_RMS_VOLTAGE, values.rms_voltage_mv)?;
+    write_accuracy(tw, MEASUREMENT_RMS_CURRENT, values.rms_current_ma)?;
+    write_accuracy(tw, MEASUREMENT_FREQUENCY, values.frequency_mhz)?;
+    write_accuracy(
+        tw,
+        MEASUREMENT_POWER_FACTOR,
+        values.power_factor_centipercent,
+    )?;
+    tw.end_container()?;
+    Ok(())
 }
 
-impl NonBlockingHandler for ElectricalPowerMeasurementHandler {}
+fn write_accuracy(
+    tw: &mut impl TLVWrite,
+    measurement_type: u16,
+    value: Option<i64>,
+) -> Result<(), Error> {
+    let value = value.unwrap_or(0);
+    tw.start_struct(&TLVTag::Anonymous)?;
+    tw.u16(&TLVTag::Context(0), measurement_type)?;
+    tw.bool(&TLVTag::Context(1), true)?;
+    tw.i64(&TLVTag::Context(2), value)?;
+    tw.i64(&TLVTag::Context(3), value)?;
+    tw.start_array(&TLVTag::Context(4))?;
+    tw.end_container()?;
+    tw.end_container()?;
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

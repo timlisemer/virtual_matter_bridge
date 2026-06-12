@@ -3,21 +3,15 @@
 //! This read-only cluster exposes MQTT diagnostics that do not have direct
 //! standard Matter attributes in the bridge today.
 
-use super::sync_dataver_with_sensor;
-use crate::matter::endpoints::endpoints_helpers::{
-    EndpointChangeTracker, Sensor, SourceReadiness, SourceSnapshot,
-};
+use super::read_only_cluster::define_versioned_read_only_cluster_handler;
+use crate::matter::clusters::tlv_helpers::write_nullable;
+use crate::matter::endpoints::endpoints_helpers::{Sensor, SourceReadiness, TrackedEndpointState};
 use crate::matter::endpoints::{ClusterNotifier, NotifiableSensor};
-use parking_lot::RwLock;
-use rs_matter::dm::{
-    Access, Attribute, Cluster, Dataver, Handler, MatchContext, NonBlockingHandler, Quality,
-    ReadContext, ReadReply, Reply, WriteContext,
-};
-use rs_matter::error::{Error, ErrorCode};
-use rs_matter::tlv::TLVWrite;
+use rs_matter::dm::{Access, Attribute, Cluster, Quality};
+use rs_matter::error::Error;
+use rs_matter::tlv::{TLVTag, TLVWrite};
 use rs_matter::{attribute_enum, attributes, with};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use strum::FromRepr;
 
 pub const CLUSTER_ID: u32 = 0xFC00;
@@ -90,37 +84,26 @@ pub struct ShellyDiagnosticsValues {
 }
 
 pub struct ShellyDiagnosticsState {
-    values: RwLock<ShellyDiagnosticsValues>,
-    changes: EndpointChangeTracker,
-    readiness: Arc<SourceSnapshot<()>>,
+    values: TrackedEndpointState<ShellyDiagnosticsValues>,
 }
 
 impl ShellyDiagnosticsState {
     pub fn new() -> Self {
         Self {
-            values: RwLock::new(ShellyDiagnosticsValues::default()),
-            changes: EndpointChangeTracker::new(),
-            readiness: Arc::new(SourceSnapshot::new()),
+            values: TrackedEndpointState::new(ShellyDiagnosticsValues::default()),
         }
     }
 
     pub fn set_values(&self, values: ShellyDiagnosticsValues) {
-        let was_ready = self.readiness.is_ready();
-        let mut guard = self.values.write();
-        if *guard != values || !was_ready {
-            *guard = values;
-            self.changes.mark_changed();
-        }
-        drop(guard);
-        self.readiness.mark_ready();
+        self.values.set(values);
     }
 
     pub fn values(&self) -> ShellyDiagnosticsValues {
-        self.values.read().clone()
+        self.values.get_cloned()
     }
 
     pub fn readiness(&self) -> Arc<dyn SourceReadiness> {
-        self.readiness.clone()
+        self.values.readiness()
     }
 
     pub fn linkquality(&self) -> Option<u16> {
@@ -144,120 +127,67 @@ impl Default for ShellyDiagnosticsState {
 
 impl Sensor for ShellyDiagnosticsState {
     fn version(&self) -> u32 {
-        self.changes.version()
+        self.values.version()
     }
 }
 
 impl NotifiableSensor for ShellyDiagnosticsState {
     fn set_notifier(&self, notifier: ClusterNotifier) {
-        self.changes.set_notifier(notifier);
+        self.values.set_notifier(notifier);
     }
 }
 
-pub struct ShellyDiagnosticsHandler {
-    dataver: Dataver,
-    state: Arc<ShellyDiagnosticsState>,
-    last_state_version: AtomicU32,
-}
+define_versioned_read_only_cluster_handler!(
+    ShellyDiagnosticsHandler,
+    ShellyDiagnosticsState,
+    ShellyDiagnosticsAttribute,
+    CLUSTER,
+    |sensor, tw, tag, attr| { write_diagnostics_attr(&mut tw, tag, sensor.values(), attr) }
+);
 
-impl ShellyDiagnosticsHandler {
-    pub const CLUSTER: Cluster<'static> = CLUSTER;
-
-    pub fn new(dataver: Dataver, state: Arc<ShellyDiagnosticsState>) -> Self {
-        Self {
-            dataver,
-            state,
-            last_state_version: AtomicU32::new(0),
+fn write_diagnostics_attr(
+    tw: &mut impl TLVWrite,
+    tag: &TLVTag,
+    values: ShellyDiagnosticsValues,
+    attr: ShellyDiagnosticsAttribute,
+) -> Result<(), Error> {
+    match attr {
+        ShellyDiagnosticsAttribute::DhcpEnabled => {
+            write_nullable(tw, tag, values.dhcp_enabled, |tw, tag, value| {
+                tw.bool(tag, value)
+            })?;
+        }
+        ShellyDiagnosticsAttribute::IpAddress => {
+            write_nullable(tw, tag, values.ip_address.as_deref(), |tw, tag, value| {
+                tw.utf8(tag, value)
+            })?;
+        }
+        ShellyDiagnosticsAttribute::Linkquality => {
+            write_nullable(tw, tag, values.linkquality, |tw, tag, value| {
+                tw.u16(tag, value)
+            })?;
+        }
+        ShellyDiagnosticsAttribute::WifiConfigEnabled => {
+            write_nullable(tw, tag, values.wifi_config_enabled, |tw, tag, value| {
+                tw.bool(tag, value)
+            })?;
+        }
+        ShellyDiagnosticsAttribute::WifiConfigSsid => {
+            write_nullable(
+                tw,
+                tag,
+                values.wifi_config_ssid.as_deref(),
+                |tw, tag, value| tw.utf8(tag, value),
+            )?;
+        }
+        ShellyDiagnosticsAttribute::WifiStatus => {
+            write_nullable(tw, tag, values.wifi_status.as_deref(), |tw, tag, value| {
+                tw.utf8(tag, value)
+            })?;
         }
     }
-
-    fn read_impl(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        sync_dataver_with_sensor(&*self.state, &self.last_state_version, &self.dataver);
-
-        let attr = ctx.attr();
-        let Some(mut writer) = reply.with_dataver(self.dataver.get())? else {
-            return Ok(());
-        };
-
-        if attr.is_system() {
-            return CLUSTER.read(attr, writer);
-        }
-
-        let tag = writer.tag();
-        let values = self.state.values();
-        {
-            let mut tw = writer.writer();
-            match attr.attr_id.try_into()? {
-                ShellyDiagnosticsAttribute::DhcpEnabled => {
-                    if let Some(value) = values.dhcp_enabled {
-                        tw.bool(tag, value)?;
-                    } else {
-                        tw.null(tag)?;
-                    }
-                }
-                ShellyDiagnosticsAttribute::IpAddress => {
-                    if let Some(value) = values.ip_address.as_deref() {
-                        tw.utf8(tag, value)?;
-                    } else {
-                        tw.null(tag)?;
-                    }
-                }
-                ShellyDiagnosticsAttribute::Linkquality => {
-                    if let Some(value) = values.linkquality {
-                        tw.u16(tag, value)?;
-                    } else {
-                        tw.null(tag)?;
-                    }
-                }
-                ShellyDiagnosticsAttribute::WifiConfigEnabled => {
-                    if let Some(value) = values.wifi_config_enabled {
-                        tw.bool(tag, value)?;
-                    } else {
-                        tw.null(tag)?;
-                    }
-                }
-                ShellyDiagnosticsAttribute::WifiConfigSsid => {
-                    if let Some(value) = values.wifi_config_ssid.as_deref() {
-                        tw.utf8(tag, value)?;
-                    } else {
-                        tw.null(tag)?;
-                    }
-                }
-                ShellyDiagnosticsAttribute::WifiStatus => {
-                    if let Some(value) = values.wifi_status.as_deref() {
-                        tw.utf8(tag, value)?;
-                    } else {
-                        tw.null(tag)?;
-                    }
-                }
-            }
-        }
-
-        writer.complete()
-    }
-
-    fn write_impl(&self, _ctx: impl WriteContext) -> Result<(), Error> {
-        Err(ErrorCode::UnsupportedAccess.into())
-    }
+    Ok(())
 }
-
-impl Handler for ShellyDiagnosticsHandler {
-    fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        self.read_impl(ctx, reply)
-    }
-
-    fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        self.write_impl(ctx)
-    }
-
-    fn bump_dataver(&self, _ctx: impl MatchContext) {
-        self.dataver.changed();
-        self.last_state_version
-            .store(self.state.version(), Ordering::SeqCst);
-    }
-}
-
-impl NonBlockingHandler for ShellyDiagnosticsHandler {}
 
 #[cfg(test)]
 mod tests {
