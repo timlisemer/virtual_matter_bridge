@@ -772,6 +772,19 @@ fn leak<T>(value: T) -> &'static T {
     Box::leak(Box::new(value))
 }
 
+fn needs_entity_label(
+    device: &VirtualDevice,
+    endpoint: &super::virtual_device::EndpointConfig,
+) -> bool {
+    endpoint.kind == EndpointKind::GenericSwitch
+        || device
+            .endpoints
+            .iter()
+            .filter(|other| other.kind == endpoint.kind)
+            .count()
+            > 1
+}
+
 fn switch_endpoint_clusters(
     ep_config: &super::virtual_device::EndpointConfig,
     onoff_cluster: Cluster<'static>,
@@ -913,13 +926,18 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
                     ),
                 };
 
-            let clusters = if ep_config.battery.is_some() {
-                let mut clusters = clusters.to_vec();
-                clusters.push(BatteryHandler::CLUSTER);
-                leak_slice(&clusters)
-            } else {
-                clusters
-            };
+            let mut child_clusters = clusters.to_vec();
+            if ep_config.battery.is_some() {
+                child_clusters.push(BatteryHandler::CLUSTER);
+            }
+            if needs_entity_label(device, ep_config)
+                && !child_clusters
+                    .iter()
+                    .any(|cluster| cluster.id == fixed_label::CLUSTER.id)
+            {
+                child_clusters.push(fixed_label::CLUSTER);
+            }
+            let clusters = leak_slice(&child_clusters);
             endpoints_vec.push(Endpoint::new(child_id, device_types, clusters));
         }
 
@@ -1179,6 +1197,9 @@ pub async fn run_matter_stack(
                 ),
             );
 
+            if needs_entity_label(device, ep_config) {
+                dynamic_handler.add_label(child_id, Dataver::new_rand(&mut rand), ep_config.label);
+            }
             if let Some(battery) = &ep_config.battery {
                 register_cluster_notifier(
                     battery.as_ref(),
@@ -1328,11 +1349,6 @@ pub async fn run_matter_stack(
                     }
                 }
                 EndpointKind::GenericSwitch => {
-                    dynamic_handler.add_label(
-                        child_id,
-                        Dataver::new_rand(&mut rand),
-                        ep_config.label,
-                    );
                     // Use state from EndpointConfig (created by caller)
                     if let Some(state) = &ep_config.generic_switch_state {
                         // Set endpoint ID so events know where they came from
