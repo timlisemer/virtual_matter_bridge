@@ -4,8 +4,8 @@
 //! This module provides the configuration types needed to define devices at startup.
 
 use super::clusters::{
-    BridgedDeviceInfo, ElectricalEnergyState, ElectricalPowerState, GenericSwitchState,
-    HumiditySensor, ShellyDiagnosticsState, TemperatureSensor,
+    BatterySensor, BridgedDeviceInfo, ElectricalEnergyState, ElectricalPowerState,
+    GenericSwitchState, HumiditySensor, ShellyDiagnosticsState, TemperatureSensor,
 };
 use super::endpoints::EndpointHandler;
 use super::endpoints::endpoints_helpers::{ReadinessOnlyHandler, SourceReadiness};
@@ -42,6 +42,7 @@ pub enum EndpointKind {
 /// Each endpoint has a label (displayed in controllers), a kind (determines
 /// the cluster), and a handler for bidirectional communication.
 pub struct EndpointConfig {
+    pub battery: Option<Arc<BatterySensor>>,
     /// Label displayed in Matter controllers
     pub label: &'static str,
     /// Type of endpoint (determines cluster handler)
@@ -99,6 +100,7 @@ impl EndpointConfig {
             electrical_power: None,
             electrical_energy: None,
             shelly_diagnostics: None,
+            battery: None,
         }
     }
 
@@ -153,6 +155,7 @@ impl EndpointConfig {
             electrical_power: None,
             electrical_energy: None,
             shelly_diagnostics: None,
+            battery: None,
         }
     }
 
@@ -172,6 +175,7 @@ impl EndpointConfig {
             electrical_power: None,
             electrical_energy: None,
             shelly_diagnostics: None,
+            battery: None,
         }
     }
 
@@ -191,7 +195,13 @@ impl EndpointConfig {
             electrical_power: None,
             electrical_energy: None,
             shelly_diagnostics: None,
+            battery: None,
         }
+    }
+
+    pub fn with_battery(mut self, battery: Arc<BatterySensor>) -> Self {
+        self.battery = Some(battery);
+        self
     }
 
     pub fn with_electrical_power(mut self, state: Arc<ElectricalPowerState>) -> Self {
@@ -283,6 +293,7 @@ impl VirtualDevice {
         for endpoint in &self.endpoints {
             endpoint.kind.hash(&mut hasher);
             endpoint.label.hash(&mut hasher);
+            endpoint.battery.is_some().hash(&mut hasher);
             endpoint.electrical_power.is_some().hash(&mut hasher);
             endpoint.electrical_energy.is_some().hash(&mut hasher);
             endpoint.shelly_diagnostics.is_some().hash(&mut hasher);

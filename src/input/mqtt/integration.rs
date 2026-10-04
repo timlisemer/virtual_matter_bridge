@@ -10,9 +10,10 @@ use super::shelly_2pm::{
 use super::w100::{W100Action, W100State};
 use crate::config::MqttConfig;
 use crate::matter::clusters::{
-    ElectricalEnergyState, ElectricalPowerState, GenericSwitchState, HumiditySensor,
+    BatterySensor, ElectricalEnergyState, ElectricalPowerState, GenericSwitchState, HumiditySensor,
     ShellyDiagnosticsState, ShellyDiagnosticsValues, TemperatureSensor,
 };
+use futures_util::StreamExt;
 use log::{info, warn};
 use parking_lot::Mutex;
 use rumqttc::{AsyncClient, QoS};
@@ -20,11 +21,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const ACTION_DEDUP_WINDOW: Duration = Duration::from_millis(500);
 
 /// Configuration for a W100 climate sensor.
 pub struct W100Config {
+    pub battery: Option<Arc<BatterySensor>>,
     /// Friendly name in zigbee2mqtt (e.g., "Büro-Thermometer")
     pub friendly_name: String,
     /// Shared temperature sensor (also used by Matter)
@@ -46,12 +49,18 @@ impl W100Config {
     ) -> Self {
         Self {
             friendly_name: friendly_name.into(),
+            battery: None,
             temperature_sensor,
             humidity_sensor,
             button_plus: None,
             button_minus: None,
             button_center: None,
         }
+    }
+
+    pub fn with_battery(mut self, battery: Arc<BatterySensor>) -> Self {
+        self.battery = Some(battery);
+        self
     }
 
     /// Add button state handlers for Matter GenericSwitch integration.
@@ -103,6 +112,7 @@ impl Shelly2PmConfig {
 
 /// Internal W100 device state for the integration.
 struct W100IntegrationDevice {
+    battery: Option<Arc<BatterySensor>>,
     friendly_name: String,
     temperature_sensor: Arc<TemperatureSensor>,
     humidity_sensor: Arc<HumiditySensor>,
@@ -165,6 +175,17 @@ impl W100IntegrationDevice {
     fn process_state_message(&self, payload: &str, retain: bool) {
         match serde_json::from_str::<W100State>(payload) {
             Ok(state) => {
+                if let (Some(sensor), Some(percent)) = (&self.battery, state.battery) {
+                    sensor.set_percent(percent);
+                }
+                if state.temperature.is_some() || state.humidity.is_some() {
+                    for button in [&self.button_plus, &self.button_minus, &self.button_center]
+                        .into_iter()
+                        .flatten()
+                    {
+                        button.mark_ready();
+                    }
+                }
                 if let Some(temp) = state.temperature {
                     let old_temp = self.temperature_sensor.get_celsius();
                     self.temperature_sensor.set_celsius(temp);
@@ -402,6 +423,8 @@ impl Shelly2PmIntegrationDevice {
 /// Manages MQTT client and device subscriptions, keeping MQTT internals
 /// out of main.rs.
 pub struct MqttIntegration {
+    doorbell: Option<Arc<GenericSwitchState>>,
+    state_cache_url: Option<String>,
     config: MqttConfig,
     w100_devices: Vec<W100IntegrationDevice>,
     shelly_2pm_devices: Vec<Shelly2PmIntegrationDevice>,
@@ -433,9 +456,69 @@ impl MqttIntegration {
     pub fn new(config: MqttConfig) -> Self {
         Self {
             config,
+            state_cache_url: None,
+            doorbell: None,
             w100_devices: Vec::new(),
             shelly_2pm_devices: Vec::new(),
             shelly_2pm_command_receivers: Vec::new(),
+        }
+    }
+
+    pub fn with_doorbell(mut self, button: Arc<GenericSwitchState>) -> Self {
+        self.doorbell = Some(button);
+        self
+    }
+
+    /// Use the read-only Zigbee2MQTT frontend feed to load cached sensor states.
+    pub fn with_state_cache(mut self, url: String) -> Self {
+        self.state_cache_url = Some(url);
+        self
+    }
+
+    async fn load_cached_states(&self) {
+        let Some(url) = &self.state_cache_url else {
+            return;
+        };
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut ws, _) = connect_async(url).await?;
+            let mut names: std::collections::HashSet<&str> = self
+                .w100_devices
+                .iter()
+                .map(|device| device.friendly_name.as_str())
+                .collect();
+            while !names.is_empty() {
+                let Some(message) = ws.next().await else {
+                    break;
+                };
+                let Message::Text(text) = message? else {
+                    continue;
+                };
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
+                let Some(name) = value["topic"].as_str() else {
+                    continue;
+                };
+                if !names.remove(name) {
+                    continue;
+                }
+                if let Some(device) = self
+                    .w100_devices
+                    .iter()
+                    .find(|device| device.friendly_name == name)
+                {
+                    device.process_state_message(&value["payload"].to_string(), true);
+                    info!("[MQTT] Loaded cached state for {}", name);
+                }
+            }
+            ws.close(None).await?;
+            Ok::<_, tokio_tungstenite::tungstenite::Error>(())
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => warn!("[MQTT] Could not load state cache: {}", error),
+            Err(_) => warn!("[MQTT] State cache read timed out"),
         }
     }
 
@@ -443,6 +526,7 @@ impl MqttIntegration {
     pub fn with_w100(mut self, config: W100Config) -> Self {
         self.w100_devices.push(W100IntegrationDevice {
             friendly_name: config.friendly_name,
+            battery: config.battery,
             temperature_sensor: config.temperature_sensor,
             humidity_sensor: config.humidity_sensor,
             button_plus: config.button_plus,
@@ -546,8 +630,15 @@ impl MqttIntegration {
                         connected_once = true;
                     }
                     self.subscribe_and_request_state(&subscribe_client).await;
+                    self.load_cached_states().await;
                 }
                 Some(msg) = msg_rx.recv() => {
+                    if msg.topic == "virtual-matter-bridge/doorbell/press" && !msg.retain
+                        && msg.payload.trim() == "press"
+                        && let Some(button) = &self.doorbell
+                    {
+                        button.single_press();
+                    }
                     for device in &self.w100_devices {
                         if device.process_message(&msg.topic, &msg.payload, msg.retain) {
                             break; // Message was handled by this device
@@ -577,6 +668,11 @@ impl MqttIntegration {
     }
 
     async fn subscribe_and_request_state(&self, client: &AsyncClient) {
+        if self.doorbell.is_some() {
+            let _ = client
+                .subscribe("virtual-matter-bridge/doorbell/press", QoS::AtMostOnce)
+                .await;
+        }
         for topic in self.subscription_topics() {
             if let Err(e) = client.subscribe(&topic, QoS::AtMostOnce).await {
                 warn!("[MQTT] Failed to subscribe to {}: {:?}", topic, e);
@@ -588,8 +684,17 @@ impl MqttIntegration {
 
         // Request current state from all devices.
         for (friendly_name, get_topic) in self.state_request_topics() {
+            let payload = if self
+                .w100_devices
+                .iter()
+                .any(|device| device.friendly_name == friendly_name)
+            {
+                r#"{"temperature":"","humidity":""}"#
+            } else {
+                r#"{"state_l1":"","state_l2":""}"#
+            };
             if let Err(e) = client
-                .publish(&get_topic, QoS::AtMostOnce, false, r#"{"state":""}"#)
+                .publish(&get_topic, QoS::AtMostOnce, false, payload)
                 .await
             {
                 warn!(
@@ -672,6 +777,7 @@ mod tests {
 
         (
             W100IntegrationDevice {
+                battery: None,
                 friendly_name: "W100".to_string(),
                 temperature_sensor: Arc::new(TemperatureSensor::new(20.0)),
                 humidity_sensor: Arc::new(HumiditySensor::new(50.0)),
@@ -703,6 +809,23 @@ mod tests {
         handle.shutdown().await;
 
         assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn cached_sensor_state_makes_buttons_ready_without_replaying_actions() {
+        let (mut device, plus, minus, center) = test_device();
+        let battery = Arc::new(BatterySensor::new());
+        device.battery = Some(battery.clone());
+        assert!(!plus.readiness().is_ready());
+        device.process_state_message(
+            r#"{"temperature":22.43,"humidity":50.07,"battery":100,"action":"single_plus"}"#,
+            true,
+        );
+        assert_eq!(battery.half_percent(), Some(200));
+        for button in [plus, minus, center] {
+            assert!(button.readiness().is_ready());
+            assert!(button.take_pending_events().is_empty());
+        }
     }
 
     #[test]
@@ -895,6 +1018,7 @@ mod tests {
     fn umlaut_friendly_name_builds_and_matches_mqtt_topics() {
         let plus = Arc::new(GenericSwitchState::new());
         let device = W100IntegrationDevice {
+            battery: None,
             friendly_name: "Büro-Thermometer".to_string(),
             temperature_sensor: Arc::new(TemperatureSensor::new(20.0)),
             humidity_sensor: Arc::new(HumiditySensor::new(50.0)),

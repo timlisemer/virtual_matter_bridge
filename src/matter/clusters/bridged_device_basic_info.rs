@@ -28,6 +28,8 @@ const CLUSTER_REVISION: u16 = 4;
 pub enum BridgedDeviceBasicInfoAttribute {
     /// Vendor name - manufacturer name (e.g., "Aqara")
     VendorName = 0x0001,
+    VendorId = 0x0002,
+    ProductId = 0x0004,
     /// Product name - model name (e.g., "Climate Sensor W100")
     ProductName = 0x0003,
     /// Node label - user-friendly name for the endpoint
@@ -50,6 +52,16 @@ const CLUSTER: Cluster<'static> = Cluster {
     revision: CLUSTER_REVISION,
     feature_map: 0,
     attributes: attributes!(
+        Attribute::new(
+            BridgedDeviceBasicInfoAttribute::VendorId as _,
+            Access::RV,
+            rs_matter::dm::Quality::NONE
+        ),
+        Attribute::new(
+            BridgedDeviceBasicInfoAttribute::ProductId as _,
+            Access::RV,
+            rs_matter::dm::Quality::NONE
+        ),
         // VendorName: optional, read-only string
         Attribute::new(
             BridgedDeviceBasicInfoAttribute::VendorName as _,
@@ -226,6 +238,14 @@ impl BridgedHandler {
             let mut tw = writer.writer();
 
             match attr.attr_id.try_into()? {
+                // The virtual endpoint uses the bridge's test identity. Home Assistant
+                // uses this identity to read the ha_entitylabel FixedLabel entry.
+                BridgedDeviceBasicInfoAttribute::VendorId => {
+                    tw.u16(tag, crate::matter::device_info::DEV_INFO.vid)?;
+                }
+                BridgedDeviceBasicInfoAttribute::ProductId => {
+                    tw.u16(tag, crate::matter::device_info::DEV_INFO.pid)?;
+                }
                 BridgedDeviceBasicInfoAttribute::VendorName => {
                     if let Some(vendor) = self.info.vendor_name {
                         tw.utf8(tag, vendor)?;

@@ -18,7 +18,7 @@ use crate::input::mqtt::{
     MqttIntegration, Shelly2PmConfig, Shelly2PmParts, W100Config, shelly_2pm_parts,
 };
 use crate::matter::clusters::{
-    BridgedDeviceInfo, GenericSwitchState, HumiditySensor, TemperatureSensor,
+    BatterySensor, BridgedDeviceInfo, GenericSwitchState, HumiditySensor, TemperatureSensor,
 };
 use crate::matter::endpoints::{
     EndpointHandler, ReadinessOnlyHandler, SourceReadiness, SourceSnapshot,
@@ -38,43 +38,101 @@ type StatePusher = Arc<dyn Fn(bool) + Send + Sync>;
 
 const W100_MATTER_DEVICE_NAME: &str = "Büro Thermometer";
 const W100_ZIGBEE2MQTT_FRIENDLY_NAME: &str = "Büro-Thermometer";
-const SHELLY_2PM_SWITCH_1_MATTER_DEVICE_NAME: &str = "Shelly 2PM Gen4 - Switch 1";
-const SHELLY_2PM_SWITCH_2_MATTER_DEVICE_NAME: &str = "Shelly 2PM Gen4 - Switch 2";
+const SHELLY_2PM_SWITCH_1_MATTER_DEVICE_NAME: &str = "Büro Licht";
+const SHELLY_2PM_SWITCH_2_MATTER_DEVICE_NAME: &str = "Tim-PC";
 const SHELLY_2PM_SWITCH_1_ENDPOINT_NAME: &str = "Büro Licht";
 const SHELLY_2PM_SWITCH_2_ENDPOINT_NAME: &str = "Tim-PC";
 const SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME: &str = "Büro Licht & PC Schalter";
 const MATTER_UNAVAILABLE_PROPAGATION_GRACE: Duration = Duration::from_secs(2);
 
-fn shelly_2pm_virtual_devices(parts: &Shelly2PmParts) -> [VirtualDevice; 2] {
+fn shelly_devices(
+    parts: &Shelly2PmParts,
+    l2_name: &'static str,
+    l1_name: &'static str,
+    l2_light: bool,
+) -> [VirtualDevice; 2] {
+    let l2 = if l2_light {
+        EndpointConfig::light_switch(l2_name, parts.l2_handler.clone())
+    } else {
+        EndpointConfig::switch(l2_name, parts.l2_handler.clone())
+    };
     [
-        VirtualDevice::new(SHELLY_2PM_SWITCH_1_MATTER_DEVICE_NAME)
+        VirtualDevice::new(l2_name)
             .with_device_info(
-                BridgedDeviceInfo::new(SHELLY_2PM_SWITCH_1_MATTER_DEVICE_NAME)
+                BridgedDeviceInfo::new(l2_name)
                     .with_vendor("Shelly")
                     .with_product("Shelly 2PM Gen4"),
             )
             .with_endpoint(
-                EndpointConfig::light_switch(
-                    SHELLY_2PM_SWITCH_1_ENDPOINT_NAME,
-                    parts.l2_handler.clone(),
-                )
-                .with_electrical_power(parts.l2_power.clone())
-                .with_electrical_energy(parts.l2_energy.clone())
-                .with_shelly_diagnostics(parts.diagnostics.clone()),
+                l2.with_electrical_power(parts.l2_power.clone())
+                    .with_electrical_energy(parts.l2_energy.clone())
+                    .with_shelly_diagnostics(parts.diagnostics.clone()),
             ),
-        VirtualDevice::new(SHELLY_2PM_SWITCH_2_MATTER_DEVICE_NAME)
+        VirtualDevice::new(l1_name)
             .with_device_info(
-                BridgedDeviceInfo::new(SHELLY_2PM_SWITCH_2_MATTER_DEVICE_NAME)
+                BridgedDeviceInfo::new(l1_name)
                     .with_vendor("Shelly")
                     .with_product("Shelly 2PM Gen4"),
             )
             .with_endpoint(
-                EndpointConfig::switch(SHELLY_2PM_SWITCH_2_ENDPOINT_NAME, parts.l1_handler.clone())
+                EndpointConfig::switch(l1_name, parts.l1_handler.clone())
                     .with_electrical_power(parts.l1_power.clone())
                     .with_electrical_energy(parts.l1_energy.clone())
                     .with_shelly_diagnostics(parts.diagnostics.clone()),
             ),
     ]
+}
+
+fn shelly_2pm_virtual_devices(parts: &Shelly2PmParts) -> [VirtualDevice; 2] {
+    shelly_devices(
+        parts,
+        SHELLY_2PM_SWITCH_1_MATTER_DEVICE_NAME,
+        SHELLY_2PM_SWITCH_2_MATTER_DEVICE_NAME,
+        true,
+    )
+}
+
+/// Live Zigbee2MQTT inventory. Keep this order stable for Matter endpoint IDs.
+const OTHER_W100_DEVICES: &[&str] = &[
+    "Tim-Schlafzimmer Thermometer",
+    "Küche-Thermometer",
+    "Wohnzimmer-Thermometer",
+];
+
+fn w100_device(name: &'static str) -> (VirtualDevice, W100Config) {
+    let battery = Arc::new(BatterySensor::new());
+    let temperature = Arc::new(TemperatureSensor::new(20.0));
+    let humidity = Arc::new(HumiditySensor::new(50.0));
+    let plus = Arc::new(GenericSwitchState::new());
+    let minus = Arc::new(GenericSwitchState::new());
+    let center = Arc::new(GenericSwitchState::new());
+    let device = VirtualDevice::new(name)
+        .with_device_info(
+            BridgedDeviceInfo::new(name)
+                .with_vendor("Aqara")
+                .with_product("Climate Sensor W100"),
+        )
+        .with_endpoint(
+            EndpointConfig::temperature_sensor("Temperature", temperature.clone())
+                .with_battery(battery.clone()),
+        )
+        .with_endpoint(EndpointConfig::humidity_sensor(
+            "Humidity",
+            humidity.clone(),
+        ))
+        .with_endpoint(EndpointConfig::generic_switch("Button Plus", plus.clone()))
+        .with_endpoint(EndpointConfig::generic_switch(
+            "Button Minus",
+            minus.clone(),
+        ))
+        .with_endpoint(EndpointConfig::generic_switch(
+            "Button Center",
+            center.clone(),
+        ));
+    let config = W100Config::new(name, temperature, humidity)
+        .with_battery(battery)
+        .with_buttons(plus, minus, center);
+    (device, config)
 }
 
 fn init_logger() {
@@ -236,6 +294,7 @@ async fn main() {
     let shelly_parts = shelly_2pm_parts(SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME);
 
     // Create W100 climate sensors (will be updated by MQTT)
+    let w100_battery = Arc::new(BatterySensor::new());
     let w100_temperature = Arc::new(TemperatureSensor::new(20.0)); // Default 20°C
     let w100_humidity = Arc::new(HumiditySensor::new(50.0)); // Default 50%
     // W100 button states (Plus, Minus, Center buttons)
@@ -243,12 +302,14 @@ async fn main() {
     let w100_button_minus = Arc::new(GenericSwitchState::new());
     let w100_button_center = Arc::new(GenericSwitchState::new());
 
+    let doorbell_button = Arc::new(GenericSwitchState::new());
+    doorbell_button.mark_ready();
     let doorbell_handler = Arc::new(ReadinessOnlyHandler::new(camera.read().readiness()));
 
     // Define our virtual devices using the new API
     let [shelly_switch_1_device, shelly_switch_2_device] =
         shelly_2pm_virtual_devices(&shelly_parts);
-    let virtual_devices = vec![
+    let mut virtual_devices = vec![
         // Door sensor (parent) with contact sensor endpoint (child)
         VirtualDevice::new("Door").with_endpoint(EndpointConfig::contact_sensor(
             "Door Sensor",
@@ -268,10 +329,15 @@ async fn main() {
         shelly_switch_2_device,
         // Video Doorbell (parent) with camera endpoint (child)
         // Camera handlers are not wired into the Matter router; streaming remains experimental.
-        VirtualDevice::new("Video Doorbell").with_endpoint(EndpointConfig::video_doorbell_camera(
-            "Camera",
-            doorbell_handler.clone(),
-        )),
+        VirtualDevice::new("Video Doorbell")
+            .with_endpoint(EndpointConfig::video_doorbell_camera(
+                "Camera",
+                doorbell_handler.clone(),
+            ))
+            .with_endpoint(EndpointConfig::generic_switch(
+                "Doorbell Press",
+                doorbell_button.clone(),
+            )),
         // W100 Climate Sensor (Aqara TH-S04D) via MQTT/zigbee2mqtt
         VirtualDevice::new(W100_MATTER_DEVICE_NAME)
             .with_device_info(
@@ -279,10 +345,10 @@ async fn main() {
                     .with_vendor("Aqara")
                     .with_product("Climate Sensor W100"),
             )
-            .with_endpoint(EndpointConfig::temperature_sensor(
-                "Temperature",
-                w100_temperature.clone(),
-            ))
+            .with_endpoint(
+                EndpointConfig::temperature_sensor("Temperature", w100_temperature.clone())
+                    .with_battery(w100_battery.clone()),
+            )
             .with_endpoint(EndpointConfig::humidity_sensor(
                 "Humidity",
                 w100_humidity.clone(),
@@ -300,6 +366,42 @@ async fn main() {
                 w100_button_center.clone(),
             )),
     ];
+    let mut mqtt = MqttIntegration::new(mqtt_config)
+        .with_doorbell(doorbell_button)
+        .with_w100(
+            W100Config::new(
+                W100_ZIGBEE2MQTT_FRIENDLY_NAME,
+                w100_temperature.clone(),
+                w100_humidity.clone(),
+            )
+            .with_battery(w100_battery)
+            .with_buttons(
+                w100_button_plus.clone(),
+                w100_button_minus.clone(),
+                w100_button_center.clone(),
+            ),
+        )
+        .with_shelly_2pm(Shelly2PmConfig::new(
+            SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME,
+            shelly_parts,
+        ));
+    for &name in OTHER_W100_DEVICES {
+        let (device, config) = w100_device(name);
+        virtual_devices.push(device);
+        mqtt = mqtt.with_w100(config);
+    }
+    if let Ok(url) = std::env::var("ZIGBEE2MQTT_WS_URL") {
+        mqtt = mqtt.with_state_cache(url);
+    }
+    let bedroom_name = "Tim-Schlafzimmer-TV-Steckdosen";
+    let bedroom = shelly_2pm_parts(bedroom_name);
+    virtual_devices.extend(shelly_devices(
+        &bedroom,
+        "Tim-Schlafzimmer Steckdose",
+        "Tim-Schlafzimmer TV",
+        false,
+    ));
+    mqtt = mqtt.with_shelly_2pm(Shelly2PmConfig::new(bedroom_name, bedroom));
     let endpoint_readiness = collect_endpoint_readiness(&virtual_devices);
 
     // Initialize the camera input
@@ -337,24 +439,7 @@ async fn main() {
     });
 
     // Start MQTT integration for W100 climate sensor (self-contained!)
-    let mqtt_task = MqttIntegration::new(mqtt_config)
-        .with_w100(
-            W100Config::new(
-                W100_ZIGBEE2MQTT_FRIENDLY_NAME,
-                w100_temperature.clone(),
-                w100_humidity.clone(),
-            )
-            .with_buttons(
-                w100_button_plus.clone(),
-                w100_button_minus.clone(),
-                w100_button_center.clone(),
-            ),
-        )
-        .with_shelly_2pm(Shelly2PmConfig::new(
-            SHELLY_2PM_ZIGBEE2MQTT_FRIENDLY_NAME,
-            shelly_parts,
-        ))
-        .start();
+    let mqtt_task = mqtt.start();
 
     // Start Matter stack in a separate thread
     // Matter uses blocking I/O internally with embassy, so we run it on a dedicated thread

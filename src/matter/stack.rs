@@ -1,7 +1,7 @@
 use super::clusters::{
-    BooleanStateHandler, BridgedDeviceInfo, BridgedHandler, ElectricalEnergyMeasurementHandler,
-    ElectricalPowerMeasurementHandler, GenericSwitchHandler, GenericSwitchState,
-    IcdManagementHandler, OccupancySensingHandler, RelativeHumidityHandler,
+    BatteryHandler, BooleanStateHandler, BridgedDeviceInfo, BridgedHandler,
+    ElectricalEnergyMeasurementHandler, ElectricalPowerMeasurementHandler, GenericSwitchHandler,
+    GenericSwitchState, IcdManagementHandler, OccupancySensingHandler, RelativeHumidityHandler,
     ShellyDiagnosticsHandler, TemperatureMeasurementHandler,
 };
 use super::device_info::DEV_INFO;
@@ -27,6 +27,8 @@ use rs_matter::crypto::{Crypto, default_crypto};
 use rs_matter::dm::IMBuffer;
 use rs_matter::dm::clusters::app::on_off::OnOffHooks;
 use rs_matter::dm::clusters::desc::{self, ClusterHandler as _, PartsMatcher};
+use rs_matter::dm::clusters::fixed_label::HandlerAdaptor;
+use rs_matter::dm::clusters::fixed_label::{self, FixedLabelEntry, FixedLabelHandler};
 use rs_matter::dm::clusters::net_comm::SharedNetworks;
 use rs_matter::dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM};
 use rs_matter::dm::endpoints;
@@ -155,6 +157,9 @@ impl DynBase for DynamicPartsMatcher {}
 
 /// Handler entry for dynamic routing.
 enum DynamicHandlerEntry {
+    Battery {
+        handler: BatteryHandler,
+    },
     /// BooleanState cluster handler using SensorBridge
     BooleanState {
         dataver: Dataver,
@@ -176,17 +181,28 @@ enum DynamicHandlerEntry {
         parts_matcher: &'static DynamicPartsMatcher,
     },
     /// Descriptor handler for child endpoints (no parts)
-    Desc { dataver: Dataver },
+    Desc {
+        dataver: Dataver,
+    },
     /// BridgedDeviceBasicInformation handler
-    Bridged { handler: BridgedHandler },
+    Bridged {
+        handler: BridgedHandler,
+    },
+    FixedLabel {
+        handler: HandlerAdaptor<FixedLabelHandler<'static>>,
+    },
     /// TemperatureMeasurement cluster handler
     Temperature {
         handler: TemperatureMeasurementHandler,
     },
     /// RelativeHumidityMeasurement cluster handler
-    Humidity { handler: RelativeHumidityHandler },
+    Humidity {
+        handler: RelativeHumidityHandler,
+    },
     /// GenericSwitch cluster handler (for buttons)
-    GenericSwitch { handler: GenericSwitchHandler },
+    GenericSwitch {
+        handler: GenericSwitchHandler,
+    },
     /// ElectricalPowerMeasurement cluster handler
     ElectricalPower {
         handler: ElectricalPowerMeasurementHandler,
@@ -196,7 +212,9 @@ enum DynamicHandlerEntry {
         handler: ElectricalEnergyMeasurementHandler,
     },
     /// Shelly diagnostics cluster handler
-    ShellyDiagnostics { handler: ShellyDiagnosticsHandler },
+    ShellyDiagnostics {
+        handler: ShellyDiagnosticsHandler,
+    },
 }
 
 /// Dynamic handler that routes requests based on (endpoint_id, cluster_id).
@@ -258,6 +276,26 @@ impl DynamicHandler {
         self.handlers.insert(
             (ep, BridgedHandler::CLUSTER.id),
             DynamicHandlerEntry::Bridged { handler },
+        );
+    }
+
+    pub fn add_label(&mut self, ep: u16, dataver: Dataver, label: &'static str) {
+        let entries = leak_slice(&[FixedLabelEntry {
+            label: "ha_entitylabel",
+            value: label,
+        }]);
+        self.handlers.insert(
+            (ep, fixed_label::CLUSTER.id),
+            DynamicHandlerEntry::FixedLabel {
+                handler: FixedLabelHandler::new(dataver, entries).adapt(),
+            },
+        );
+    }
+
+    pub fn add_battery(&mut self, ep: u16, handler: BatteryHandler) {
+        self.handlers.insert(
+            (ep, BatteryHandler::CLUSTER.id),
+            DynamicHandlerEntry::Battery { handler },
         );
     }
 
@@ -338,6 +376,8 @@ impl Handler for DynamicHandler {
                     Handler::read(&handler.adapt(), ctx, reply)
                 }
                 DynamicHandlerEntry::Bridged { handler } => handler.read(ctx, reply),
+                DynamicHandlerEntry::Battery { handler } => handler.read(ctx, reply),
+                DynamicHandlerEntry::FixedLabel { handler } => handler.read(ctx, reply),
                 DynamicHandlerEntry::Temperature { handler } => handler.read(ctx, reply),
                 DynamicHandlerEntry::Humidity { handler } => handler.read(ctx, reply),
                 DynamicHandlerEntry::GenericSwitch { handler } => handler.read(ctx, reply),
@@ -411,6 +451,8 @@ impl Handler for DynamicHandler {
                         dataver.changed();
                     }
                     DynamicHandlerEntry::Bridged { handler } => handler.bump_dataver(&ctx),
+                    DynamicHandlerEntry::Battery { handler } => handler.bump_dataver(&ctx),
+                    DynamicHandlerEntry::FixedLabel { handler } => handler.bump_dataver(&ctx),
                     DynamicHandlerEntry::Temperature { handler } => handler.bump_dataver(&ctx),
                     DynamicHandlerEntry::Humidity { handler } => handler.bump_dataver(&ctx),
                     DynamicHandlerEntry::GenericSwitch { handler } => handler.bump_dataver(&ctx),
@@ -681,20 +723,13 @@ fn check_schema_and_maybe_reset(
         }
         Some(old_hash) => {
             info!(
-                "Schema hash changed ({:#018x} -> {:#018x}), resetting persistence",
+                "Schema changed ({:#018x} -> {:#018x}); keeping Matter fabric credentials. Re-interview the node to load new endpoints.",
                 old_hash, current_hash
             );
-            // Delete matter.bin to force re-commissioning
-            if let Err(e) = fs::remove_file(persist_path)
-                && e.kind() != std::io::ErrorKind::NotFound
-            {
-                error!("Failed to delete persistence file: {}", e);
-            }
-            // Write new schema hash
             if let Err(e) = fs::write(schema_path, format!("{}\n", current_hash)) {
                 error!("Failed to write schema hash: {}", e);
             }
-            true
+            false
         }
         None => {
             // No stored hash, first run or corrupted - write current hash
@@ -872,11 +907,19 @@ pub fn build_node(virtual_devices: &[VirtualDevice]) -> BuiltNode {
                         clusters!(
                             desc::DescHandler::CLUSTER,
                             BridgedHandler::CLUSTER,
-                            GenericSwitchHandler::CLUSTER
+                            GenericSwitchHandler::CLUSTER,
+                            fixed_label::CLUSTER
                         ),
                     ),
                 };
 
+            let clusters = if ep_config.battery.is_some() {
+                let mut clusters = clusters.to_vec();
+                clusters.push(BatteryHandler::CLUSTER);
+                leak_slice(&clusters)
+            } else {
+                clusters
+            };
             endpoints_vec.push(Endpoint::new(child_id, device_types, clusters));
         }
 
@@ -986,7 +1029,7 @@ pub async fn run_matter_stack(
         rs_matter::error::ErrorCode::StdIoError
     })?;
 
-    let bind_addr = SocketAddr::new(IpAddr::V6(ipv6_addr), MATTER_PORT);
+    let bind_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), MATTER_PORT);
     raw_socket.bind(&bind_addr.into()).map_err(|e| {
         error!("Failed to bind UDP socket to {:?}: {}", bind_addr, e);
         rs_matter::error::ErrorCode::StdIoError
@@ -1136,6 +1179,18 @@ pub async fn run_matter_stack(
                 ),
             );
 
+            if let Some(battery) = &ep_config.battery {
+                register_cluster_notifier(
+                    battery.as_ref(),
+                    sensor_notify_ref,
+                    child_id,
+                    BatteryHandler::CLUSTER.id,
+                );
+                dynamic_handler.add_battery(
+                    child_id,
+                    BatteryHandler::new(Dataver::new_rand(&mut rand), battery.clone()),
+                );
+            }
             match ep_config.kind {
                 EndpointKind::ContactSensor => {
                     let bridge = SensorBridge::new(ep_config.handler.clone());
@@ -1273,6 +1328,11 @@ pub async fn run_matter_stack(
                     }
                 }
                 EndpointKind::GenericSwitch => {
+                    dynamic_handler.add_label(
+                        child_id,
+                        Dataver::new_rand(&mut rand),
+                        ep_config.label,
+                    );
                     // Use state from EndpointConfig (created by caller)
                     if let Some(state) = &ep_config.generic_switch_state {
                         // Set endpoint ID so events know where they came from

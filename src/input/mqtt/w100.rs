@@ -50,6 +50,8 @@ impl From<&str> for W100Action {
 /// W100 state from zigbee2mqtt.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct W100State {
+    #[serde(default)]
+    pub battery: Option<u8>,
     /// Current temperature reading (°C)
     #[serde(default)]
     pub temperature: Option<f32>,

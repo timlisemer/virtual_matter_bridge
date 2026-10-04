@@ -7,6 +7,8 @@
 //! because the provisional camera clusters have path resolution issues when used from
 //! outside the rs-matter crate.
 
+pub mod battery;
+pub use battery::{BatteryHandler, BatterySensor};
 pub mod boolean_state;
 pub mod bridged_device_basic_info;
 pub mod camera_av_stream_mgmt;
