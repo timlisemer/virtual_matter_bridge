@@ -37,6 +37,10 @@ Home Assistant does not create native sensors for Matter frequency, power
 factor, or the custom Shelly diagnostics cluster. The bridge publishes these
 attributes, but their absence from the UI is a controller limitation.
 
+The NixOS `Virtual Matter Bridge` dashboard shows the Matter entities and
+read-only MQTT companion values for frequency, power factor, and network
+diagnostics. Its Shelly state cards have no switch action.
+
 ## Simulation
 
 Publish the non-retained payload `press` to
@@ -46,6 +50,8 @@ real Shelly command topic.
 The NixOS test stream is `rtsp://vmb-doorbell-stream:8554/doorbell` inside the
 Home Assistant Docker network. The camera dashboard includes the stream and
 the Matter press event. It does not control the real Reolink doorbell.
+The dashboard's `Simulated Doorbell Press` helper publishes only to the
+simulation topic.
 
 ## Checks
 
