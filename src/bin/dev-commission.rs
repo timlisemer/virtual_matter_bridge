@@ -78,110 +78,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let (mut write, mut read) = ws_stream.split();
 
-    match cli.command {
+    let (command, args, timeout_seconds) = match &cli.command {
         Commands::Commission {
             discriminator,
             passcode,
         } => {
-            let pairing_code = generate_pairing_code(discriminator, passcode);
+            let pairing_code = generate_pairing_code(*discriminator, *passcode);
             println!("Commissioning with code: {}", pairing_code);
-
-            send_ws_request(
-                &mut write,
-                "1",
+            (
                 "commission_with_code",
                 Some(serde_json::json!({
                     "code": pairing_code,
                     "network_only": true
                 })),
+                120,
             )
-            .await?;
-
-            // Wait for response (with timeout)
-            println!("Waiting for commissioning response (this may take 30-60 seconds)...");
-            let timeout = tokio::time::timeout(
-                Duration::from_secs(120),
-                wait_for_ws_response(&mut read, "1", |text| println!("Received: {}", text)),
-            )
-            .await;
-
-            match timeout {
-                Ok(Ok(Some(response))) => {
-                    if let Some(error_code) = response.error_code {
-                        eprintln!("Commissioning failed with error code: {}", error_code);
-                        if let Some(details) = response.details {
-                            eprintln!("Details: {}", details);
-                        }
-                    } else if let Some(result) = response.result {
-                        println!("Commissioning successful!");
-                        println!("Result: {}", serde_json::to_string_pretty(&result)?);
-                    }
-                }
-                Ok(Ok(None)) => {
-                    eprintln!("Connection closed before receiving response");
-                }
-                Ok(Err(e)) => {
-                    eprintln!("WebSocket error: {}", e);
-                }
-                Err(_) => {
-                    eprintln!("Timeout waiting for commissioning response");
-                    eprintln!("The device may still be commissioning in the background.");
-                    eprintln!("Check Home Assistant for the new device.");
-                }
-            }
         }
         Commands::Remove { node_id } => {
             println!("Removing node {}...", node_id);
-
-            send_ws_request(
-                &mut write,
-                "1",
+            (
                 "remove_node",
-                Some(serde_json::json!({
-                    "node_id": node_id
-                })),
+                Some(serde_json::json!({"node_id": node_id})),
+                30,
             )
-            .await?;
-
-            // Wait for response
-            match wait_for_ws_response(&mut read, "1", |text| println!("Received: {}", text)).await
-            {
-                Ok(Some(response)) => {
-                    if response.error_code.is_some() {
-                        eprintln!("Remove failed: {:?}", response.details);
-                    } else {
-                        println!("Node {} removed successfully", node_id);
-                    }
-                }
-                Ok(None) => {
-                    eprintln!("Connection closed before receiving response");
-                }
-                Err(e) => {
-                    eprintln!("WebSocket error: {}", e);
-                }
-            }
         }
         Commands::Status => {
             println!("Getting node status...");
+            ("get_nodes", None, 30)
+        }
+    };
 
-            send_ws_request(&mut write, "1", "get_nodes", None).await?;
+    send_ws_request(&mut write, "1", command, args).await?;
+    let response = tokio::time::timeout(
+        Duration::from_secs(timeout_seconds),
+        wait_for_ws_response(&mut read, "1", |_| {}),
+    )
+    .await
+    .map_err(|_| format!("Timeout waiting for {} response", command))??
+    .ok_or("Connection closed before receiving response")?;
 
-            // Wait for response
-            match wait_for_ws_response(&mut read, "1", |_| {}).await {
-                Ok(Some(response)) => {
-                    if let Some(result) = response.result {
-                        println!("Nodes:\n{}", serde_json::to_string_pretty(&result)?);
-                    } else if response.error_code.is_some() {
-                        eprintln!("Failed to get nodes: {:?}", response.details);
-                    }
-                }
-                Ok(None) => {
-                    eprintln!("Connection closed before receiving response");
-                }
-                Err(e) => {
-                    eprintln!("WebSocket error: {}", e);
-                }
+    if let Some(error_code) = response.error_code {
+        return Err(format!(
+            "{} failed (error {}): {}",
+            command,
+            error_code,
+            response.details.unwrap_or_default()
+        )
+        .into());
+    }
+
+    match cli.command {
+        Commands::Commission { .. } => {
+            let result = response
+                .result
+                .ok_or("No commissioning result in response")?;
+            println!("Commissioning successful!");
+            println!("Result: {}", serde_json::to_string_pretty(&result)?);
+        }
+        Commands::Remove { node_id } => {
+            println!("Node {} removed successfully", node_id);
+        }
+        Commands::Status => {
+            let result = response.result.ok_or("No nodes in response")?;
+            if !result.is_array() {
+                return Err("Nodes is not an array".into());
             }
+            println!("Nodes:\n{}", serde_json::to_string_pretty(&result)?);
         }
     }
 

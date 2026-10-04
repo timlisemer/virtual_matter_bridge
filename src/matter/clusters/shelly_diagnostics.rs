@@ -14,7 +14,8 @@ use rs_matter::{attribute_enum, attributes, with};
 use std::sync::Arc;
 use strum::FromRepr;
 
-pub const CLUSTER_ID: u32 = 0xFC00;
+// The upper 16 bits identify the development bridge vendor (0xFFF1).
+pub const CLUSTER_ID: u32 = 0xFFF1_FC00;
 pub const CLUSTER_REVISION: u16 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, FromRepr)]

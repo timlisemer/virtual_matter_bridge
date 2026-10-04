@@ -16,7 +16,7 @@ macro_rules! define_scalar_measurement_handler {
             |sensor, tw, tag, attr| {
                 match attr {
                     $attr::MeasuredValue => {
-                        tw.$write_raw(tag, sensor.raw_value())?;
+                        Self::write_measured_value(sensor, &mut tw, tag)?;
                     }
                     $attr::MinMeasuredValue => {
                         tw.$write_raw(tag, $min)?;
@@ -31,6 +31,20 @@ macro_rules! define_scalar_measurement_handler {
                 Ok::<(), rs_matter::error::Error>(())
             }
         );
+
+        impl $handler {
+            fn write_measured_value(
+                sensor: &$sensor,
+                mut tw: impl rs_matter::tlv::TLVWrite,
+                tag: &rs_matter::tlv::TLVTag,
+            ) -> Result<(), rs_matter::error::Error> {
+                if sensor.readiness().is_ready() {
+                    tw.$write_raw(tag, sensor.raw_value())
+                } else {
+                    tw.null(tag)
+                }
+            }
+        }
     };
 }
 

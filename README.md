@@ -96,15 +96,16 @@ otherwise uses `ws://localhost:5580/ws`. It commissions over the network, withou
 requiring a Bluetooth adapter.
 
 If `MATTER_SERVER_URL` is set for the main bridge, it can automatically commission
-itself. Fabric state is stored under `.config/virtual-matter-bridge` relative to
-the working directory. Keep that directory and working directory stable across
-restarts. Changes to the endpoint schema can reset bridge persistence and remove
-old controller nodes; do not enable `DEV_AUTO_RESET` during a server migration.
+itself. Fabric state is stored under `~/.config/virtual-matter-bridge` in the user's
+home directory. Keep that directory and service user stable across restarts.
+Changes to the endpoint schema can reset bridge persistence and remove old
+controller nodes; do not enable `DEV_AUTO_RESET` during a server migration.
 
 The Matter Server upgrade uses the controller's existing data directory and
 migrates it on first start. Keep both the controller data and bridge persistence.
 A controller upgrade does not require deleting and pairing the bridge again.
-The bridge uses development attestation credentials.
+The bridge uses development attestation credentials. For matter.js Matter Server,
+enable Test DCL (`ENABLE_TEST_NET_DCL=true`) before commissioning the bridge.
 
 ## Integration guides
 

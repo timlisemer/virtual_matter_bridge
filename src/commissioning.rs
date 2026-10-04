@@ -182,6 +182,15 @@ pub async fn remove_bridge_nodes(
     .map_err(|_| "Timeout waiting for get_nodes response")??
     .ok_or("Connection closed")?;
 
+    if let Some(error_code) = nodes_response.error_code {
+        return Err(format!(
+            "get_nodes failed (error {}): {}",
+            error_code,
+            nodes_response.details.unwrap_or_default()
+        )
+        .into());
+    }
+
     // Parse nodes and find ones matching our vendor ID
     let nodes = nodes_response.result.ok_or("No nodes in response")?;
     let nodes_array = nodes.as_array().ok_or("Nodes is not an array")?;
@@ -192,11 +201,9 @@ pub async fn remove_bridge_nodes(
         let node_id = node.get("node_id").and_then(|v| v.as_u64());
         let node_vendor_id = node
             .get("attributes")
-            .and_then(|a| a.get("0"))
-            .and_then(|ep| ep.get("40"))
-            .and_then(|basic| basic.get("1"))
+            .and_then(|attributes| attributes.get("0/40/2"))
             .and_then(|v| v.as_u64())
-            .map(|v| v as u16);
+            .and_then(|value| u16::try_from(value).ok());
 
         if let (Some(nid), Some(vid)) = (node_id, node_vendor_id)
             && vid == vendor_id
@@ -330,10 +337,9 @@ pub async fn auto_commission(
             warn!("[Commission] WebSocket error: {}", e);
             Err(format!("WebSocket error before receiving response: {}", e).into())
         }
-        Err(_) => {
-            // Timeout isn't necessarily an error - commissioning may still succeed
-            warn!("[Commission] Timeout waiting for response. Device may still be commissioning.");
-            Ok(())
-        }
+        Err(_) => Err(
+            "Timeout waiting for commissioning response. Check the controller before retrying."
+                .into(),
+        ),
     }
 }

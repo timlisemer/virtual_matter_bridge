@@ -142,6 +142,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn measured_value_is_null_until_ready_and_after_unavailable() {
+        fn read(sensor: &TemperatureSensor) -> Option<i16> {
+            let mut buf = [0; 16];
+            let mut writer = rs_matter::utils::storage::WriteBuf::new(&mut buf);
+            TemperatureMeasurementHandler::write_measured_value(
+                sensor,
+                &mut writer,
+                &rs_matter::tlv::TLVTag::Anonymous,
+            )
+            .unwrap();
+            let value = rs_matter::tlv::TLVElement::new(writer.as_slice());
+            if value.null().is_ok() {
+                None
+            } else {
+                Some(value.i16().unwrap())
+            }
+        }
+
+        let sensor = TemperatureSensor::new(20.0);
+        assert_eq!(read(&sensor), None);
+        sensor.set_celsius(23.5);
+        assert_eq!(read(&sensor), Some(2350));
+        sensor.readiness().mark_unavailable();
+        assert_eq!(read(&sensor), None);
+    }
+
+    #[test]
     fn set_celsius_marks_first_update_even_when_raw_value_is_unchanged() {
         let sensor = TemperatureSensor::new(21.5);
 

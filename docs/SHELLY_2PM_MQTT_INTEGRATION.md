@@ -71,7 +71,7 @@ Each Shelly switch endpoint also advertises:
 | --- | --- |
 | `power_l*`, `power_apparent_l*`, `power_reactive_l*`, `voltage_l*`, `current_l*`, `ac_frequency_l*`, `power_factor_l*` | Electrical Power Measurement cluster `0x0090` |
 | `energy_l*`, `produced_energy_l*` | Electrical Energy Measurement cluster `0x0091` |
-| `dhcp_enabled`, `ip_address`, `linkquality`, `wifi_config.enabled`, `wifi_config.ssid`, `wifi_status` | Shelly diagnostics cluster `0xFC00` |
+| `dhcp_enabled`, `ip_address`, `linkquality`, `wifi_config.enabled`, `wifi_config.ssid`, `wifi_status` | Shelly diagnostics cluster `0xFFF1FC00` |
 
 Diagnostics are read-only. The bridge does not publish MQTT writes for `wifi_config`.
 
@@ -122,7 +122,7 @@ After starting the commissioned bridge in Home Assistant:
 2. Confirm `Shelly 2PM Gen4 - Switch 2` appears with switch endpoint `Tim-PC`.
 3. Toggle `Tim-PC` from Matter/Home Assistant and verify `state_l1` changes on MQTT.
 4. Toggle `Büro Licht` from Matter/Home Assistant and verify `state_l2` changes on MQTT.
-5. Confirm each Matter device exposes electrical telemetry, and confirm shared diagnostics are visible or inspectable through cluster `0xFC00`.
+5. Confirm each Matter device exposes electrical telemetry, and confirm shared diagnostics are visible or inspectable through cluster `0xFFF1FC00`.
 
 ## Implementation Files
 
