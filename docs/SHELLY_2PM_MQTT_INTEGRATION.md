@@ -5,7 +5,8 @@ This document describes the integration of the Shelly 2PM Gen4 Zigbee2MQTT devic
 Home Assistant controls the Shelly through Matter. The bridge translates between
 Matter endpoints and Zigbee2MQTT messages.
 
-The bridge subscribes to one Zigbee2MQTT Shelly state topic and exposes each relay channel as its own Matter bridged device.
+The bridge subscribes to both Shelly state topics and exposes each relay channel
+as its own Matter bridged device.
 
 ## Device Mapping
 
@@ -21,8 +22,19 @@ Matter endpoint mapping:
 
 | Matter Device | Matter Endpoint | Matter Type | MQTT Channel |
 | --- | --- | --- | --- |
-| `Shelly 2PM Gen4 - Switch 1` | `Büro Licht` | Light / On-Off Light | L2 / `state_l2` |
-| `Shelly 2PM Gen4 - Switch 2` | `Tim-PC` | Normal switch / On-Off Plug-in Unit | L1 / `state_l1` |
+| `Büro Licht` | `Büro Licht` | Light / On-Off Light | L2 / `state_l2` |
+| `Tim-PC` | `Tim-PC` | Normal switch / On-Off Plug-in Unit | L1 / `state_l1` |
+| `Tim-Schlafzimmer Steckdose` | `Tim-Schlafzimmer Steckdose` | On-Off Plug-in Unit | L2 / `state_l2` |
+| `Tim-Schlafzimmer TV` | `Tim-Schlafzimmer TV` | On-Off Plug-in Unit | L1 / `state_l1` |
+
+The bedroom channels use `zigbee2mqtt/Tim-Schlafzimmer-TV-Steckdosen`.
+Startup requests read `state_l1` and `state_l2`; they do not write either state.
+
+The live test must not operate the Shelly relays. Test switch commands on the
+simulated Power Strip only. Home Assistant exposes the standard electrical
+sensors that it supports. Frequency, power factor, and the custom diagnostics
+remain Matter attributes; Home Assistant does not create native entities for
+these attributes.
 
 The Matter device names are split for controller display. MQTT command routing still follows the physical channel mapping already used by the bridge.
 

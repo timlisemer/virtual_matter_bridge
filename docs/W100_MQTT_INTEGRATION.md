@@ -1,8 +1,18 @@
 # Aqara W100 via MQTT
 
-The bridge exposes an Aqara W100 paired to Zigbee2MQTT as a Matter device named
-`Büro Thermometer`, with temperature, humidity, and three Generic Switch endpoints.
-The Zigbee2MQTT friendly name is `Büro-Thermometer`.
+The bridge exposes four Aqara W100 devices from Zigbee2MQTT. Each device has
+temperature, humidity, battery, and three named Generic Switch endpoints.
+
+| Matter name | Zigbee2MQTT name |
+| --- | --- |
+| Büro Thermometer | Büro-Thermometer |
+| Tim-Schlafzimmer Thermometer | Tim-Schlafzimmer Thermometer |
+| Küche-Thermometer | Küche-Thermometer |
+| Wohnzimmer-Thermometer | Wohnzimmer-Thermometer |
+
+The NixOS service reads cached sensor data through the Zigbee2MQTT frontend
+WebSocket. It does not replay cached button actions. Startup requests use
+`{"temperature":"","humidity":""}`. Battery uses the Power Source cluster.
 
 ## MQTT topics
 
@@ -39,8 +49,9 @@ Retained action messages must not replay a button press after a reconnect.
 
 After commissioning the bridge, inspect the three event entities in Home
 Assistant and use their actual entity IDs in automations. The repository's
-Home Assistant configuration uses plus/minus for thermostat changes and center
-for the audio receiver. Device entity IDs are assigned by Home Assistant.
+Home Assistant configuration has separate MQTT automations for thermostat
+control. These automations are not part of the Matter event test. Device entity
+IDs are assigned by Home Assistant. Fixed Label entries supply the button names.
 
 ## Display control
 
