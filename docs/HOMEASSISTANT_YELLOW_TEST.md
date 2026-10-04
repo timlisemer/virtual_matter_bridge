@@ -15,9 +15,10 @@ uses matterjs-server 1.4.0 and Home Assistant 2026.9.4.
   events. These were simulated MQTT actions, not physical button presses.
 - Both Shelly 2PM devices expose all four relay channels with their code names.
   Home Assistant receives their live states and standard electrical sensors.
-- No Shelly switch command was sent. The real relays were not operated for the
-  test. Only the simulated Power Strip was switched off and back on through
-  Home Assistant.
+- The automated tests sent no Shelly switch commands. Only the simulated Power
+  Strip was switched off and back on through Home Assistant. Separate Tim-account
+  calls to `light.buro_licht` appeared in the Home Assistant logbook at 21:40;
+  those calls were outside these tests.
 - The simulated doorbell press produced a Home Assistant Matter button event.
 - The simulated H.264/AAC stream played in the Home Assistant browser at
   640 by 360 pixels. Video uses Generic Camera, since Home Assistant has no
