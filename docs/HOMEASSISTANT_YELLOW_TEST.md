@@ -18,11 +18,13 @@ uses matterjs-server 1.4.0 and Home Assistant 2026.9.4.
 - The automated tests sent no Shelly switch commands. Only the simulated Power
   Strip was switched off and back on through Home Assistant. Separate Tim-account
   calls to `light.buro_licht` appeared in the Home Assistant logbook at 21:40;
-  those calls were outside these tests.
+  Tim confirmed that he made those calls manually. They were outside these tests.
 - The simulated doorbell press produced a Home Assistant Matter button event.
 - The simulated H.264/AAC stream played in the Home Assistant browser at
   640 by 360 pixels. Video uses Generic Camera, since Home Assistant has no
   Matter camera platform for this endpoint.
+- After the final NixOS activation and Home Assistant restart, the saved camera
+  dashboard played the video with advancing playback time and no player error.
 - Bridge restart keeps the commissioned fabric. Schema changes request a new
   interview instead of deleting the fabric credentials.
 
@@ -54,9 +56,27 @@ the Matter press event. It does not control the real Reolink doorbell.
 The dashboard's `Simulated Doorbell Press` helper publishes only to the
 simulation topic.
 
+The deployed camera card selects Home Assistant's HLS player directly. The
+stock live camera card selects WebRTC and reports that go2rtc does not support
+this stream source. The custom card loads the normal Home Assistant camera
+components and does not require a frontend bundle URL or an access token in
+the configuration. It supports only `camera.vmb_doorbell_stream`.
+
 ## Checks
 
 `just check` passed in both repositories. The astral-ai check MCP was called,
-but its session hook was unavailable. The direct repository checks supplied
-the validation result. The NixOS package and system build provide deployment
-validation in addition to those checks.
+but its session hook was initially unavailable. After the local server rebuild,
+the MCP returned `Transport closed`. The direct repository checks supplied
+the validation result.
+
+The release package was built natively on Yellow. Its test phase passed 140
+tests with no failures. The full NixOS system build passed. The permanent
+bridge, stream server, and video producer started under NixOS. The bridge
+loaded its existing fabric and all four W100 state caches after activation.
+The final deployed system is NixOS generation 344. The camera card JavaScript
+syntax check and the final NixOS `just check` both passed.
+
+The unrelated `docker-astral-ai-telemetry` service already failed before this
+deployment because its `latest` image tag was missing. This causes a NixOS
+activation warning. It does not prevent the bridge or Home Assistant from
+running.
