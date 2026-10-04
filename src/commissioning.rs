@@ -1,7 +1,7 @@
-//! Auto-commissioning to python-matter-server.
+//! Auto-commissioning to Matter Server.
 //!
 //! When `MATTER_SERVER_URL` is set, the bridge automatically commissions
-//! itself to python-matter-server on startup.
+//! itself to Matter Server on startup.
 //!
 //! Uses `commission_with_code` with `network_only: true` to commission via
 //! mDNS/IP without requiring Bluetooth.
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-/// Request message for python-matter-server WebSocket API.
+/// Request message for Matter Server WebSocket API.
 #[derive(Debug, Serialize)]
 pub struct WsRequest {
     message_id: String,
@@ -21,7 +21,7 @@ pub struct WsRequest {
     args: Option<serde_json::Value>,
 }
 
-/// Response message from python-matter-server.
+/// Response message from Matter Server.
 #[derive(Debug, Deserialize)]
 pub struct WsResponse {
     pub message_id: String,
@@ -149,7 +149,7 @@ fn verhoeff_checksum(input: &str) -> u8 {
     INV[c as usize]
 }
 
-/// Remove existing bridge nodes from python-matter-server.
+/// Remove existing bridge nodes from Matter Server.
 ///
 /// This should be called before re-commissioning after a schema change
 /// to clean up orphaned device entries from the controller.
@@ -265,10 +265,10 @@ pub async fn remove_bridge_nodes(
     Ok(removed_count)
 }
 
-/// Auto-commission the bridge to python-matter-server.
+/// Auto-commission the bridge to Matter Server.
 ///
 /// This function waits for the bridge to be ready, then connects to
-/// python-matter-server and sends a commission request.
+/// Matter Server and sends a commission request.
 pub async fn auto_commission(
     server_url: &str,
     discriminator: u16,
@@ -278,16 +278,13 @@ pub async fn auto_commission(
     info!("[Commission] Waiting for Matter stack to initialize...");
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    info!(
-        "[Commission] Connecting to python-matter-server at {}",
-        server_url
-    );
+    info!("[Commission] Connecting to Matter Server at {}", server_url);
 
     let (ws_stream, _) = connect_async(server_url)
         .await
         .map_err(|e| format!("Failed to connect to {}: {}", server_url, e))?;
 
-    info!("[Commission] Connected to python-matter-server");
+    info!("[Commission] Connected to Matter Server");
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -324,7 +321,7 @@ pub async fn auto_commission(
                 let details = response.details.unwrap_or_default();
                 Err(format!("Commissioning failed (error {}): {}", error_code, details).into())
             } else {
-                info!("[Commission] Successfully commissioned to python-matter-server!");
+                info!("[Commission] Successfully commissioned to Matter Server!");
                 Ok(())
             }
         }

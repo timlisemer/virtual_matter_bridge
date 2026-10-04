@@ -2,14 +2,15 @@
 name = "virtual-matter-bridge"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.90"
 description = "A virtual Matter bridge for exposing various devices to Matter controllers"
 authors = ["Tim Lisemer"]
 license = "MIT"
 
 [dependencies]
-# Matter protocol (use git for latest features, crates.io version is outdated)
+# Matter protocol (pinned upstream Matter 1.5.1 SDK)
 # Features: std (stdlib support), os (OS-level features), zbus (D-Bus mDNS via Avahi on Linux), async-io (async runtime)
-rs-matter = { git = "https://github.com/project-chip/rs-matter.git", branch = "main", features = ["std", "os", "zbus", "async-io"] }
+rs-matter = { git = "https://github.com/project-chip/rs-matter.git", rev = "578ae0e0b875edfc3ffec80e94aa0ff48fb31cc9", features = ["std", "os", "zbus", "async-io"] }
 
 # Embassy async utilities for Matter stack
 embassy-futures = "0.1"

@@ -44,7 +44,7 @@ use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::pairing::qr::QrTextType;
 use rs_matter::persist::{FileKvBlobStore, SharedKvBlobStore};
 use rs_matter::respond::DefaultResponder;
-use rs_matter::transport::network::mdns::builtin::{BuiltinMdnsResponder, Host};
+use rs_matter::transport::network::mdns::builtin::{BuiltinMdns, Host};
 use rs_matter::transport::network::mdns::{
     MDNS_IPV4_BROADCAST_ADDR, MDNS_IPV6_BROADCAST_ADDR, MDNS_SOCKET_DEFAULT_BIND_ADDR,
 };
@@ -1468,7 +1468,7 @@ pub async fn run_matter_stack(
         ipv6: ipv6_addr,
     };
 
-    let mut mdns_responder = BuiltinMdnsResponder::new();
+    let mut mdns_responder = BuiltinMdns::new();
     let mut mdns = pin!(mdns_responder.run(
         &mdns_socket,
         &mdns_socket,

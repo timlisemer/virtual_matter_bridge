@@ -267,7 +267,7 @@ async fn main() {
         shelly_switch_1_device,
         shelly_switch_2_device,
         // Video Doorbell (parent) with camera endpoint (child)
-        // Note: Camera handlers are stub - actual streaming awaits Matter 1.5 controller support
+        // Camera handlers are not wired into the Matter router; streaming remains experimental.
         VirtualDevice::new("Video Doorbell").with_endpoint(EndpointConfig::video_doorbell_camera(
             "Camera",
             doorbell_handler.clone(),

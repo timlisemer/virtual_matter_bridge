@@ -76,7 +76,7 @@ pub struct MatterConfig {
     pub device_name: String,
     pub discriminator: u16,
     pub passcode: u32,
-    /// python-matter-server WebSocket URL for auto-commissioning
+    /// Matter Server WebSocket URL for auto-commissioning
     pub server_url: Option<String>,
 }
 

@@ -2,9 +2,8 @@
 
 This document describes the integration of the Shelly 2PM Gen4 Zigbee2MQTT device `Büro Licht & PC Schalter` into the Virtual Matter Bridge.
 
-**Instead of**: Home Assistant <- MQTT <- Zigbee2MQTT <- Shelly 2PM
-
-**We want**: Home Assistant <- Matter <- **Virtual Matter Bridge** <- MQTT <- Zigbee2MQTT <- Shelly 2PM
+Home Assistant controls the Shelly through Matter. The bridge translates between
+Matter endpoints and Zigbee2MQTT messages.
 
 The bridge subscribes to one Zigbee2MQTT Shelly state topic and exposes each relay channel as its own Matter bridged device.
 
@@ -96,39 +95,10 @@ Turn `Büro Licht` / L2 on or off:
 
 ## Data Flow
 
-```text
-Zigbee2MQTT state topic
-zigbee2mqtt/Büro Licht & PC Schalter
-payload has state_l1, state_l2, telemetry, diagnostics
-|
-+--> L1/state_l1 + L1 telemetry --> Shelly 2PM Gen4 - Switch 2 / Tim-PC
-|
-+--> L2/state_l2 + L2 telemetry --> Shelly 2PM Gen4 - Switch 1 / Büro Licht
-|
-+--> shared diagnostics ---------> both Shelly Matter devices
-```
-
-Matter command path:
-
-```text
-Matter switch/light command
-|
-v
-Shelly channel EndpointHandler
-|
-v
-Local state update + queued MQTT command
-|
-v
-MqttIntegration command publisher
-|
-+--> Tim-PC publishes {"state_l1":"ON"|"OFF"}
-|
-+--> Büro Licht publishes {"state_l2":"ON"|"OFF"}
-|
-v
-zigbee2mqtt/Büro Licht & PC Schalter/set
-```
+L1 state and telemetry update `Tim-PC`; L2 state and telemetry update `Büro Licht`.
+Both Matter devices receive the shared diagnostics. Matter commands update local
+state and queue a channel-specific message for `MqttIntegration` to publish to
+the Shelly `/set` topic.
 
 ## Terminal Verification
 
@@ -146,14 +116,13 @@ nix-shell -p mosquitto jq --run "mosquitto_sub -h 10.0.0.2 -t 'zigbee2mqtt/Büro
 
 ## Matter Verification
 
-After starting the bridge and refreshing or re-pairing it in Home Assistant:
+After starting the commissioned bridge in Home Assistant:
 
-1. Confirm `Büro Licht & PC Schalter` no longer appears as a Shelly bridged Matter device.
-2. Confirm `Shelly 2PM Gen4 - Switch 1` appears with light endpoint `Büro Licht`.
-3. Confirm `Shelly 2PM Gen4 - Switch 2` appears with switch endpoint `Tim-PC`.
-4. Toggle `Tim-PC` from Matter/Home Assistant and verify `state_l1` changes on MQTT.
-5. Toggle `Büro Licht` from Matter/Home Assistant and verify `state_l2` changes on MQTT.
-6. Confirm each Matter device exposes electrical telemetry, and confirm shared diagnostics are visible or inspectable through cluster `0xFC00`.
+1. Confirm `Shelly 2PM Gen4 - Switch 1` appears with light endpoint `Büro Licht`.
+2. Confirm `Shelly 2PM Gen4 - Switch 2` appears with switch endpoint `Tim-PC`.
+3. Toggle `Tim-PC` from Matter/Home Assistant and verify `state_l1` changes on MQTT.
+4. Toggle `Büro Licht` from Matter/Home Assistant and verify `state_l2` changes on MQTT.
+5. Confirm each Matter device exposes electrical telemetry, and confirm shared diagnostics are visible or inspectable through cluster `0xFC00`.
 
 ## Implementation Files
 

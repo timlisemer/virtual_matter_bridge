@@ -1,6 +1,6 @@
 //! Development tool for commissioning the virtual matter bridge.
 //!
-//! This tool connects to python-matter-server via WebSocket and sends
+//! This tool connects to Matter Server via WebSocket and sends
 //! commissioning commands, eliminating the need for phone-based QR scanning.
 //!
 //! Usage:
@@ -16,7 +16,7 @@ use virtual_matter_bridge::commissioning::{
     generate_pairing_code, send_ws_request, wait_for_ws_response,
 };
 
-/// Default python-matter-server WebSocket URL
+/// Default Matter Server WebSocket URL
 const DEFAULT_MATTER_SERVER_URL: &str = "ws://localhost:5580/ws";
 
 /// Default discriminator (from rs-matter TEST_DEV_COMM)
@@ -39,7 +39,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Commission the virtual matter bridge to python-matter-server
+    /// Commission the virtual matter bridge to Matter Server
     Commission {
         /// Override the discriminator
         #[arg(long, env = "MATTER_DISCRIMINATOR", default_value_t = DEFAULT_DISCRIMINATOR)]
@@ -49,7 +49,7 @@ enum Commands {
         #[arg(long, env = "MATTER_PASSCODE", default_value_t = DEFAULT_PASSCODE)]
         passcode: u32,
     },
-    /// Remove a commissioned node from python-matter-server
+    /// Remove a commissioned node from Matter Server
     Remove {
         /// Node ID to remove
         node_id: u64,
@@ -65,11 +65,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let cli = Cli::parse();
 
-    println!("Connecting to python-matter-server at {}...", cli.server);
+    println!("Connecting to Matter Server at {}...", cli.server);
 
     let (ws_stream, _) = connect_async(&cli.server).await.map_err(|e| {
         eprintln!("Failed to connect to {}", cli.server);
-        eprintln!("Make sure python-matter-server is running and accessible.");
+        eprintln!("Make sure Matter Server is running and accessible.");
         eprintln!("Error: {}", e);
         e
     })?;
@@ -91,7 +91,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 "1",
                 "commission_with_code",
                 Some(serde_json::json!({
-                    "code": pairing_code
+                    "code": pairing_code,
+                    "network_only": true
                 })),
             )
             .await?;
